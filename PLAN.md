@@ -40,11 +40,51 @@ Every unlearning method gets the **same step budget per U op**. "Loss" here mean
 | Day | Task |
 |---|---|
 | 1 | Install Isaac-GR00T (`n1.6-release`) + LIBERO on the GPU box. Measure training steps/sec and rollouts/hour. Fix the A–E task mapping. |
-| 2 | Single-task fine-tune on task A, then evaluate. Check that SR is in the expected range (the pipeline works). |
+| 2 | Single-task fine-tune on task A, then evaluate. Check that SR is in the expected range (the pipeline works). Details below. |
 | 3 | Train the shared prefix `L_A L_B L_C` with ER. Evaluate all 3 tasks. Start the oracle branch. |
 | 4–5 | Implement the 5 unlearning methods (common interface). Run `U_B` for each, evaluate, and launch each method's tail `L_D L_E U_E`. |
 | 6 | Finish the tails and run evals after every op. |
 | 7 | Build the results table and write up observations. |
+
+### Day 2 in detail: pipeline sanity check on task A
+
+**Why:** every later number depends on data loading, action normalization, training and evaluation all being correct. A bug here, such as a flipped camera image or wrong gripper sign, would silently make every method look bad. One cheap task proves the pipeline before we spend compute on full streams.
+
+**Steps:**
+
+1. **Zero-shot floor.** Evaluate the base N1.6 model on task A before any fine-tuning (50 rollouts).
+   - Expected: about 0%, since the base model has never seen the LIBERO robot setup (`LIBERO_PANDA`).
+   - This is also the "never trained" reference the retrain oracle is compared against.
+2. **Prepare task A's data.** From the LIBERO-Goal LeRobot dataset, keep only task A's demonstrations (about 50).
+   - Check that the episode count, camera views (main + wrist), robot state, action dimensions and instruction text are as expected.
+   - Check that the action normalization statistics look sane.
+3. **Fine-tune.** Use the CL-paper recipe (lr 1e-4, batch 16, AdamW, cosine decay) for 10k steps with the default trainable scope.
+   - Save checkpoints at 2k, 5k and 10k steps.
+   - Log the training loss and the flow-matching loss on a few held-out demos.
+4. **Evaluate each checkpoint.** Run 50 rollouts per checkpoint from LIBERO's fixed initial states, with the standard step limit.
+   - Record SR and wall-clock time.
+   - Save ~5 rollout videos to inspect by eye.
+5. **Measure eval noise.** Re-run the 10k-step eval with a different seed. The gap between the two runs tells us how much SR moves by chance.
+
+**Expected range and pass criterion:**
+- Published GR00T results on LIBERO-Goal (multi-task) are in the 90s; confirm the exact figure from NVIDIA's N1.6 numbers.
+- A single task with ~50 demos should reach **≥ 80% SR**. That is the pass bar.
+- 50–80%: likely a hyperparameter or step-count issue, so investigate before moving on.
+- Below 50%: almost certainly a pipeline bug.
+
+**Debug checklist if SR is low:**
+- Image orientation: LeRobot LIBERO datasets are often stored flipped 180°, and the simulator at eval time must match training.
+- Gripper open/close sign convention.
+- Action normalization: are train stats applied at eval, and un-normalized correctly?
+- The modality config: camera keys, state keys and action keys.
+- Action chunk length and how many actions are executed before re-planning.
+- Instruction text at eval exactly matching the training text.
+
+**Outputs that feed later days:**
+- SR vs. steps (2k / 5k / 10k). This tells us whether 5k steps per task is enough, our compute fallback.
+- Eval noise between seeds.
+- Training steps/sec and rollouts/hour, to finalize the week-1 compute budget.
+- A frozen config file for all later runs.
 
 **Deliverable:** for each method, SR on A–E after each op, plus four summary numbers:
 - **Forget SR:** on B and E, compared with the oracle
