@@ -1,0 +1,7 @@
+# Tiny end-to-end check of the whole pipeline (minutes, not hours). Numbers are meaningless.
+name: smoke
+suite: goal
+tasks: {A: 0, B: 1}
+ops: [L A, L B, U B]
+learn: {steps: 20, lr: 1.0e-4, batch: 4}
+eval: {episodes: 2, envs: 2, max_steps: 50, action_steps: 8}

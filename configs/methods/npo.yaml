@@ -1,0 +1,6 @@
+method: npo
+steps: 500
+lr: 1.0e-5
+batch: 16
+beta: 0.1
+retain_weight: 0.0   # pure NPO; set 1.0 for NPO + retain loss

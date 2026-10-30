@@ -1,0 +1,5 @@
+method: graddiff
+steps: 500
+lr: 1.0e-5
+batch: 16
+retain_weight: 1.0

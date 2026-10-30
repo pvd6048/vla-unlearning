@@ -1,0 +1,7 @@
+method: salun
+steps: 500
+lr: 1.0e-5
+batch: 16
+saliency: 0.5        # fraction of weights (per tensor) that may change
+saliency_batches: 20
+retain_weight: 1.0

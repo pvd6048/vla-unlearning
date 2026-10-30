@@ -1,0 +1,5 @@
+method: ssd          # no training: dampen forget-specific weights
+batch: 16
+alpha: 10.0          # select weights with F_forget > alpha * F_retain
+lambda: 1.0          # shrink factor min(lambda * F_retain / F_forget, 1)
+fisher_batches: 50

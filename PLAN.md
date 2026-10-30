@@ -86,13 +86,263 @@ Every unlearning method gets the **same step budget per U op**. "Loss" here mean
 - Training steps/sec and rollouts/hour, to finalize the week-1 compute budget.
 - A frozen config file for all later runs.
 
-**Deliverable:** for each method, SR on A–E after each op, plus four summary numbers:
+**Deliverable:** for each method, SR on A–E after each op, plus the metrics in "Evaluation metrics" below (NBT, oracle gap, collateral, relapse, unlearning score). The headline numbers are:
 - **Forget SR:** on B and E, compared with the oracle
 - **Retain SR:** on the tasks that should still be known
 - **Relapse:** does B come back after `L_D L_E`?
 - **Cost:** GPU-minutes per unlearn op
 
 **If compute is short:** cut to 5k steps per task (after checking that SR has saturated) and 20 rollouts for intermediate evals.
+
+## Weeks 2–3: add state-of-the-art unlearning methods
+
+The week-1 methods (GA, Gradient Difference, NPO, SSD, SalUn) are **standard baselines**, not state of the art. For ICML we add the following, run on the same stream, tasks, step budget and metrics as week 1.
+
+| Method | Why it's included | Porting work |
+|---|---|---|
+| **VLA-Forget** (2026) | The only dedicated VLA unlearning method we found | Medium: written for OpenVLA, so needs adapting (see below) |
+| **LACU** (ECCV 2026) | State of the art for *continual* unlearning in diffusion models, and GR00T's action head is diffusion-family | Medium: replace "nearest concept" with "nearest kept task" in GR00T feature space |
+| **RMU-style representation unlearning** | Strong recent method family, and listed in the team doc. Pushes forget-task features toward a random vector while keeping retain features unchanged. | Low |
+| **Task-vector negation** | Needed anyway for the core forgetting-vs-unlearning question (§5) | Low: subtract task B's fine-tuning delta |
+| *Optional:* SimNPO, FIT, AKLN | Improved NPO; methods built for repeated unlearning requests | Add if time allows |
+
+These choices come from our reading of the 2025–26 literature; there is no single shared leaderboard, and rankings vary by benchmark.
+
+### Porting VLA-Forget to GR00T
+
+| VLA-Forget on OpenVLA | Our version on GR00T |
+|---|---|
+| Cross-entropy on action tokens | GR00T's flow-matching loss |
+| Gradient ascent on the forget set | Gradient ascent on the flow-matching loss for the forget task |
+| KL to the base model (retain / mismatch terms) | Distance between current and base model's predicted velocity field on the same noisy inputs |
+| Stage 1: late vision-encoder layers | Late layers of N1.6's vision encoder |
+| Stage 2: projector | N1.6's VLM → action-head projection |
+| Stage 3: upper LLM blocks | Top 4 VLM layers + selected DiT blocks |
+| Gradient-score layer selection, LoRA, PCGrad | Kept as is |
+
+### Bridge check on OpenVLA
+
+This guards against the reviewer question "did your port break their method?".
+
+1. Run the authors' code ([github.com/raviranjan-ai/VLA-Forget](https://github.com/raviranjan-ai/VLA-Forget)) on a public OpenVLA-7B checkpoint fine-tuned on LIBERO-Goal. Do a single unlearning step on task B and check the results look reasonable.
+2. Run the week-1 stream on OpenVLA with VLA-Forget and GA.
+3. If VLA-Forget beats GA on OpenVLA in our setup and the GR00T port behaves similarly, the port is credible.
+
+OpenVLA-7B with LoRA fits on the 96 GB GPU. VLA-Forget's FC/FAD metrics are defined on token cross-entropy, so the headline comparison uses success-rate metrics shared by both models. For GR00T, the rise in flow-matching loss on the forget set stands in for FC.
+
+### Schedule
+
+| Week | Work |
+|---|---|
+| 2 | Short N1.5 sanity run (reproduce Liu et al.). Implement task-vector negation and RMU-style. Start the VLA-Forget port. |
+| 3 | Finish the VLA-Forget port + OpenVLA bridge check. Implement LACU. Run all new methods on the week-1 stream. |
+
+**Deliverable:** the week-1 results table extended with the state-of-the-art rows.
+
+## Evaluation metrics (used from week 1 onward)
+
+Everything is computed from one **success matrix** `c[i,k]`: the success rate (SR) on task *i* after op *k*. After every op we evaluate every task seen so far, including unlearned ones, so this costs no extra training.
+
+**Notation:**
+- `K_k`: the tasks that *should* be known after op *k* (learned and not unlearned).
+- `F_k`: the tasks unlearned by op *k*.
+- `k_X`: the op where task X was learned; `u_X`: the op where it was unlearned.
+- `N`: the final op.
+
+### A. Continual-learning metrics (is the kept knowledge safe?)
+
+| Metric | Definition | Good |
+|---|---|---|
+| **Final retain SR** (ACC) | Mean of `c[i,N]` over `i ∈ K_N` | High |
+| **NBT** (negative backward transfer, Liu et al.) | For each kept task i: mean over later ops k of `c[i,k_i] − c[i,k]`, then averaged over tasks. Positive = forgetting, negative = it improved. | ≈ 0 |
+| **NBT split by cause** | NBT from L ops (ordinary CL forgetting) vs. NBT from U ops (**collateral damage** from unlearning) | Both ≈ 0 |
+| **Max forgetting** | Largest single drop `max_k (c[i,k_i] − c[i,k])` for a kept task | Low |
+| **Retain AUC** | Mean retain SR averaged over every op in the stream, i.e. how good the model was *throughout*, not just at the end | High |
+| **Plasticity** (forward transfer) | SR on a new task right after learning it, minus SR of a model trained on that task alone | ≈ 0 or positive |
+
+### B. Unlearning metrics (is the removed task really gone?)
+
+| Metric | Definition | Good |
+|---|---|---|
+| **Forget SR** | `c[X,u_X]`, measured right after unlearning X | Low |
+| **Oracle gap** | `|c[X,k] − c_oracle[X,k]|`, where the oracle is a model never trained on X. The true unlearning target, since the oracle may still succeed somewhat by generalization. | ≈ 0 |
+| **Unlearning collateral** | Mean drop on kept tasks caused by the U op itself: `c[i,u_X−1] − c[i,u_X]` for i ∈ K | ≈ 0 |
+| **Relapse / forgetting rebound** (UnCLe, ICU-Bench) | `max_{k>u_X} c[X,k] − c[X,u_X]`: does X come back as new tasks are learned? | ≈ 0 |
+| **Retain stability rate** (ICU-Bench) | Average size of change in retain SR from one op to the next | Low |
+| **Forward failure** (Plasticity Collapse) | Unlearning quality (oracle gap) plotted against how many U ops came before | Flat |
+| **Recovery ratio** (relearning attack) | Steps to regain peak SR on X when fine-tuning the unlearned model, divided by the steps needed from the oracle. Near 1 = truly erased; ≪ 1 = only hidden. | ≈ 1 |
+
+### C. One-number summary
+
+**Unlearning score** = harmonic mean of `(1 − oracle gap)` and `final retain SR`. The harmonic mean punishes a method that does well on only one side, e.g. erasing everything including the kept tasks.
+
+### D. Cheap offline metrics (no rollouts)
+
+- **Flow-matching loss** on held-out demos of forget and kept tasks. A rise on forget plus flat on kept is good. This is also our stand-in for VLA-Forget's FC metric.
+- **Action distance to the oracle** on forget-task states: how close the unlearned model's actions are to the never-trained model's.
+- Both are fast, so they're used to tune hyperparameters before spending rollouts.
+
+### E. Robustness (from week 3)
+
+- **Quantization:** forget SR after 8-bit and 4-bit quantization. Unlearning that is only skin-deep often comes back here.
+- **Relearning attack:** the recovery ratio above, with 100 / 500 / 1000 fine-tuning steps.
+
+### F. Reporting rules
+
+- Every SR comes with a 95% confidence interval: Wilson interval over the 50 rollouts per eval, and bootstrap over seeds once we have more than one seed.
+- At 50 rollouts the SR standard error is up to ~7 points, so smaller differences are not claimed as real.
+- Cost (GPU-minutes per U op) is reported next to every method.
+
+## Code design (lean and modular)
+
+### Model choice: GR00T N1.6 primary, OpenVLA only as a plug-in
+
+| | GR00T N1.6 | OpenVLA-7B |
+|---|---|---|
+| Matches the forgetting paper (Liu et al.) | Yes (same model family; N1.5 check in week 2) | No (they used π0 and GR00T) |
+| Novelty for the paper | High: no one has unlearned a flow-matching VLA, or done it continually | Low: VLA-Forget already covers it |
+| Standard unlearning losses | Need rewriting for the flow-matching loss | Work as-is (token cross-entropy) |
+| Rollout speed | Fast (action chunks) | Slow (one autoregressive token at a time) |
+
+All experiments run on **GR00T**. The code talks to the model only through a tiny wrapper (below), so OpenVLA is one extra file used for the VLA-Forget bridge check (weeks 2–3), not a second codebase.
+
+### Rule #1: NVIDIA's GR00T code is used as-is
+
+- **Install, never edit.** Isaac-GR00T is pinned to one commit of the `n1.6-release` branch and installed as a package (git submodule in `third_party/`, `pip install -e`). We never edit files inside it, so when something breaks, the bug is in *our* code.
+- **Use NVIDIA's own pieces wherever they exist:**
+
+  | Need | What we use |
+  |---|---|
+  | Loading model + processor | NVIDIA's loader, with the LIBERO modality config from their playbook |
+  | Data loading | NVIDIA's LeRobot dataset classes. Per-task data = per-task dataset folders, split once on disk by a small script, so their loader needs no filtering logic. |
+  | **L ops (learning)** | **NVIDIA's fine-tuning script**, unchanged. Experience replay = their dataset-mixture option (new task + replay subset). |
+  | Evaluation | NVIDIA's LIBERO evaluation script / policy server, unchanged |
+  | Forward pass + loss | The model's own forward, which returns the flow-matching loss |
+
+- **Our code only adds things from the outside.** It never changes GR00T internals:
+  - **Unlearning loops:** our small loop calls GR00T's own forward/loss.
+  - **Features** for RMU, VLA-Forget and drift analysis: PyTorch forward hooks.
+  - **Parameter groups:** selected by module-name prefixes.
+  - **Same noise for model and reference** (NPO, KL terms): fork and seed the torch RNG around each forward, with no code change.
+  - **Per-sample loss:** if GR00T's forward only returns a batch mean, use the mean for GA / GradDiff / SalUn / SSD / task vector (fine), and small micro-batches where per-sample matters (NPO).
+- **If a change inside GR00T ever becomes unavoidable,** it is a small `.patch` file in `patches/`, applied by script and documented with the reason. It is never a silent edit.
+- **Smoke test** (`tests/test_wrapper.py`): our wrapper's loss on a batch must equal GR00T's own training loss on the same batch and seed. It runs before every experiment batch.
+
+### Principles
+
+- **One idea per file**, and short files: target ≤ 150 lines each and ~1,000 lines total, excluding GR00T and LIBERO themselves.
+- **Only one file touches GR00T** (`policy.py`). Methods, runner and metrics never import GR00T.
+- **Every unlearning method is one function with the same signature.** Adding a method means adding one file.
+- **Experiments are YAML files**, not code. A run = stream + method + seed.
+- **No frameworks:** plain PyTorch + PyYAML + pandas; no Hydra, Lightning or custom trainers. Logging is a CSV and a text log, with W&B optional.
+
+### Layout
+
+> **Implemented (2026-10-30):** the code follows this design with simpler names; see README.md for the actual files:
+> - `groot.py` replaces `policy.py`. It exposes plain functions (`loss`, `groups`, `save`), and features come from the model's own `backbone_features` output.
+> - Replay is plain per-task folders (`scripts/split_tasks.py`), not a `ReplayBuffer` class.
+> - Methods live in `vla_unlearning/methods/`.
+> - The boundary split, `policy_openvla.py` and the week 2–3 methods come later.
+> - GR00T is pinned to tag `n1.6.1-release`. It differs from `n1.6-release` only in deployment files.
+> - NVIDIA's default fine-tuning already trains the top 4 LLM layers + projector + DiT, with vision frozen. That settles open decision 1 without any code change.
+
+```
+third_party/Isaac-GR00T/   # NVIDIA's repo, pinned commit, never edited
+patches/                   # empty unless unavoidable; each patch documented
+tests/test_wrapper.py      # wrapper loss == GR00T's own loss
+scripts/split_tasks.py     # one-time: split LIBERO-Goal dataset into per-task folders
+vla_unlearning/
+  policy.py         # GrootPolicy wrapper around NVIDIA's model (hooks, groups, seeded loss)
+  policy_openvla.py # same interface for OpenVLA (bridge check only, week 2–3)
+  data.py           # ReplayBuffer + forget/retain/boundary splits (over NVIDIA datasets)
+  learn.py          # L op = call NVIDIA's fine-tuning script with a dataset mixture
+  unlearn_loop.py   # one plain loop used by the gradient-based unlearning methods
+  evaluate.py       # thin call to NVIDIA's LIBERO eval → success rate
+  runner.py         # executes a stream of ops, writes the success matrix
+  metrics.py        # pure functions on the success matrix (NBT, oracle gap, relapse…)
+  unlearn/
+    ga.py  graddiff.py  npo.py  ssd.py  salun.py       # week 1
+    task_vector.py  rmu.py  vla_forget.py  lacu.py      # weeks 2–3
+configs/
+  streams/s1.yaml   # ops list
+  methods/*.yaml    # per-method hyperparameters
+run.py              # python run.py --stream s1 --method ga --seed 0
+results/<stream>/<method>/seed<k>/  matrix.csv  log.txt  config.yaml  ckpt/
+```
+
+### The policy wrapper: 4 methods, that's the whole contract
+
+```python
+class GrootPolicy:
+    def loss(self, batch, gen) -> Tensor       # per-sample flow-matching loss; `gen` fixes noise/timestep
+    def features(self, batch) -> dict          # named hidden states: "vision", "projector", "vlm_top", "dit"
+    def groups(self) -> dict[str, list[Param]] # parameter groups: "vision", "projector", "vlm_top", "action_head"
+    def act(self, obs) -> ndarray              # action chunk for evaluation
+```
+
+- `loss(batch, gen)` returns **per-sample** losses with **controllable noise**. NPO and KL-style terms compare the current model against a frozen reference, which is only meaningful if both see the same noise and timestep.
+- `features` and `groups` give VLA-Forget-style methods their staged structure (vision → projector → upper blocks → action head) without knowing GR00T's internals.
+
+### An unlearning method is one function
+
+```python
+def unlearn(policy, ref, splits, cfg):  # splits.forget / splits.retain / splits.boundary
+    ...                                 # modifies policy in place, returns nothing
+```
+
+- **Splits follow VLA-Forget's design:**
+  - `forget`: demos of the task being removed.
+  - `retain`: the replay buffer of kept tasks.
+  - `boundary`: the kept tasks closest to the forget task. For LIBERO-Goal, same scene and objects; picked by distance in GR00T feature space.
+- `ref` is a frozen copy of the model from just before the U op.
+- Every method gets the **same step budget** from `cfg`.
+
+Week-1 methods, written in terms of the per-sample loss `ℓ`:
+
+| File | Core of the method (a few lines each) |
+|---|---|
+| `ga.py` | minimize `−ℓ(forget)`, with gradient clipping |
+| `graddiff.py` | minimize `−ℓ(forget) + ℓ(retain)` |
+| `npo.py` | `(2/β)·softplus(β·(ℓ_ref(forget) − ℓ(forget)))`, using `−ℓ` as a log-likelihood proxy |
+| `ssd.py` | No training. Compute diagonal Fisher on forget and retain, then shrink the weights where forget-Fisher ≫ retain-Fisher. |
+| `salun.py` | Mask = top-50% weights by `|∇ℓ(forget)|`. Train only those on forget samples relabeled with other tasks' actions, plus retain. |
+| (none) `purge` | Do nothing; the runner already removes the task from the replay buffer |
+
+The **retrain oracle** is not a method. It is just a stream file with the unlearned tasks' ops removed (`L_A L_C L_D`).
+
+### The runner is one loop
+
+```python
+for op, task in stream.ops:                       # e.g. ("L","A"), ("U","B")
+    if cache.has(prefix):  policy.load(cache[prefix]); continue   # shared prefix L_A L_B L_C trained once
+    if op == "L":  learn(policy, data[task], buffer)             # NVIDIA fine-tune script, ER via 1:1 mixture
+                   buffer.add(task)
+    if op == "U":  buffer.remove(task)
+                   METHODS[method](policy, ref=policy.frozen_copy(), splits=splits(task, buffer), cfg=cfg)
+    matrix.add_row(op, {t: success_rate(policy, t) for t in seen_tasks})   # unlearned tasks included
+    policy.save_trainable(ckpt_dir / prefix)       # trainable params only, a few GB
+```
+
+- Checkpoints are named by their op prefix (`L_A-L_B-L_C`). Any run that shares a prefix reuses it automatically, so the expensive learning steps are trained once.
+- `metrics.py` reads `matrix.csv` files and computes everything in "Evaluation metrics". No GPU is needed, so analysis is separate from experiments.
+
+### Configs
+
+```yaml
+# configs/streams/s1.yaml
+suite: libero_goal
+tasks: {A: 0, B: 1, C: 2, D: 3, E: 4}   # LIBERO-Goal task indices, fixed on day 1
+ops: [L A, L B, L C, U B, L D, L E, U E]
+learn: {steps: 10000, lr: 1.0e-4, batch: 16, replay: 1000}
+eval:  {rollouts: 50}
+```
+```yaml
+# configs/methods/npo.yaml
+name: npo
+steps: 500          # same budget for every method
+lr: 1.0e-5
+beta: 0.1
+```
 
 ## 1. Research agenda
 
@@ -245,18 +495,7 @@ The same infrastructure, packaged as **L/U op streams over LIBERO**.
 | S6 | `L_A L_B U_B L_B'` with B' similar to B | Boundary relapse |
 | S7 | Random streams of length 15–20 on LIBERO-10 | Scale |
 
-**Metrics** come from the success matrix `c[i,k]`, built by evaluating every seen task, including unlearned ones, after every op:
-
-- Retain SR, forget SR, and Δ-to-oracle
-- NBT, split into collateral damage from L ops and from U ops
-- Relapse / forgetting rebound
-- Retain stability rate
-- Recovery ratio
-- Plasticity (SR on the next new task)
-- Cost in GPU-minutes per U op
-- Quantization robustness
-
-Several drift metrics from §4 are logged as part of the benchmark too.
+**Metrics:** the full set defined in "Evaluation metrics" (after weeks 2–3), all computed from the success matrix. Several drift metrics from §4 are logged as part of the benchmark too.
 
 ## 9. Phases
 

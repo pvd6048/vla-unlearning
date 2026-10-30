@@ -1,0 +1,4 @@
+method: ga
+steps: 500           # same budget for every gradient-based method
+lr: 1.0e-5
+batch: 16

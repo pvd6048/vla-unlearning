@@ -1,0 +1,1 @@
+method: purge        # do nothing except drop the task from the replay buffer

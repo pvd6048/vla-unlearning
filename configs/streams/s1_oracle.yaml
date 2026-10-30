@@ -1,0 +1,8 @@
+# Retrain oracle for s1: the same stream without ever training the unlearned tasks (B, E).
+name: s1_oracle
+suite: goal
+tasks: {A: 0, B: 1, C: 2, D: 3, E: 4}
+ops: [L A, L C, L D]
+also_eval: [B, E]                # evaluate the never-learned tasks too
+learn: {steps: 10000, lr: 1.0e-4, batch: 16}
+eval: {episodes: 50, envs: 5, max_steps: 720, action_steps: 8}

@@ -1,0 +1,8 @@
+# Week-1 stream: learn A, B, C; unlearn B; learn D, E; unlearn E.
+name: s1
+suite: goal                      # data/goal/{tasks,replay}, made by scripts/split_tasks.py
+tasks: {A: 0, B: 1, C: 2, D: 3, E: 4}   # LIBERO-Goal task indices (see data/goal/tasks.json); fix on day 1
+ops: [L A, L B, L C, U B, L D, L E, U E]
+oracle: s1_oracle                # stream used as the "never trained on it" reference
+learn: {steps: 10000, lr: 1.0e-4, batch: 16}   # Liu et al. GR00T recipe
+eval: {episodes: 50, envs: 5, max_steps: 720, action_steps: 8}   # NVIDIA's LIBERO eval settings
