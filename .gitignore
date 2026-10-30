@@ -1,0 +1,11 @@
+external/
+runs/
+data/
+hf_cache/
+uv_cache/
+libero_config/
+envs/
+slurm/env.local.sh
+__pycache__/
+*.tmp
+.DS_Store

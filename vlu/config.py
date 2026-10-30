@@ -1,0 +1,58 @@
+"""Paths and the frozen experiment recipe.
+
+Change a default here (and commit it) rather than overriding it on the command line, so that every
+run in the paper uses the same recipe. Paths come from environment variables set in slurm/env.sh.
+"""
+
+from dataclasses import dataclass
+import os
+from pathlib import Path
+
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+RUNS_DIR = Path(os.environ.get("VLU_RUNS_DIR", PROJECT_DIR / "runs"))
+DATA_DIR = Path(os.environ.get("VLU_DATA_DIR", PROJECT_DIR / "data"))
+GOAL_DATASET = DATA_DIR / "libero_goal_no_noops_1.0.0_lerobot"
+
+BASE_MODEL = os.environ.get("VLU_BASE_MODEL", "nvidia/GR00T-N1.6-3B")
+EMBODIMENT = "libero_panda"
+# Video decoder for the demos (AV1 videos). "pyav" (default) uses the FFmpeg bundled in the pinned av
+# wheel, so it works on any node. "torchcodec" is GR00T's default but needs system FFmpeg libraries
+# with an AV1 decoder. Do not use GR00T's "opencv" reader: it returns BGR frames (LIBERO gives RGB).
+VIDEO_BACKEND = os.environ.get("VLU_VIDEO_BACKEND", "pyav")
+
+
+@dataclass(frozen=True)
+class Recipe:
+    # --- Learning (L ops) -------------------------------------------------------------------------
+    # CL-paper recipe (Liu et al. 2026, GR00T): lr 1e-4, batch 16, AdamW, wd 1e-5, cosine decay.
+    # The optimizer and LR schedule restart at every op: each op is a fresh fine-tune of its parent.
+    learn_steps: int = 10_000
+    batch_size: int = 16
+    lr: float = 1e-4
+    weight_decay: float = 1e-5
+    warmup_ratio: float = 0.05  # NVIDIA finetune.sh default
+    max_grad_norm: float = 1.0  # NVIDIA TrainingConfig default
+    # ER: this fraction of every L-op batch is drawn from the retained earlier tasks
+    # (task chosen uniformly, then a uniform frame of that task). 0.5 = the 1:1 mix.
+    replay_fraction: float = 0.5
+
+    # --- Unlearning (U ops) -----------------------------------------------------------------------
+    # PROVISIONAL: same step budget for every method; values still to be agreed (see README).
+    unlearn_steps: int = 1_000
+    unlearn_lr: float = 1e-5
+
+    # --- Bookkeeping ------------------------------------------------------------------------------
+    num_workers: int = 8  # DataLoader processes building batches
+    log_every: int = 50
+    save_every: int = 1_000  # resumable checkpoint (weights + optimizer)
+    probe_every: int = 500  # flow-matching loss on a fixed batch of every task
+    probe_size: int = 32
+
+    # --- Evaluation (LIBERO) ----------------------------------------------------------------------
+    eval_episodes: int = 50  # one per fixed LIBERO initial state
+    eval_max_steps: int = 300  # standard LIBERO-Goal limit (OpenVLA protocol)
+    eval_wait_steps: int = 10  # no-op steps after reset so objects settle (standard)
+    n_action_steps: int = 8  # actions executed from each predicted 16-step chunk (NVIDIA default)
+
+
+RECIPE = Recipe()

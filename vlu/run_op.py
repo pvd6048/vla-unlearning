@@ -1,0 +1,120 @@
+"""Train one node: apply its last op to its parent.
+
+    python -m vlu.run_op --run goal_s0 --node LA/LB/LC/UB-ga
+
+Safe to rerun: a finished node is skipped, an interrupted one resumes from its last checkpoint.
+The parent must be finished first (scripts/submit.py chains the jobs).
+"""
+
+import argparse
+from dataclasses import asdict
+import json
+import os
+import shutil
+import subprocess
+
+import torch
+
+from vlu.config import PROJECT_DIR, RECIPE, RUNS_DIR
+from vlu.data import OpBatches, fixed_batch, load_demos
+from vlu.model import build_processor, describe, gr00t_config, load_model, modality_configs
+from vlu.nodes import Node
+from vlu.ops import ZERO_STEP_METHODS, plan_op
+from vlu.tasks import TASKS
+from vlu.train import train
+
+
+def run_seed(run: str, seed: int | None) -> int:
+    """Each run has one seed, fixed in RUNS_DIR/<run>/run.json when the run is created."""
+    path = RUNS_DIR / run / "run.json"
+    if path.exists():
+        stored = json.loads(path.read_text())["seed"]
+        if seed is not None and seed != stored:
+            raise ValueError(f"run {run} was created with seed {stored}, not {seed}")
+        return stored
+    if seed is None:
+        raise ValueError(f"run {run} does not exist yet; pass --seed to create it")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"seed": seed, "tasks": TASKS}, indent=2) + "\n")
+    return seed
+
+
+def git_commit() -> str:
+    try:
+        out = subprocess.run(["git", "-C", str(PROJECT_DIR), "rev-parse", "HEAD"], capture_output=True, text=True)
+        dirty = subprocess.run(["git", "-C", str(PROJECT_DIR), "status", "--porcelain"], capture_output=True, text=True)
+        return out.stdout.strip() + ("-dirty" if dirty.stdout.strip() else "")
+    except OSError:
+        return "unknown"
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--run", required=True, help="run name, e.g. goal_s0")
+    parser.add_argument("--node", required=True, help="op path, e.g. LA/LB/LC/UB-ga")
+    parser.add_argument("--seed", type=int, help="only needed for the first op of a new run")
+    parser.add_argument("--steps", type=int, help="override the op's step budget (smoke tests only)")
+    parser.add_argument("--save-at", default="", help="extra weight snapshots, e.g. 2000,5000")
+    args = parser.parse_args()
+
+    node = Node.from_path(args.run, args.node)
+    seed = run_seed(args.run, args.seed)
+    if node.is_base:
+        raise ValueError("--node must contain at least one op")
+    if node.done:
+        print(f"{node} is already done ({node.weights_path})")
+        return
+    if not node.parent.done:
+        raise RuntimeError(f"parent {node.parent} is not done; train it first")
+
+    op = node.last_op
+    if op.kind == "U" and op.method in ZERO_STEP_METHODS:
+        node.write_json("op.json", {"op": str(op), "parent": node.parent.path, "steps": 0, "git": git_commit()})
+        try:  # hard link: same bytes, no extra disk
+            os.link(node.parent.weights_path, node.weights_path)
+        except OSError:
+            shutil.copyfile(node.parent.weights_path, node.weights_path)
+        print(f"{node}: {op.method} trains nothing; copied the parent's weights")
+        return
+
+    plan = plan_op(node, RECIPE)
+    if args.steps is not None:
+        plan.steps = args.steps
+
+    torch.manual_seed(seed)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+    config = gr00t_config()
+    processor = build_processor(config)
+    model = load_model(config, node.parent.weights_file())
+    mcfg = modality_configs(config)
+    demos = load_demos(mcfg)
+    probes = {t: fixed_batch(d, RECIPE.probe_size, processor, mcfg) for t, d in demos.items()}
+
+    node.write_json(
+        "op.json",
+        {
+            "op": str(op),
+            "parent": node.parent.path,
+            "run_seed": seed,
+            "steps": plan.steps,
+            "lr": plan.lr,
+            "parts": {name: [list(s) for s in slots] for name, slots in plan.parts.items()},
+            "notes": plan.notes,
+            "recipe": asdict(RECIPE),
+            "model": describe(model),
+            "git": git_commit(),
+            "slurm_job": os.environ.get("SLURM_JOB_ID"),
+        },
+    )
+    # Batches depend on (run seed, depth, step): sibling branches at the same depth draw the same
+    # random numbers, which makes them easier to compare.
+    batches = OpBatches(demos, plan.parts, processor, mcfg, seed=seed * 1000 + node.depth, num_steps=plan.steps)
+    save_at = {int(s) for s in args.save_at.split(",") if s}
+    train(node, model, plan, batches, probes, RECIPE, save_at)
+    print(f"{node} done: {node.weights_path}")
+
+
+if __name__ == "__main__":
+    main()
