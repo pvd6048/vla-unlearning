@@ -1,6 +1,6 @@
 #!/bin/bash
-# Train one node. Usually submitted by scripts/submit.py, which sets the resources.
-#   sbatch <resources> slurm/train_op.sbatch <run> <node path> [extra vlu.run_op args]
+# Train one node by hand (normal runs go through scripts/submit.py and the worker jobs).
+#   sbatch <gpu_large resources, see scripts/submit.py> slurm/train_op.sbatch <run> <node path> [extra vlu.run_op args]
 # Rerunning (e.g. after a time-out) resumes from the node's resume.pt.
 set -euo pipefail
 source "${VLU_PROJECT_DIR:?export VLU_PROJECT_DIR (scripts/submit.py does)}/slurm/env.sh"

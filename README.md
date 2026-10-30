@@ -15,10 +15,11 @@ vlu/                 the experiment code (python package)
   ops.py             what each op trains on + its loss: L ops (ER) and unlearning methods
   train.py           the training loop (AdamW + cosine, bf16, resumable)
   run_op.py          CLI: train one node
+  worker.py          runs a run's plan item by item inside one Slurm job (see "Jobs" below)
   eval/serve.py      CLI: serve a node's policy (GPU, main env)
   eval/libero_client.py  CLI: LIBERO rollouts against the server (CPU, simulator env)
-slurm/               env.sh (paths, environments) and the job scripts
-scripts/             setup_cluster.sh, prepare_data.py, submit.py (job DAGs), results.py (tables)
+slurm/               env.sh (paths, environments), worker.sbatch, eval.sbatch, smoke.sbatch, train_op.sbatch
+scripts/             setup_cluster.sh, prepare_data.py, submit.py (plan + workers), results.py (tables)
 ```
 
 ## Concepts
@@ -85,26 +86,47 @@ Known risks (the smoke test shows which ones bite):
 - The simulator env builds a few packages from source (e.g. `evdev` via robosuite → pynput), which
   needs a C compiler and kernel headers on the login node.
 
-Then edit `RESOURCES` at the top of `scripts/submit.py` to the cluster's partition/GRES names.
+Slurm resources for training and eval jobs are in `RESOURCES` at the top of `scripts/submit.py`.
 
 ## Day 1: smoke test
 
 ```bash
 export VLU_PROJECT_DIR=$PWD
-sbatch --partition=gpu_large --gres=gpu:1 --cpus-per-task=24 --mem=90G --time=2:00:00 \
-    --output=smoke-%j.out slurm/smoke.sbatch
+sbatch --partition=gpu_large --qos=gpu_large --gres=gpu:4g.96gb:1 --cpus-per-gpu=24 --mem-per-gpu=96G \
+    --time=2:00:00 --output=smoke-%j.out slurm/smoke.sbatch
 ```
 
 200 training steps of L_A in the throw-away run `smoke`, then 5 rollouts with 2 videos. From the
 output take: `steps_per_s` and `peak_mem_gb` (train_log.jsonl), seconds per rollout (eval json),
 and look at the videos in `runs/smoke/LA/eval/final_seed0/videos/`.
 
+## Jobs: the plan and the workers
+
+Cluster limits per user: gpu_large 1 running / 2 submitted jobs (48 h max), gpu_medium 1 / 4,
+gpu_small 4 / 20 (24 h max), and at most one GPU's worth of slices at a time (4 small, or 1
+medium, or 1 large). So work runs one item at a time, and one Slurm job per item is not possible.
+
+`scripts/submit.py` therefore only (1) adds items to the run's plan, `runs/<run>/plan.json`, and
+(2) starts a worker job if none is queued or running. The worker (`vlu/worker.py`, on gpu_large by
+default) runs the plan in order: a node's training as soon as its parent is trained, then the node's
+evals (on the same slice, 23 simulator processes). 15 minutes before its time limit it queues its own
+successor, which carries on; a training cut off by the time limit resumes from its last checkpoint.
+Rerunning `submit.py` is always safe, and `python scripts/submit.py --run <run>` alone prints progress.
+
+Files a run directory gets besides the node tree: `plan.json`, `_logs/<item>.<job>.log` (output of
+each training/eval), `_slurm/worker-*.out` (the workers' own logs), `_failed/<item>.json` (failed items
+are skipped, and so are the items depending on them, until `--retry-failed`) and `_claims/` (items
+being worked on; a claim of a dead job is taken over automatically).
+
+`--workers small:4` adds eval-only workers on gpu_small (e.g. to catch up on evals while no large job
+is running); `--workers none` only updates the plan.
+
 ## Day 2: pipeline sanity check on task A
 
 ```bash
-python scripts/submit.py --run goal_s0 --seed 0 --zero-shot A --videos 5
-python scripts/submit.py --run goal_s0 --seed 0 --nodes LA --save-at 2000,5000 \
+python scripts/submit.py --run goal_s0 --seed 0 --zero-shot A --nodes LA --save-at 2000,5000 \
     --eval-weights step_002000,step_005000,final --eval-seeds 0,1 --videos 5
+python scripts/submit.py --run goal_s0                      # progress
 python scripts/results.py --run goal_s0 --weights final --seed 0
 ```
 
@@ -119,8 +141,8 @@ python scripts/submit.py --run goal_s0 --stream S1 --methods purge,ga,graddiff
 python scripts/results.py --run goal_s0
 ```
 
-This submits the shared prefix once, every method's tail, the oracles (`LA/LC`, `LA/LC/LD`), and an
-eval after every op on every task seen so far. Logs go to `runs/<run>/_slurm/`.
+This plans the shared prefix once, every method's tail, the oracles (`LA/LC`, `LA/LC/LD`), and an
+eval after every op on every task seen so far.
 
 ## Adding an unlearning method
 

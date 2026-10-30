@@ -15,28 +15,12 @@ import subprocess
 
 import torch
 
-from vlu.config import PROJECT_DIR, RECIPE, RUNS_DIR
+from vlu.config import PROJECT_DIR, RECIPE
 from vlu.data import OpBatches, fixed_batch, load_demos
 from vlu.model import build_processor, describe, gr00t_config, load_model, modality_configs
-from vlu.nodes import Node
+from vlu.nodes import Node, run_seed
 from vlu.ops import ZERO_STEP_METHODS, plan_op
-from vlu.tasks import TASKS
 from vlu.train import train
-
-
-def run_seed(run: str, seed: int | None) -> int:
-    """Each run has one seed, fixed in RUNS_DIR/<run>/run.json when the run is created."""
-    path = RUNS_DIR / run / "run.json"
-    if path.exists():
-        stored = json.loads(path.read_text())["seed"]
-        if seed is not None and seed != stored:
-            raise ValueError(f"run {run} was created with seed {stored}, not {seed}")
-        return stored
-    if seed is None:
-        raise ValueError(f"run {run} does not exist yet; pass --seed to create it")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"seed": seed, "tasks": TASKS}, indent=2) + "\n")
-    return seed
 
 
 def git_commit() -> str:

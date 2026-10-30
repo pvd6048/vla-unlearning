@@ -137,6 +137,21 @@ class Node:
         (self.dir / name).write_text(json.dumps(data, indent=2, default=str) + "\n")
 
 
+def run_seed(run: str, seed: int | None) -> int:
+    """Each run has one seed, fixed in RUNS_DIR/<run>/run.json when the run is created."""
+    path = RUNS_DIR / run / "run.json"
+    if path.exists():
+        stored = json.loads(path.read_text())["seed"]
+        if seed is not None and seed != stored:
+            raise ValueError(f"run {run} was created with seed {stored}, not {seed}")
+        return stored
+    if seed is None:
+        raise ValueError(f"run {run} does not exist yet; pass --seed to create it")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"seed": seed, "tasks": TASKS}, indent=2) + "\n")
+    return seed
+
+
 def expand_stream(stream: list[str], method: str) -> list[str]:
     """Node paths after each op of a stream, with `method` attached to every U op.
     expand_stream(["LA", "UA"], "ga") -> ["LA", "LA/UA-ga"]"""
