@@ -18,6 +18,8 @@ vlu/                 the experiment code (python package)
   worker.py          runs a run's plan item by item inside one Slurm job (see "Jobs" below)
   eval/serve.py      CLI: serve a node's policy (GPU, main env)
   eval/libero_client.py  CLI: LIBERO rollouts against the server (CPU, simulator env)
+  drift/             drift metrics (PLAN §4): params.py (weights), extract.py (GPU: probe features,
+                     Fisher), compare.py (representation + policy drift); see drift/__init__.py
 slurm/               env.sh (paths, environments), worker.sbatch, eval.sbatch, smoke.sbatch, train_op.sbatch
 scripts/             setup_cluster.sh, prepare_data.py, submit.py (plan + workers), results.py (tables)
 ```
@@ -143,6 +145,37 @@ python scripts/results.py --run goal_s0
 
 This plans the shared prefix once, every method's tail, the oracles (`LA/LC`, `LA/LC/LD`), and an
 eval after every op on every task seen so far.
+
+## Drift metrics
+
+PLAN §5's branches are nodes of the tree (target task B, θ₀ = `LA/LB/LC`):
+
+| branch | node | drift |
+|---|---|---|
+| C, control (B still replayed) | `LA/LB/LC/LD/LE` | |
+| F, forgetting (B dropped from replay) | `LA/LB/LC/UB-purge/LD/LE` | Δ_F\|B = `LA/LB/LC/LD/LE..LA/LB/LC/UB-purge/LD/LE` |
+| U, unlearning | `LA/LB/LC/UB-ga` | Δ_U = `LA/LB/LC..LA/LB/LC/UB-ga` |
+| UF | `LA/LB/LC/UB-ga/LD/LE` | |
+| task vector τ_B | | `LA..LA/LB` |
+
+1. Train what is missing and extract probe features (and a Fisher where needed) inside the workers:
+   ```bash
+   python scripts/submit.py --run goal_s0 --nodes LA/LB/LC/LD/LE --stream S1 --methods purge,ga --features --fisher LA/LB/LC:B
+   ```
+2. Compare (main env; `params.py` streams the weight files tensor by tensor, `compare.py` reads small files):
+   ```bash
+   source slurm/env.sh
+   $MAIN_PY -m vlu.drift.params --run goal_s0 --random --subspace-k 8 --fisher "FB=LA/LB/LC:B" \
+       --drift "U=LA/LB/LC..LA/LB/LC/UB-ga" --drift "FB=LA/LB/LC/LD/LE..LA/LB/LC/UB-purge/LD/LE" \
+       --drift "tauB=LA..LA/LB" --drift "U_s1=goal_s1:LA/LB/LC..goal_s1:LA/LB/LC/UB-ga" \
+       --out $VLU_RUNS_DIR/goal_s0/_analysis/params_B.csv
+   $MAIN_PY -m vlu.drift.compare --run goal_s0 \
+       --drift "U=LA/LB/LC..LA/LB/LC/UB-ga" --drift "FB=LA/LB/LC/LD/LE..LA/LB/LC/UB-purge/LD/LE" \
+       --out $VLU_RUNS_DIR/goal_s0/_analysis/rep_B.csv
+   ```
+   Outputs are tidy CSVs (one value per row: level/group or feature/task, metric, drift pair).
+   A cosine only means something next to its controls: `random` (unrelated direction) and the
+   seed twin (`U` vs `U_s1`: the best agreement two runs of the same op reach).
 
 ## Adding an unlearning method
 

@@ -38,9 +38,9 @@ from vlu.worker import failed_file, item_key, load_plan, plan_path, status  # no
 # Worker pools, from the IIT Guwahati GPU facility job templates. "kinds" = what a worker may run:
 # training needs a big slice; a small slice only evaluates.
 POOLS = {
-    "large": {"kinds": "train,eval", "sbatch": ["--partition=gpu_large", "--qos=gpu_large", "--gres=gpu:4g.96gb:1",
+    "large": {"kinds": "train,eval,features", "sbatch": ["--partition=gpu_large", "--qos=gpu_large", "--gres=gpu:4g.96gb:1",
                                                 "--cpus-per-gpu=24", "--mem-per-gpu=96G", "--time=2-00:00:00"]},
-    "medium": {"kinds": "train,eval", "sbatch": ["--partition=gpu_medium", "--qos=gpu_medium", "--gres=gpu:2g.48gb:1",
+    "medium": {"kinds": "train,eval,features", "sbatch": ["--partition=gpu_medium", "--qos=gpu_medium", "--gres=gpu:2g.48gb:1",
                                                  "--cpus-per-gpu=12", "--mem-per-gpu=48G", "--time=2-00:00:00"]},
     "small": {"kinds": "eval", "sbatch": ["--partition=gpu_small", "--qos=gpu_small", "--gres=gpu:1g.24gb:1",
                                           "--cpus-per-gpu=6", "--mem-per-gpu=24G", "--time=1-00:00:00"]},
@@ -69,17 +69,25 @@ def build_items(args) -> list[dict]:
     if args.zero_shot:
         items.append({"kind": "eval", "node": "", "weights": "final", "seed": 0,
                       "tasks": args.zero_shot.split(","), "videos": args.videos})
+    if args.features:
+        items.append({"kind": "features", "node": "", "weights": "final", "fisher": []})
     for path in sorted(targets, key=lambda p: (p.count("/"), p)):
         node = Node.from_path(args.run, path)
         for depth in range(1, node.depth + 1):  # missing ancestors first (done ones are skipped later)
-            items.append({"kind": "train", "node": "/".join(str(op) for op in node.ops[:depth]), "save_at": []})
-        items[-1]["save_at"] = save_at
+            ancestor = "/".join(str(op) for op in node.ops[:depth])
+            items.append({"kind": "train", "node": ancestor, "save_at": save_at if depth == node.depth else []})
+            if args.features:
+                items.append({"kind": "features", "node": ancestor, "weights": "final", "fisher": []})
         if args.no_eval or node.last_op.method == "purge":
             continue
         for weights in args.eval_weights.split(","):
             for seed in map(int, args.eval_seeds.split(",")):
                 items.append({"kind": "eval", "node": path, "weights": weights, "seed": seed,
                               "tasks": targets[path], "videos": args.videos})
+    for spec in args.fisher:
+        path, _, tasks = spec.rpartition(":")
+        path = "" if path == "base" else path
+        items.append({"kind": "features", "node": path, "weights": "final", "fisher": tasks.split(",")})
     return items
 
 
@@ -94,6 +102,8 @@ def merge(plan: list[dict], new: list[dict]) -> list[dict]:
             plan.append(item)
         elif item["kind"] == "train":
             old["save_at"] = sorted(set(old.get("save_at", [])) | set(item["save_at"]))
+        elif item["kind"] == "features":
+            old["fisher"] = sorted(set(old.get("fisher", [])) | set(item["fisher"]))
         else:
             old["tasks"] = sorted(set(old["tasks"]) | set(item["tasks"]))
             old["videos"] = max(old.get("videos", 0), item["videos"])
@@ -135,6 +145,10 @@ def main():
     parser.add_argument("--eval-seeds", default="0")
     parser.add_argument("--videos", type=int, default=0, help="videos per task per eval")
     parser.add_argument("--no-eval", action="store_true")
+    parser.add_argument("--features", action="store_true",
+                        help="also extract drift probe features of the base model and every trained node")
+    parser.add_argument("--fisher", action="append", default=[],
+                        help="NODE:TASKS, e.g. LA/LB/LC:B or base:A,B: diagonal Fisher of a node on tasks (repeatable)")
     parser.add_argument("--workers", default="large",
                         help="pools to keep a worker in, e.g. large, or large,small:2; 'none' = only update the plan")
     parser.add_argument("--retry-failed", action="store_true", help="forget earlier failures, so they are run again")

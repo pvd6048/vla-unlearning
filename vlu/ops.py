@@ -235,7 +235,7 @@ def _plan_salun(node: Node, recipe: Recipe) -> OpPlan:
         else:
             grads = accumulate_grads(ctx, forget, recipe.importance_batches, stream=0, square=False)
             saliency = {name: g.abs() for name, g in grads.items()}
-            threshold = _top_fraction_threshold(saliency, recipe.salun_keep)
+            threshold = top_fraction_threshold(saliency, recipe.salun_keep)
             masks = {name: s >= threshold for name, s in saliency.items()}
             ctx.node.dir.mkdir(parents=True, exist_ok=True)
             torch.save(masks, mask_path)
@@ -257,7 +257,7 @@ def _plan_salun(node: Node, recipe: Recipe) -> OpPlan:
     return plan
 
 
-def _top_fraction_threshold(values: dict[str, torch.Tensor], keep: float, sample_size: int = 10_000_000) -> float:
+def top_fraction_threshold(values: dict[str, torch.Tensor], keep: float, sample_size: int = 10_000_000) -> float:
     """Value above which `keep` of all entries lie, estimated from a uniform random sample (an exact
     quantile over ~1e9 entries does not fit torch.quantile)."""
     total = sum(v.numel() for v in values.values())

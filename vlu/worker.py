@@ -5,9 +5,10 @@
 The plan is RUNS_DIR/<run>/plan.json, written by scripts/submit.py: a list of items such as
     {"kind": "train", "node": "LA/LB", "save_at": [2000, 5000]}
     {"kind": "eval", "node": "LA/LB", "weights": "final", "seed": 0, "tasks": ["A", "B"], "videos": 0}
+    {"kind": "features", "node": "LA/LB", "weights": "final", "fisher": ["B"]}     (vlu/drift/extract.py)
 The worker repeatedly takes the first item, in plan order, that is not done, not failed, ready (a
-train item needs its parent trained, an eval item its node) and not taken by another worker, and
-runs it in a subprocess: vlu.run_op for train items, slurm/eval.sbatch for eval items. It exits when
+train item needs its parent trained, the other kinds their node) and not taken by another worker,
+and runs it in a subprocess: vlu.run_op, slurm/eval.sbatch or vlu.drift.extract. It exits when
 nothing is left that it can run.
 
 Several workers may run at once: an item is taken by creating _claims/<item> (mkdir is atomic). A
@@ -27,6 +28,7 @@ import sys
 import time
 
 from vlu.config import PROJECT_DIR, RUNS_DIR
+from vlu.drift.paths import features_path, fisher_path
 from vlu.nodes import Node
 
 JOB = os.environ.get("SLURM_JOB_ID", f"local{os.getpid()}")
@@ -36,6 +38,8 @@ def item_key(item: dict) -> str:
     node = item["node"] or "<base>"
     if item["kind"] == "train":
         return f"train:{node}"
+    if item["kind"] == "features":
+        return f"features:{node}:{item['weights']}"
     return f"eval:{node}:{item['weights']}:s{item['seed']}"
 
 
@@ -71,8 +75,12 @@ def eval_todo(run: str, item: dict) -> list[str]:
 
 
 def is_done(run: str, item: dict) -> bool:
+    node = Node.from_path(run, item["node"])
     if item["kind"] == "train":
-        return Node.from_path(run, item["node"]).done
+        return node.done
+    if item["kind"] == "features":
+        return features_path(node, item["weights"]).exists() and all(
+            fisher_path(node, t, item["weights"]).exists() for t in item.get("fisher", []))
     return not eval_todo(run, item)
 
 
@@ -132,6 +140,11 @@ def command(run: str, item: dict) -> list[str]:
         if item.get("save_at"):
             cmd += ["--save-at", ",".join(map(str, item["save_at"]))]
         return cmd
+    if item["kind"] == "features":
+        cmd = [sys.executable, "-m", "vlu.drift.extract", "--run", run, "--node", item["node"], "--weights", item["weights"]]
+        if item.get("fisher"):
+            cmd += ["--fisher", ",".join(item["fisher"])]
+        return cmd
     tasks = ",".join(eval_todo(run, item))
     return ["bash", str(PROJECT_DIR / "slurm" / "eval.sbatch"), run, item["node"], tasks,
             item["weights"], str(item["seed"]), str(item.get("videos", 0))]
@@ -160,7 +173,7 @@ def run_item(run: str, item: dict) -> None:
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", required=True)
-    parser.add_argument("--kinds", default="train,eval", help="item kinds this worker may run")
+    parser.add_argument("--kinds", default="train,eval,features", help="item kinds this worker may run")
     args = parser.parse_args()
     kinds = set(args.kinds.split(","))
 
