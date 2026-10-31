@@ -91,6 +91,10 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
         with torch.autocast("cuda", dtype=torch.bfloat16):
             loss, metrics = plan.loss_fn(model, batch)
         loss.backward()
+        if plan.grad_mask is not None:  # e.g. SalUn: only the selected weights may change
+            for name, p in trainable_named_parameters(model).items():
+                if p.grad is not None:
+                    p.grad.mul_(plan.grad_mask[name])
         grad_norm = torch.nn.utils.clip_grad_norm_(params, recipe.max_grad_norm).item()
         optimizer.step()
         scheduler.step()

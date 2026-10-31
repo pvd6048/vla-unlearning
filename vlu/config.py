@@ -40,6 +40,12 @@ class Recipe:
     # PROVISIONAL: same step budget for every method; values still to be agreed (see README).
     unlearn_steps: int = 1_000
     unlearn_lr: float = 1e-5
+    # Method hyperparameters, PROVISIONAL (each paper's default, mapped to the flow-matching loss):
+    npo_beta: float = 0.1  # NPO paper default; log-likelihood stand-in = -sum of squared FM errors of a chunk
+    ssd_alpha: float = 10.0  # SSD paper defaults: dampen weights with I_forget > alpha * I_all ...
+    ssd_lambda: float = 1.0  # ... by the factor min(lambda * I_all / I_forget, 1)
+    salun_keep: float = 0.5  # SalUn paper default: update the 50% most salient weights
+    importance_batches: int = 64  # batches for SSD's Fisher importances and SalUn's saliency
 
     # --- Bookkeeping ------------------------------------------------------------------------------
     num_workers: int = 8  # DataLoader processes building batches

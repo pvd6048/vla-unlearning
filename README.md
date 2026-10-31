@@ -136,8 +136,8 @@ Pass bar (PLAN.md): ≥ 80% SR on A after 10k steps. The `--eval-seeds 0,1` pair
 ## Week 1: stream S1
 
 ```bash
-python scripts/submit.py --run goal_s0 --stream S1 --methods purge,ga,graddiff --dry-run   # look first
-python scripts/submit.py --run goal_s0 --stream S1 --methods purge,ga,graddiff
+python scripts/submit.py --run goal_s0 --stream S1 --methods purge,ga,graddiff,npo,ssd,salun --dry-run   # look first
+python scripts/submit.py --run goal_s0 --stream S1 --methods purge,ga,graddiff,npo,ssd,salun
 python scripts/results.py --run goal_s0
 ```
 
@@ -147,11 +147,20 @@ eval after every op on every task seen so far.
 ## Adding an unlearning method
 
 Write `_plan_<name>(node, recipe) -> OpPlan` in `vlu/ops.py` (batch parts + loss) and add it to
-`UNLEARN_METHODS`. The op token is then `U<task>-<name>`.
+`UNLEARN_METHODS`. The op token is then `U<task>-<name>`. A method that needs a one-off computation on
+the parent model (a reference copy, importances, a weight mask) gives its plan a `prepare(ctx)`;
+`OpPlan.grad_mask` restricts which weights may change. See NPO, SSD and SalUn there.
+
+How the methods map onto GR00T's flow-matching loss (PROVISIONAL values in `vlu/config.py`):
+- **NPO**: log-likelihood of a chunk := −(sum of squared flow-matching errors); θ and the frozen
+  reference see the same noise and timesteps; β = 0.1.
+- **SSD**: diagonal Fisher of L_FM gradients on the forget task vs. on all the parent's tasks; α = 10, λ = 1; no training steps.
+- **SalUn**: saliency = |∇L_FM| on the forget task, top 50% of trainable weights updated; "random
+  label" = the action chunk of a random retained-task frame; loss = relabeled forget + retain.
 
 ## Open decisions (provisional values in the code)
 
 - A–E task mapping (`vlu/tasks.py`): currently LIBERO-Goal tasks 0–4.
 - Unlearning budget and lr (`vlu/config.py`): 1000 steps at 1e-5 for every method.
-- GA stopping rule / loss ceiling; NPO's likelihood proxy; SalUn's "random label" for actions.
+- GA stopping rule / loss ceiling; NPO's β (depends on the scale of L_FM, see the probe losses); SSD's α, λ.
 - ER: total batch 16 (8 new + 8 replay), replay from all demos of retained tasks.

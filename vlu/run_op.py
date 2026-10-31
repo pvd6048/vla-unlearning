@@ -19,7 +19,7 @@ from vlu.config import PROJECT_DIR, RECIPE
 from vlu.data import OpBatches, fixed_batch, load_demos
 from vlu.model import build_processor, describe, gr00t_config, load_model, modality_configs
 from vlu.nodes import Node, run_seed
-from vlu.ops import ZERO_STEP_METHODS, plan_op
+from vlu.ops import ZERO_STEP_METHODS, OpContext, plan_op
 from vlu.train import train
 
 
@@ -75,6 +75,8 @@ def main():
     mcfg = modality_configs(config)
     demos = load_demos(mcfg)
     probes = {t: fixed_batch(d, RECIPE.probe_size, processor, mcfg) for t, d in demos.items()}
+    if plan.prepare is not None:  # method-specific setup on the parent model (see vlu/ops.py)
+        plan.prepare(OpContext(node, model, demos, processor, mcfg, seed))
 
     node.write_json(
         "op.json",
