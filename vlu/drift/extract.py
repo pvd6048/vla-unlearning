@@ -13,7 +13,12 @@ and timesteps are fixed by seed, so every checkpoint gets exactly the same input
         vlm.layerXX.image / .text   each trainable LLM layer, pooled over the image / text tokens
         vl.image / vl.text          the VL embeddings the DiT attends to (after the VL layer norm)
         dit.blockXX.<kind>          each DiT block (kind: x-text, x-image or self), pooled over the action tokens
+    attn_ratio {DiT block name: (N,)} size of the block's attention update relative to its input,
+               ||attn(norm(h))|| / ||h|| averaged over the action tokens: in x-text / x-image blocks,
+               how much the action head draws on the instruction / the images
     velocity   (N, 16, 7) predicted flow-matching velocity, normalized action space, valid dims only
+    velocity_swapped  (N, 16, 7) the same with the instruction replaced by the next task's
+               (A->B, ..., E->A), same noise and timestep: the language sensitivity of the policy
     sse, n_valid  (N,) per-sample squared flow-matching error and number of valid action entries
 
 Fisher (--fisher B): mean over RECIPE.importance_batches batches of the squared L_FM gradient of a
@@ -31,12 +36,12 @@ import torch
 
 from vlu.config import RECIPE
 from vlu.data import load_demos, make_sample
-from vlu.drift.paths import features_path, fisher_path
+from vlu.drift.paths import FEATURES_VERSION, features_path, fisher_path
 from vlu.drift.weights import DIT_BLOCK_KIND, WeightReader, module_of
 from vlu.model import build_processor, gr00t_config, load_model, modality_configs
 from vlu.nodes import Node
 from vlu.ops import OpContext, accumulate_grads, top_fraction_threshold
-from vlu.tasks import TASKS
+from vlu.tasks import TASKS, instruction
 
 PROBE_PER_TASK = 64
 CHUNK = 16  # probe samples per forward pass
@@ -48,13 +53,18 @@ class Recorder:
 
     def __init__(self, model):
         self.outputs = {}
+        self.block_inputs = {}
+        self.attn_outputs = {}
         layers = model.backbone.model.language_model.model.layers
         for i, layer in enumerate(layers):
             if any(p.requires_grad for p in layer.parameters()):
                 self._hook(layer, f"vlm.layer{i:02d}")
         self._hook(model.action_head.vlln, "vl")
         for i, block in enumerate(model.action_head.model.transformer_blocks):
-            self._hook(block, f"dit.block{i:02d}.{DIT_BLOCK_KIND[i % 4]}")
+            name = f"dit.block{i:02d}.{DIT_BLOCK_KIND[i % 4]}"
+            self._hook(block, name)
+            block.register_forward_pre_hook(lambda _m, args, name=name: self.block_inputs.__setitem__(name, args[0].detach()))
+            block.attn1.register_forward_hook(lambda _m, _a, out, name=name: self.attn_outputs.__setitem__(name, out.detach()))
         self._hook(model.action_head.action_decoder, "velocity")
 
     def _hook(self, module, name: str):
@@ -74,15 +84,20 @@ def extract_features(model, processor, mcfg) -> dict:
     recorder = Recorder(model)
     image_token = model.backbone.model.config.image_token_index
     horizon = len(mcfg["action"].delta_indices)
+    letters = list(TASKS)
     tasks, features, velocity, sse, n_valid = [], defaultdict(list), [], [], []
-    for t_index, letter in enumerate(TASKS):
+    attn_ratio, velocity_swapped = defaultdict(list), []
+    for t_index, letter in enumerate(letters):
         demos = load_demos(mcfg, letters=(letter,))[letter]
         picks = np.linspace(0, len(demos.index) - 1, PROBE_PER_TASK).round().astype(int)
         samples = [make_sample(processor, mcfg, demos, *demos.index[i]) for i in picks]
+        swapped_text = instruction(letters[(t_index + 1) % len(letters)])
+        swapped = [make_sample(processor, mcfg, demos, *demos.index[i], text=swapped_text) for i in picks]
         del demos
         for start in range(0, len(samples), CHUNK):
+            seed = SEED + 1000 * t_index + start  # same noise/timesteps for every checkpoint
             inputs = dict(processor.collator(samples[start : start + CHUNK])["inputs"])
-            torch.manual_seed(SEED + 1000 * t_index + start)  # same noise/timesteps for every checkpoint
+            torch.manual_seed(seed)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 out = model(inputs)
             valid = inputs["attention_mask"] == 1
@@ -93,20 +108,30 @@ def extract_features(model, processor, mcfg) -> dict:
                     features[f"{name}.text"].append(_masked_mean(h.float(), valid & ~image).half().cpu())
                 elif name.startswith("dit."):
                     features[name].append(h[:, -horizon:].float().mean(dim=1).half().cpu())
+            for name, update in recorder.attn_outputs.items():
+                ratio = update[:, -horizon:].float().norm(dim=-1) / recorder.block_inputs[name][:, -horizon:].float().norm(dim=-1).clamp_min(1e-6)
+                attn_ratio[name].append(ratio.mean(dim=1).cpu())
             action_mask = out["action_mask"].bool()
             dims = int(action_mask[0, 0].sum())  # valid action dims (7 for LIBERO)
             velocity.append(recorder.outputs["velocity"][:, -horizon:, :dims].float().cpu())
             sse.append(out["action_loss"].float().sum(dim=(1, 2)).cpu())
             n_valid.append(action_mask.sum(dim=(1, 2)).float().cpu())
             tasks += [letter] * len(inputs["input_ids"])
+            # The same frames and noise with another task's instruction (recorder outputs are not used).
+            torch.manual_seed(seed)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                model(dict(processor.collator(swapped[start : start + CHUNK])["inputs"]))
+            velocity_swapped.append(recorder.outputs["velocity"][:, -horizon:, :dims].float().cpu())
         print(f"probe features of task {letter}: {len(samples)} samples", flush=True)
     return {
         "tasks": tasks,
         "features": {k: torch.cat(v) for k, v in features.items()},
+        "attn_ratio": {k: torch.cat(v) for k, v in attn_ratio.items()},
         "velocity": torch.cat(velocity),
+        "velocity_swapped": torch.cat(velocity_swapped),
         "sse": torch.cat(sse),
         "n_valid": torch.cat(n_valid),
-        "probe": {"per_task": PROBE_PER_TASK, "seed": SEED},
+        "probe": {"per_task": PROBE_PER_TASK, "seed": SEED, "version": FEATURES_VERSION, "swap": "instruction of the next task"},
     }
 
 

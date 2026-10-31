@@ -4,6 +4,8 @@ from pathlib import Path
 
 from vlu.nodes import Node
 
+FEATURES_VERSION = 2  # layout of the features file written by vlu.drift.extract
+
 
 def _suffix(weights: str) -> str:
     return "" if weights == "final" else f"_{weights}"

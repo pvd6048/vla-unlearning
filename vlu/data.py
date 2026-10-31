@@ -11,6 +11,8 @@ Batch number t of an op depends only on (seed, t), so a resumed job sees the sam
 would have seen without the interruption.
 """
 
+import dataclasses
+
 import av
 import numpy as np
 from torch.utils.data import Dataset
@@ -73,9 +75,12 @@ def load_demos(modality_configs: dict, letters=tuple(TASKS)) -> dict[str, TaskDe
     return demos
 
 
-def make_sample(processor, modality_configs: dict, demos: TaskDemos, episode: int, step: int) -> dict:
-    """One processed training sample, exactly as GR00T's ShardedSingleStepDataset builds it."""
+def make_sample(processor, modality_configs: dict, demos: TaskDemos, episode: int, step: int, text: str | None = None) -> dict:
+    """One processed training sample, exactly as GR00T's ShardedSingleStepDataset builds it.
+    `text` replaces the instruction (used to measure language sensitivity)."""
     step_data = extract_step_data(demos.episodes[episode], step, modality_configs, EmbodimentTag(EMBODIMENT))
+    if text is not None:
+        step_data = dataclasses.replace(step_data, text=text)
     return processor([{"type": MessageType.EPISODE_STEP.value, "content": step_data}])
 
 

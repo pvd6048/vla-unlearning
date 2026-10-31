@@ -21,6 +21,14 @@ Per pair of drifts i < j:
     shift_cka        linear CKA between the representation shifts h_Y - h_X of the two drifts
   feature "policy":
     velocity_shift_cos  cosine between the two drifts' changes of predicted velocity
+
+Cross-modal alignment, per drift, each as <metric>_start (at X), <metric>_end (at Y), <metric>_change:
+    vl_alignment     (features vlm.layerXX / vl) mean cosine between a sample's pooled image tokens
+                     and its pooled text tokens
+    attn_ratio       (each DiT block) size of the attention update relative to the block input; in
+                     x-text / x-image blocks: how much the action head draws on language / vision
+    language_sensitivity  (feature "policy") mean ||v(swapped instruction) - v||^2 / mean ||v||^2:
+                     0 = the policy ignores the instruction ("linguistic blindness")
 """
 
 import argparse
@@ -32,7 +40,7 @@ import torch
 
 from vlu.drift.metrics import cosine, linear_cka, pca_shift
 from vlu.drift.params import parse_drift
-from vlu.drift.paths import features_path
+from vlu.drift.paths import FEATURES_VERSION, features_path
 from vlu.drift.weights import Ref
 
 
@@ -42,7 +50,20 @@ def load(ref: Ref, cache: dict) -> dict:
         if not path.exists():
             raise FileNotFoundError(f"{path} not found: extract features of {ref} first (scripts/submit.py --features)")
         cache[ref] = torch.load(path, map_location="cpu", weights_only=False)
+        if cache[ref]["probe"].get("version") != FEATURES_VERSION:
+            raise ValueError(f"{path} has an old layout: delete it and extract again (scripts/submit.py --features)")
     return cache[ref]
+
+
+def vl_alignment(data: dict, layer: str, idx: torch.Tensor) -> float:
+    image = data["features"][f"{layer}.image"][idx].double()
+    text = data["features"][f"{layer}.text"][idx].double()
+    return float(torch.nn.functional.cosine_similarity(image, text, dim=1).mean())
+
+
+def language_sensitivity(data: dict, idx: torch.Tensor) -> float:
+    v, swapped = data["velocity"][idx].double(), data["velocity_swapped"][idx].double()
+    return float((swapped - v).square().sum() / v.square().sum().clamp_min(1e-300))
 
 
 def main():
@@ -58,7 +79,8 @@ def main():
     tasks = drifts[0][1]["tasks"]
     for _, a, b in drifts:
         if a["tasks"] != tasks or b["tasks"] != tasks or a["probe"] != b["probe"]:
-            raise ValueError("probe sets differ between checkpoints; re-extract with the same vlu.drift.extract")
+            raise ValueError("probe sets differ between checkpoints (or were extracted by different versions "
+                             "of vlu.drift.extract); re-extract them")
     subsets = {t: torch.tensor([i for i, s in enumerate(tasks) if s == t]) for t in dict.fromkeys(tasks)}
     subsets["all"] = torch.arange(len(tasks))
 
@@ -86,6 +108,19 @@ def main():
             rows.append(["policy", task, "fm_loss_change", name, "", float(loss_b - loss_a)])
         for i, j in itertools.combinations(vshift, 2):
             rows.append(["policy", task, "velocity_shift_cos", i, j, cosine(vshift[i], vshift[j])])
+
+    def endpoints(feature, task, metric, name, start, end):
+        rows.extend([[feature, task, f"{metric}_start", name, "", start], [feature, task, f"{metric}_end", name, "", end],
+                     [feature, task, f"{metric}_change", name, "", end - start]])
+
+    for task, idx in subsets.items():
+        for name, a, b in drifts:
+            for layer in sorted({k.rsplit(".", 1)[0] for k in a["features"] if k.endswith(".image")}):
+                endpoints(layer, task, "vl_alignment", name, vl_alignment(a, layer, idx), vl_alignment(b, layer, idx))
+            for block in a["attn_ratio"]:
+                endpoints(block, task, "attn_ratio", name, float(a["attn_ratio"][block][idx].mean()),
+                          float(b["attn_ratio"][block][idx].mean()))
+            endpoints("policy", task, "language_sensitivity", name, language_sensitivity(a, idx), language_sensitivity(b, idx))
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
