@@ -20,6 +20,18 @@ from vlu.nodes import Node
 from vlu.ops import OpPlan, fm_loss
 
 
+def jsonl_logger(path):
+    """log(record): append record (plus a timestamp) to a JSON-lines file and print it."""
+
+    def log(record: dict):
+        record["time"] = time.time()
+        with open(path, "a") as f:
+            f.write(json.dumps(record) + "\n")
+        print(json.dumps(record), flush=True)
+
+    return log
+
+
 def _optimizer(model, lr: float, weight_decay: float):
     # No weight decay on biases and norm weights (1-D tensors), like the HF Trainer.
     params = list(trainable_named_parameters(model).values())
@@ -74,14 +86,7 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
         pin_memory=True,
         multiprocessing_context="fork",
     )
-    log_file = open(node.dir / "train_log.jsonl", "a")
-
-    def log(record: dict):
-        record["time"] = time.time()
-        log_file.write(json.dumps(record) + "\n")
-        log_file.flush()
-        print(json.dumps(record), flush=True)
-
+    log = jsonl_logger(node.dir / "train_log.jsonl")
     if start == 0:
         log({"step": 0, "probe": probe_losses(model, probes)})
 
@@ -133,4 +138,3 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
 
     save_weights(model, node.weights_path)
     resume_path.unlink(missing_ok=True)
-    log_file.close()

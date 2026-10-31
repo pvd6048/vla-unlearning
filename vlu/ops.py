@@ -10,7 +10,7 @@ loaded and before training (NPO: frozen reference copy; SSD: the whole method; S
 """
 
 import copy
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Callable
 
 import torch
@@ -59,6 +59,9 @@ class OpPlan:
     prepare: Callable[[OpContext], None] | None = None
     # {parameter name: 0/1 tensor}: gradients are multiplied by it before every step (SalUn)
     grad_mask: dict[str, torch.Tensor] | None = None
+    # A method with its own optimization loop (VLA-Forget) replaces vlu.train.train with
+    # custom_train(ctx, probes); it must leave ctx.model ready to be saved.
+    custom_train: Callable[[OpContext, dict], None] | None = None
 
 
 def fm_loss(model, inputs: dict) -> torch.Tensor:
@@ -266,6 +269,24 @@ def top_fraction_threshold(values: dict[str, torch.Tensor], keep: float, sample_
     return torch.quantile(torch.cat(samples).float(), 1 - keep).item()
 
 
+def _plan_vlaforget(node: Node, recipe: Recipe) -> OpPlan:
+    """VLA-Forget (Ranjan & Polyzou 2026), staged LoRA unlearning of vision, projector and
+    reasoning/action layers; see vlu/vlaforget.py for the port and its choices."""
+    forget, retain = _forget_retain(node, recipe)
+    if not retain:
+        raise ValueError(f"{node}: vlaforget needs at least one retained task")
+    task, retain_tasks = forget[0][0], retain[0]
+    plan = OpPlan({}, None, recipe.unlearn_steps, recipe.vlaforget.lr, {"vlaforget": asdict(recipe.vlaforget)})
+
+    def custom_train(ctx: OpContext, probes: dict):
+        from vlu import vlaforget  # imported here: vlaforget imports this module
+
+        vlaforget.run(ctx, probes, recipe, task, retain_tasks, plan.steps)
+
+    plan.custom_train = custom_train
+    return plan
+
+
 # "purge" is handled in run_op.py: it trains nothing and only drops the task from the replay
 # buffer, which happens automatically because the task is no longer retained after the U op.
 UNLEARN_METHODS: dict[str, Callable[[Node, Recipe], OpPlan]] = {
@@ -274,6 +295,7 @@ UNLEARN_METHODS: dict[str, Callable[[Node, Recipe], OpPlan]] = {
     "npo": _plan_npo,
     "ssd": _plan_ssd,
     "salun": _plan_salun,
+    "vlaforget": _plan_vlaforget,
 }
 ZERO_STEP_METHODS = {"purge"}
 

@@ -15,9 +15,12 @@ def _centered(x: torch.Tensor) -> torch.Tensor:
 def linear_cka(x: torch.Tensor, y: torch.Tensor) -> float:
     """Linear CKA (Kornblith et al. 2019) between two representations of the same N samples:
     1 = identical up to rotation and isotropic scaling, 0 = unrelated. Computed with N x N Gram
-    matrices, so D may be large."""
+    matrices, so D may be large. NaN if either representation does not vary across the samples
+    (e.g. the shift of a drift that changes nothing): CKA is undefined there, not 0."""
     k, l = _centered(x) @ _centered(x).T, _centered(y) @ _centered(y).T
-    return float((k * l).sum() / (k.norm() * l.norm()).clamp_min(1e-300))
+    if not (k.norm() > 0 and l.norm() > 0):
+        return float("nan")
+    return float((k * l).sum() / (k.norm() * l.norm()))
 
 
 def pca_basis(x: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

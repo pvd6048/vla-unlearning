@@ -78,16 +78,20 @@ class WeightReader:
 
     def _file_of(self, ref: Ref, key: str) -> Path:
         if not ref.is_base:
-            return ref.node.weights_file(ref.weights)
+            path = ref.node.weights_file(ref.weights)
+            if key in self._open(path).keys():
+                return path
+            # A frozen weight this node does not override (vlu/model.py: frozen overrides) = base value.
         if self._base_map is None:
             root = base_checkpoint_dir()
             index = json.loads((root / "model.safetensors.index.json").read_text())["weight_map"]
             self._base_map = {k: root / f for k, f in index.items()}
         return self._base_map[key]
 
-    def keys(self, ref: Ref) -> list[str]:
-        """Trainable parameter names, from a node's weights file (the base model has no such list)."""
-        return sorted(self._open(ref.node.weights_file(ref.weights)).keys())
+    def keys(self, refs: list[Ref]) -> list[str]:
+        """Parameter names stored in the nodes' weights files (trainable ones and frozen overrides);
+        the base model has no such list."""
+        return sorted(set().union(*(self._open(r.node.weights_file(r.weights)).keys() for r in refs if not r.is_base)))
 
     def get(self, ref: Ref, key: str) -> torch.Tensor:
         return self.reduce(key, self._open(self._file_of(ref, key)).get_tensor(key))
@@ -110,9 +114,17 @@ _DIT_BLOCK = re.compile(r"^action_head\.model\.transformer_blocks\.(\d+)\.")
 DIT_BLOCK_KIND = {0: "x-text", 1: "self", 2: "x-image", 3: "self"}
 
 
+_VISION_LAYER = re.compile(r"^backbone\.model\.vision_model\.vision_model\.encoder\.layers\.(\d+)\.")
+
+
 def module_of(key: str) -> str:
-    """vlm (trainable LLM layers), projector (state/action encoders and decoder, position embedding,
-    VL layer norm) or dit."""
+    """vision (vision tower), vl_projector (vision -> LLM projector), vlm (LLM layers), projector
+    (state/action encoders and decoder, position embedding, VL layer norm) or dit. The vision tower and
+    vl_projector are frozen in learning; only VLA-Forget changes them (frozen overrides)."""
+    if key.startswith("backbone.model.vision_model."):
+        return "vision"
+    if key.startswith("backbone.model.mlp1."):
+        return "vl_projector"
     if key.startswith("backbone."):
         return "vlm"
     if key.startswith("action_head.model."):
@@ -121,6 +133,12 @@ def module_of(key: str) -> str:
 
 
 def layer_of(key: str) -> str:
+    if m := _VISION_LAYER.match(key):
+        return f"vision.layer{int(m[1]):02d}"
+    if key.startswith("backbone.model.mlp1."):
+        return "vl_projector"
+    if key.startswith("backbone.model.vision_model."):
+        return "vision.other"
     if m := _LLM_LAYER.match(key):
         return f"vlm.layer{int(m[1]):02d}"
     if m := _DIT_BLOCK.match(key):

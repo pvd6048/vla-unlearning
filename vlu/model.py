@@ -8,8 +8,10 @@ and gr00t/model/gr00t_n1d6/setup.py at the pinned Isaac-GR00T commit). If you ch
 commit, re-check it against those two files.
 """
 
+import json
 from pathlib import Path
 
+from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 import torch
 from transformers import AutoModel, AutoProcessor
@@ -124,27 +126,54 @@ def trainable_named_parameters(model) -> dict[str, torch.nn.Parameter]:
     return {name: p for name, p in model.named_parameters() if p.requires_grad}
 
 
+# Frozen overrides: an op may change parameters that are frozen during learning (VLA-Forget edits the
+# vision tower and the vision-language projector). Their new values are stored in the node's weights
+# file next to the trainable parameters, and every descendant node carries them forward. The names of
+# the overridden frozen parameters of a loaded model are kept in this attribute.
+OVERRIDES_ATTR = "vlu_frozen_overrides"
+
+
+def frozen_overrides(model) -> set[str]:
+    return getattr(model, OVERRIDES_ATTR, set())
+
+
+def add_frozen_overrides(model, names) -> None:
+    setattr(model, OVERRIDES_ATTR, frozen_overrides(model) | set(names))
+
+
 def save_weights(model, path: Path) -> None:
-    """Save the trainable parameters (fp32) atomically: a crash never leaves a half-written file
-    under the final name, and the file's existence is what marks a node as done."""
-    state = {name: p.detach().float().cpu().contiguous() for name, p in trainable_named_parameters(model).items()}
+    """Save the trainable parameters (fp32) and any frozen overrides atomically: a crash never leaves
+    a half-written file under the final name, and the file's existence is what marks a node as done."""
+    params = dict(model.named_parameters())
+    overrides = sorted(frozen_overrides(model))
+    names = set(trainable_named_parameters(model)) | set(overrides)
+    state = {name: params[name].detach().float().cpu().contiguous() for name in sorted(names)}
     tmp = path.with_name(path.name + ".tmp")
-    save_file(state, str(tmp))
+    save_file(state, str(tmp), metadata={"frozen_overrides": json.dumps(overrides)})
     tmp.replace(path)
 
 
 def load_weights(model, path: Path) -> None:
+    """Load a node's weights. The file's trainable parameters must be exactly the model's trainable
+    parameters (else it was saved with another trainable scope); its frozen overrides (listed in the
+    file's metadata) must be frozen parameters of the model."""
     state = load_file(str(path))
-    params = trainable_named_parameters(model)
-    if set(state) != set(params):
-        missing, extra = sorted(set(params) - set(state)), sorted(set(state) - set(params))
+    with safe_open(str(path), framework="pt") as f:
+        overrides = set(json.loads((f.metadata() or {}).get("frozen_overrides", "[]")))
+    all_params = dict(model.named_parameters())
+    trainable = set(trainable_named_parameters(model))
+    saved_trainable = set(state) - overrides
+    bad_overrides = sorted(n for n in overrides if n not in all_params or n in trainable)
+    if saved_trainable != trainable or bad_overrides:
+        missing, extra = sorted(trainable - saved_trainable), sorted(saved_trainable - trainable)
         raise ValueError(
-            f"{path} does not match the model's trainable parameters "
-            f"(missing {missing[:5]}..., unexpected {extra[:5]}...). Was it saved with another trainable scope?"
+            f"{path} does not match the model's trainable parameters (missing {missing[:5]}..., unexpected "
+            f"{extra[:5]}..., bad frozen overrides {bad_overrides[:5]}...). Was it saved with another trainable scope?"
         )
     with torch.no_grad():
-        for name, p in params.items():
-            p.copy_(state[name].to(p.dtype))
+        for name, value in state.items():
+            all_params[name].copy_(value.to(all_params[name].dtype))
+    add_frozen_overrides(model, overrides)
 
 
 def describe(model) -> dict:

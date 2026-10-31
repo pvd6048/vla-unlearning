@@ -17,7 +17,7 @@ import torch
 
 from vlu.config import PROJECT_DIR, RECIPE
 from vlu.data import OpBatches, fixed_batch, load_demos
-from vlu.model import build_processor, describe, gr00t_config, load_model, modality_configs
+from vlu.model import build_processor, describe, gr00t_config, load_model, modality_configs, save_weights
 from vlu.nodes import Node, run_seed
 from vlu.ops import ZERO_STEP_METHODS, OpContext, plan_op
 from vlu.train import train
@@ -96,9 +96,13 @@ def main():
     )
     # Batches depend on (run seed, depth, step): sibling branches at the same depth draw the same
     # random numbers, which makes them easier to compare.
-    batches = OpBatches(demos, plan.parts, processor, mcfg, seed=seed * 1000 + node.depth, num_steps=plan.steps)
-    save_at = {int(s) for s in args.save_at.split(",") if s}
-    train(node, model, plan, batches, probes, RECIPE, save_at)
+    if plan.custom_train is not None:  # a method with its own loop (VLA-Forget)
+        plan.custom_train(OpContext(node, model, demos, processor, mcfg, seed), probes)
+        save_weights(model, node.weights_path)
+    else:
+        batches = OpBatches(demos, plan.parts, processor, mcfg, seed=seed * 1000 + node.depth, num_steps=plan.steps)
+        save_at = {int(s) for s in args.save_at.split(",") if s}
+        train(node, model, plan, batches, probes, RECIPE, save_at)
     print(f"{node} done: {node.weights_path}")
 
 

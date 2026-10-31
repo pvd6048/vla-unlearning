@@ -19,7 +19,8 @@ with the metrics
     rel_norm    ||D_i|| / ||theta_X_i||               (drift_j empty)
     cos         cos(D_i, D_j)
     proj        <D_i, D_j> / ||D_j||^2: how much of D_j is in D_i (-1: D_i undoes all of D_j)
-    <F>_norm, <F>_cos, <F>_proj   the same in the Fisher metric <a, b>_F = sum F a b
+    <F>_norm, <F>_cos, <F>_proj   the same in the Fisher metric <a, b>_F = sum F a b, over the weights
+                the Fisher was computed on (the trainable ones; frozen overrides get weight 0)
     subspace    layer level: mean over the layer's 2-D weights of the overlap of the top-k left
                 singular subspaces of D_i and D_j (vlu.drift.metrics.subspace_overlap); random ~ k/rows
 """
@@ -81,7 +82,7 @@ def main():
     node_refs = [r for _, x, y in drifts for r in (x, y) if not r.is_base]
     if not node_refs:
         sys.exit("at least one checkpoint must be a node (the base model has no list of trainable weights)")
-    keys = reader.keys(node_refs[0])
+    keys = reader.keys(node_refs)
     fisher_files = {name: safe_open(str(path), framework="pt", device="cpu") for name, path in fishers}
 
     n = len(names)
@@ -108,6 +109,9 @@ def main():
         s = torch.stack(starts).cpu()
         fg = {}
         for f, handle in fisher_files.items():
+            if key not in handle.keys():  # a Fisher covers the weights it was computed on (the trainable ones)
+                fg[f] = torch.zeros(n, n, dtype=torch.float64)
+                continue
             weights = reader.reduce(key, handle.get_tensor(key)).flatten()
             fg[f] = ((flat * weights) @ flat.T).double().cpu()
         sub = None

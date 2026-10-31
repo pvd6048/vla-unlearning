@@ -4,7 +4,7 @@ Change a default here (and commit it) rather than overriding it on the command l
 run in the paper uses the same recipe. Paths come from environment variables set in slurm/env.sh.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
 
@@ -19,6 +19,31 @@ EMBODIMENT = "libero_panda"
 # wheel, so it works on any node. "torchcodec" is GR00T's default but needs system FFmpeg libraries
 # with an AV1 decoder. Do not use GR00T's "opencv" reader: it returns BGR frames (LIBERO gives RGB).
 VIDEO_BACKEND = os.environ.get("VLU_VIDEO_BACKEND", "pyav")
+
+
+@dataclass(frozen=True)
+class VLAForgetConfig:
+    """VLA-Forget (vlu/vlaforget.py). Values from the paper (Table 5) and the authors' code; PROVISIONAL
+    until checked on GR00T."""
+
+    lr: float = 2e-4  # Table 5 and code (the paper's appendix also mentions 5e-5)
+    lambda_forget: float = 0.7  # paper, OpenVLA setting (1.2 in the authors' small-model code)
+    lambda_mismatch: float = 0.8
+    lambda_feat: float = 0.7
+    beta_kl: float = 0.5
+    gamma: float = 1.0  # weight of the projector features in the feature loss (code default)
+    alpha_ratio: float = 1.0
+    top_k_vision: int = 2
+    top_k_projector: int = 2
+    top_k_reasoning: int = 3  # code default (paper: 3 or 4)
+    vision_blocks: int = 4  # last SigLIP2 layers (of 27) that are candidates; the paper does not say
+    lora_r: int = 16
+    lora_alpha: float = 16.0
+    stage_ratio: tuple = (60, 60, 90)  # vision / projector / reasoning share of the op's step budget
+    max_grad_norm: float = 1.0
+    selection_batches: int = 16  # batches for the layer-selection gradients (paper: whole set; code: 1)
+    boundary_forget_pool: int = 256  # forget frames whose nearest retain frames form the boundary set
+    boundary_retain_pool: int = 2048  # retain frames searched
 
 
 @dataclass(frozen=True)
@@ -46,6 +71,7 @@ class Recipe:
     ssd_lambda: float = 1.0  # ... by the factor min(lambda * I_all / I_forget, 1)
     salun_keep: float = 0.5  # SalUn paper default: update the 50% most salient weights
     importance_batches: int = 64  # batches for SSD's Fisher importances and SalUn's saliency
+    vlaforget: VLAForgetConfig = field(default_factory=VLAForgetConfig)
 
     # --- Bookkeeping ------------------------------------------------------------------------------
     num_workers: int = 8  # DataLoader processes building batches

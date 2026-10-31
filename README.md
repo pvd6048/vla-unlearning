@@ -13,6 +13,7 @@ vlu/                 the experiment code (python package)
   model.py           load GR00T / build its processor (mirrors NVIDIA's fine-tune), save/load weights
   data.py            demos per task in RAM, batch composition, deterministic per-step batches
   ops.py             what each op trains on + its loss: L ops (ER) and unlearning methods
+  vlaforget.py       VLA-Forget ported to GR00T (staged LoRA unlearning); lora.py: minimal LoRA
   train.py           the training loop (AdamW + cosine, bf16, resumable)
   run_op.py          CLI: train one node
   worker.py          runs a run's plan item by item inside one Slurm job (see "Jobs" below)
@@ -21,6 +22,7 @@ vlu/                 the experiment code (python package)
   drift/             drift metrics (PLAN §4): params.py (weights), extract.py (GPU: probe features,
                      Fisher), compare.py (representation + policy drift); see drift/__init__.py
 slurm/               env.sh (paths, environments), worker.sbatch, eval.sbatch, smoke.sbatch, train_op.sbatch
+tests/               base-level checks without GR00T (fake models with GR00T's layout); see tests/README.md
 scripts/             setup_cluster.sh, prepare_data.py, submit.py (plan + workers), results.py (tables)
 ```
 
@@ -39,6 +41,10 @@ scripts/             setup_cluster.sh, prepare_data.py, submit.py (plan + worker
 - **Run**: one seed of everything (`goal_s0`, `goal_s1`, ...). The seed is fixed in `runs/<run>/run.json`.
 - **Replay / retain set** of a node = tasks learned and not unlearned since. L ops replay them (ER,
   half of every batch); U ops use them as the retain set. Unlearned tasks are never replayed.
+- **Frozen overrides**: an op may change weights that are frozen during learning (VLA-Forget edits the
+  vision tower and the vision-language projector). The node's weights file then also stores those
+  weights (listed in the file's metadata), every descendant node carries them forward, and loading
+  still checks the trainable parameters strictly.
 - **Normalization statistics** are pinned to the full LIBERO-Goal dataset for every op, so they
   never change between ops or branches.
 
@@ -138,8 +144,8 @@ Pass bar (PLAN.md): ≥ 80% SR on A after 10k steps. The `--eval-seeds 0,1` pair
 ## Week 1: stream S1
 
 ```bash
-python scripts/submit.py --run goal_s0 --stream S1 --methods purge,ga,graddiff,npo,ssd,salun --dry-run   # look first
-python scripts/submit.py --run goal_s0 --stream S1 --methods purge,ga,graddiff,npo,ssd,salun
+python scripts/submit.py --run goal_s0 --stream S1 --methods purge,ga,graddiff,npo,ssd,salun,vlaforget --dry-run   # look first
+python scripts/submit.py --run goal_s0 --stream S1 --methods purge,ga,graddiff,npo,ssd,salun,vlaforget
 python scripts/results.py --run goal_s0
 ```
 
@@ -188,6 +194,10 @@ How the methods map onto GR00T's flow-matching loss (PROVISIONAL values in `vlu/
 - **NPO**: log-likelihood of a chunk := −(sum of squared flow-matching errors); θ and the frozen
   reference see the same noise and timesteps; β = 0.1.
 - **SSD**: diagonal Fisher of L_FM gradients on the forget task vs. on all the parent's tasks; α = 10, λ = 1; no training steps.
+- **VLA-Forget**: three stages of LoRA unlearning (vision tower → vision-language projector → LLM/DiT
+  layers), each on the top-scored layers, with retain, forget, mismatch and feature losses combined by
+  PCGrad; KL terms become velocity differences between the model and its pre-op copy. The mapping
+  and every choice the paper leaves open are in the docstring of `vlu/vlaforget.py`.
 - **SalUn**: saliency = |∇L_FM| on the forget task, top 50% of trainable weights updated; "random
   label" = the action chunk of a random retained-task frame; loss = relabeled forget + retain.
 

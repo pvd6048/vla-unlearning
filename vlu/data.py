@@ -28,6 +28,15 @@ from vlu.tasks import TASKS, instruction
 Slots = list[tuple[str, ...]]
 
 
+class Frames(list):
+    """A batch part drawn from an explicit list of frames (task letter, episode, step) instead of
+    from tasks: `per_batch` frames per batch, uniformly with replacement (VLA-Forget's boundary set)."""
+
+    def __init__(self, frames: list[tuple[str, int, int]], per_batch: int):
+        super().__init__(frames)
+        self.per_batch = per_batch
+
+
 def _frames_pyav(video_path: str, indices, video_backend=None, video_backend_kwargs=None) -> np.ndarray:
     """Frames `indices` of a video as RGB uint8 (N, H, W, 3), decoded with PyAV. The av wheel bundles
     FFmpeg with the AV1 decoder (dav1d) the LIBERO-Goal videos need, so no system FFmpeg is required.
@@ -99,11 +108,16 @@ class OpBatches(Dataset):
         rng = np.random.default_rng([self.seed, step])
         batch = {}
         for name, slots in self.parts.items():
-            samples = []
-            for tasks in slots:
-                task = self.demos[tasks[rng.integers(len(tasks))]]
-                episode, t = task.index[rng.integers(len(task.index))]
-                samples.append(make_sample(self.processor, self.modality_configs, task, episode, t))
+            if isinstance(slots, Frames):
+                picks = [slots[i] for i in rng.integers(len(slots), size=slots.per_batch)]
+            else:
+                picks = []
+                for tasks in slots:
+                    letter = tasks[rng.integers(len(tasks))]
+                    episode, t = self.demos[letter].index[rng.integers(len(self.demos[letter].index))]
+                    picks.append((letter, episode, t))
+            samples = [make_sample(self.processor, self.modality_configs, self.demos[letter], episode, t)
+                       for letter, episode, t in picks]
             batch[name] = dict(self.processor.collator(samples)["inputs"])
         return batch
 
