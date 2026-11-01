@@ -23,7 +23,8 @@ vlu/                 the experiment code (python package)
                      Fisher), compare.py (representation + policy drift); see drift/__init__.py
 slurm/               env.sh (paths, environments), worker.sbatch, eval.sbatch, smoke.sbatch, train_op.sbatch
 tests/               base-level checks without GR00T (fake models with GR00T's layout); see tests/README.md
-scripts/             setup_cluster.sh, prepare_data.py, submit.py (plan + workers), results.py (tables)
+scripts/             setup_cluster.sh, prepare_data.py, submit.py (plan + workers), results.py (tables),
+                     metrics.py (stream metrics per method: NBT, collateral, relapse, oracle gap, ...)
 ```
 
 ## Concepts
@@ -147,10 +148,13 @@ Pass bar (PLAN.md): ≥ 80% SR on A after 10k steps. The `--eval-seeds 0,1` pair
 python scripts/submit.py --run goal_s0 --stream S1 --methods purge,ga,graddiff,npo,ssd,salun,vlaforget --dry-run   # look first
 python scripts/submit.py --run goal_s0 --stream S1 --methods purge,ga,graddiff,npo,ssd,salun,vlaforget
 python scripts/results.py --run goal_s0
+python scripts/metrics.py --stream S1 --methods purge,ga,graddiff,npo,ssd,salun,vlaforget --runs goal_s0
 ```
 
 This plans the shared prefix once, every method's tail, the oracles (`LA/LC`, `LA/LC/LD`), and an
-eval after every op on every task seen so far.
+eval after every op on every task seen so far. `results.py` prints the raw success rates.
+`metrics.py` turns them into the PLAN's metrics per method, averaged over runs (`--runs goal_s0,goal_s1`).
+NaN means an eval it needs is missing.
 
 ## Drift metrics
 
