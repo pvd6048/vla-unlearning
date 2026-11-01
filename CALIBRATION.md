@@ -17,7 +17,6 @@ us how to set our hyperparameters. You don't need to interpret anything: run it 
 
 ```bash
 git clone https://github.com/pvd6048/vla-unlearning.git && cd vla-unlearning
-git checkout <branch we sent you>
 echo 'export VLU_STORE=/path/with/100GB/free/vla-unlearning' > slurm/env.local.sh
 bash scripts/setup_cluster.sh     # one time, roughly 30-60 minutes (installs into VLU_STORE)
 bash scripts/run_local.sh         # the whole calibration; expect about a day
