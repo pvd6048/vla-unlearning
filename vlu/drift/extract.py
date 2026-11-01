@@ -55,6 +55,7 @@ class Recorder:
         self.outputs = {}
         self.block_inputs = {}
         self.attn_outputs = {}
+        self.handles = []
         layers = model.backbone.model.language_model.model.layers
         for i, layer in enumerate(layers):
             if any(p.requires_grad for p in layer.parameters()):
@@ -63,15 +64,21 @@ class Recorder:
         for i, block in enumerate(model.action_head.model.transformer_blocks):
             name = f"dit.block{i:02d}.{DIT_BLOCK_KIND[i % 4]}"
             self._hook(block, name)
-            block.register_forward_pre_hook(lambda _m, args, name=name: self.block_inputs.__setitem__(name, args[0].detach()))
-            block.attn1.register_forward_hook(lambda _m, _a, out, name=name: self.attn_outputs.__setitem__(name, out.detach()))
+            self.handles.append(block.register_forward_pre_hook(
+                lambda _m, args, name=name: self.block_inputs.__setitem__(name, args[0].detach())))
+            self.handles.append(block.attn1.register_forward_hook(
+                lambda _m, _a, out, name=name: self.attn_outputs.__setitem__(name, out.detach())))
         self._hook(model.action_head.action_decoder, "velocity")
 
     def _hook(self, module, name: str):
         def keep(_module, _inputs, output):
             self.outputs[name] = (output[0] if isinstance(output, tuple) else output).detach()
 
-        module.register_forward_hook(keep)
+        self.handles.append(module.register_forward_hook(keep))
+
+    def remove(self):
+        for handle in self.handles:
+            handle.remove()
 
 
 def _masked_mean(h: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -123,6 +130,7 @@ def extract_features(model, processor, mcfg) -> dict:
                 model(dict(processor.collator(swapped[start : start + CHUNK])["inputs"]))
             velocity_swapped.append(recorder.outputs["velocity"][:, -horizon:, :dims].float().cpu())
         print(f"probe features of task {letter}: {len(samples)} samples", flush=True)
+    recorder.remove()  # no hooks (and no kept activations) during later passes, e.g. the Fisher
     return {
         "tasks": tasks,
         "features": {k: torch.cat(v) for k, v in features.items()},

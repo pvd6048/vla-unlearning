@@ -49,14 +49,17 @@ def attach(model: nn.Module, names: list[str], r: int, alpha: float, dropout: fl
 
 
 @torch.no_grad()
-def merge(model: nn.Module, adapters: dict[str, LoRALinear]) -> list[str]:
+def merge(model: nn.Module, adapters: dict[str, LoRALinear]) -> dict[str, float]:
     """Fold every adapter into its base weight (computed in fp32, stored in the weight's dtype) and put
-    the plain nn.Linear back. Returns the names of the changed weight parameters."""
-    changed = []
+    the plain nn.Linear back. Returns {changed weight name: retained fraction}, where the retained
+    fraction ||W_merged - W|| / ||delta|| shows how much of the delta survived rounding to the weight's
+    dtype (1 for fp32 weights; a bf16 weight loses the part of the delta below its precision)."""
+    retained = {}
     for name, adapter in adapters.items():
         weight = adapter.base.weight
-        weight.copy_((weight.float() + adapter.delta_weight()).to(weight.dtype))
+        old, delta = weight.float().clone(), adapter.delta_weight()
+        weight.copy_((old + delta).to(weight.dtype))
+        retained[f"{name}.weight"] = float((weight.float() - old).norm() / delta.norm().clamp_min(1e-30))
         parent, child = _parent(model, name)
         setattr(parent, child, adapter.base)
-        changed.append(f"{name}.weight")
-    return changed
+    return retained

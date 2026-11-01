@@ -17,6 +17,7 @@ import torch
 
 from vlu.config import Recipe
 from vlu.data import OpBatches, Slots
+from vlu.drift.weights import embodiment_index, live_part
 from vlu.model import trainable_named_parameters
 from vlu.nodes import Node
 
@@ -57,7 +58,7 @@ class OpPlan:
     lr: float
     notes: dict = field(default_factory=dict)  # method hyperparameters, recorded in op.json
     prepare: Callable[[OpContext], None] | None = None
-    # {parameter name: 0/1 tensor}: gradients are multiplied by it before every step (SalUn)
+    # {parameter name: bool tensor}: gradients are multiplied by it before every step (SalUn)
     grad_mask: dict[str, torch.Tensor] | None = None
     # A method with its own optimization loop (VLA-Forget) replaces vlu.train.train with
     # custom_train(ctx, probes); it must leave ctx.model ready to be saved.
@@ -232,21 +233,24 @@ def _plan_salun(node: Node, recipe: Recipe) -> OpPlan:
                    "random_label": "action chunk of a random retained-task frame"})
 
     def prepare(ctx: OpContext):
+        embodiment = embodiment_index()
         mask_path = ctx.node.dir / "salun_mask.pt"
         if mask_path.exists():
             masks = torch.load(mask_path, map_location="cuda", weights_only=True)
         else:
             grads = accumulate_grads(ctx, forget, recipe.importance_batches, stream=0, square=False)
             saliency = {name: g.abs() for name, g in grads.items()}
-            threshold = top_fraction_threshold(saliency, recipe.salun_keep)
-            masks = {name: s >= threshold for name, s in saliency.items()}
+            # The fraction refers to the weights that can change: LIBERO's row of the per-embodiment
+            # projectors (the other 31 rows never get a gradient); zero saliency is never selected.
+            threshold = top_fraction_threshold({n: live_part(n, s, embodiment) for n, s in saliency.items()}, recipe.salun_keep)
+            masks = {name: (s >= threshold) & (s > 0) for name, s in saliency.items()}
             ctx.node.dir.mkdir(parents=True, exist_ok=True)
             torch.save(masks, mask_path)
-        kept = sum(int(m.sum()) for m in masks.values())
-        total = sum(m.numel() for m in masks.values())
+        kept = sum(int(live_part(n, m, embodiment).sum()) for n, m in masks.items())
+        total = sum(live_part(n, m, embodiment).numel() for n, m in masks.items())
         plan.notes["kept_fraction"] = kept / total
-        plan.grad_mask = {name: m.to(torch.float32) for name, m in masks.items()}
-        print(f"SalUn updates {kept:,} of {total:,} trainable weights ({kept / total:.2%})", flush=True)
+        plan.grad_mask = masks  # bool: 1 byte per weight
+        print(f"SalUn updates {kept:,} of the {total:,} trainable weights that can change ({kept / total:.2%})", flush=True)
 
     def loss_fn(model, batch):
         relabeled = dict(batch["forget"])
@@ -264,8 +268,13 @@ def top_fraction_threshold(values: dict[str, torch.Tensor], keep: float, sample_
     """Value above which `keep` of all entries lie, estimated from a uniform random sample (an exact
     quantile over ~1e9 entries does not fit torch.quantile)."""
     total = sum(v.numel() for v in values.values())
-    samples = [v.flatten()[torch.randint(v.numel(), (max(1, round(sample_size * v.numel() / total)),), device=v.device)]
-               for v in values.values()]
+    generator = {}  # one fixed-seed generator per device: the global RNG is left untouched
+
+    def sample(v):
+        g = generator.setdefault(v.device, torch.Generator(device=v.device).manual_seed(0))
+        return v.flatten()[torch.randint(v.numel(), (max(1, round(sample_size * v.numel() / total)),), device=v.device, generator=g)]
+
+    samples = [sample(v) for v in values.values()]
     return torch.quantile(torch.cat(samples).float(), 1 - keep).item()
 
 

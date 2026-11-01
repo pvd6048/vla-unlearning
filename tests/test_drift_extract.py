@@ -112,7 +112,8 @@ assert all(torch.equal(a["features"][k], b["features"][k]) for k in a["features"
 assert not torch.equal(a["velocity"], a["velocity_swapped"])
 blind = ex.extract_features(Fake(ignore_text=True).cuda().eval(), processor, mcfg)
 assert torch.equal(blind["velocity"], blind["velocity_swapped"]), "a model that ignores text must have zero language sensitivity"
-print("features: shapes, names, determinism, swap OK")
+assert not any(m._forward_hooks or m._forward_pre_hooks for m in model.modules()), "extraction hooks left on the model"
+print("features: shapes, names, determinism, swap OK; no hooks left behind")
 
 # Fisher of task B: non-negative, same names/shapes as the trainable weights, summary shares sum to 1.
 fisher, summary = ex.extract_fisher(SimpleNamespace(), model, processor, mcfg, "B")

@@ -87,6 +87,9 @@ def build_items(args) -> list[dict]:
     for spec in args.fisher:
         path, _, tasks = spec.rpartition(":")
         path = "" if path == "base" else path
+        node = Node.from_path(args.run, path)
+        for depth in range(1, node.depth + 1):  # the node must be trained (done ones are skipped later)
+            items.append({"kind": "train", "node": "/".join(str(op) for op in node.ops[:depth]), "save_at": []})
         items.append({"kind": "features", "node": path, "weights": "final", "fisher": tasks.split(",")})
     return items
 

@@ -59,8 +59,12 @@ def probe_losses(model, probes: dict[str, dict]) -> dict[str, float]:
 
 
 def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], recipe: Recipe, save_at: set[int]):
-    params = list(trainable_named_parameters(model).values())
-    optimizer = _optimizer(model, plan.lr, recipe.weight_decay)
+    named = trainable_named_parameters(model)
+    params = list(named.values())
+    # With a gradient mask (SalUn) only the selected weights may change, so no weight decay either
+    # (AdamW's decay would shrink the masked-out weights).
+    optimizer = _optimizer(model, plan.lr, 0.0 if plan.grad_mask is not None else recipe.weight_decay)
+    masked = [(named[n], m) for n, m in plan.grad_mask.items()] if plan.grad_mask is not None else []
     scheduler = get_cosine_schedule_with_warmup(optimizer, math.ceil(recipe.warmup_ratio * plan.steps), plan.steps)
 
     resume_path = node.dir / "resume.pt"
@@ -96,10 +100,9 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
         with torch.autocast("cuda", dtype=torch.bfloat16):
             loss, metrics = plan.loss_fn(model, batch)
         loss.backward()
-        if plan.grad_mask is not None:  # e.g. SalUn: only the selected weights may change
-            for name, p in trainable_named_parameters(model).items():
-                if p.grad is not None:
-                    p.grad.mul_(plan.grad_mask[name])
+        for p, mask in masked:  # SalUn: only the selected weights get a gradient
+            if p.grad is not None:
+                p.grad.mul_(mask)
         grad_norm = torch.nn.utils.clip_grad_norm_(params, recipe.max_grad_norm).item()
         optimizer.step()
         scheduler.step()

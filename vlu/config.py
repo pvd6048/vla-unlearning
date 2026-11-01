@@ -44,6 +44,7 @@ class VLAForgetConfig:
     selection_batches: int = 16  # batches for the layer-selection gradients (paper: whole set; code: 1)
     boundary_forget_pool: int = 256  # forget frames whose nearest retain frames form the boundary set
     boundary_retain_pool: int = 2048  # retain frames searched
+    merge_tolerance: float = 0.01  # max relative change of a probe loss when merging the adapters; above it the op fails
 
 
 @dataclass(frozen=True)

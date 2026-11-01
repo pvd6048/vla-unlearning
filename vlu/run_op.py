@@ -62,8 +62,14 @@ def main():
         return
 
     plan = plan_op(node, RECIPE)
-    if args.steps is not None:
+    if args.steps is not None and plan.steps > 0:  # zero-step methods (SSD) stay zero-step
         plan.steps = args.steps
+    save_at = {int(s) for s in args.save_at.split(",") if s}
+    if save_at and (plan.custom_train is not None or plan.steps == 0 or not all(0 < s <= plan.steps for s in save_at)):
+        # Snapshots are written only by the standard loop, at steps 1..plan.steps; fail now rather
+        # than leave evals of snapshots that will never exist.
+        raise ValueError(f"--save-at {sorted(save_at)} is not possible for {op} ({plan.steps} steps"
+                         + (", own training loop" if plan.custom_train is not None else "") + ")")
 
     torch.manual_seed(seed)
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -101,7 +107,6 @@ def main():
         save_weights(model, node.weights_path)
     else:
         batches = OpBatches(demos, plan.parts, processor, mcfg, seed=seed * 1000 + node.depth, num_steps=plan.steps)
-        save_at = {int(s) for s in args.save_at.split(",") if s}
         train(node, model, plan, batches, probes, RECIPE, save_at)
     print(f"{node} done: {node.weights_path}")
 

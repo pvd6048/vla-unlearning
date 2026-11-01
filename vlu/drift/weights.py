@@ -60,6 +60,17 @@ def embodiment_index() -> int:
 
 # Projector weights are stacked per embodiment (dim 0 = 32 robots); only LIBERO's row ever changes.
 _PER_EMBODIMENT = re.compile(r"^action_head\.(state_encoder|action_encoder|action_decoder)\.")
+# Module paths of GR00T N1.6 (shared with vlu/vlaforget.py).
+VISION_LAYER = re.compile(r"^backbone\.model\.vision_model\.vision_model\.encoder\.layers\.(\d+)\.")
+LLM_LAYER = re.compile(r"^backbone\.model\.language_model\.model\.layers\.(\d+)\.")
+
+
+def live_part(key: str, t: torch.Tensor, embodiment: int) -> torch.Tensor:
+    """The part of a parameter (or of a per-parameter tensor such as a gradient or Fisher) that can
+    change when training LIBERO: LIBERO's row of the per-embodiment projector stacks, else all of it."""
+    if _PER_EMBODIMENT.match(key) and t.ndim >= 2 and t.shape[0] == 32:
+        return t[embodiment]
+    return t
 
 
 class WeightReader:
@@ -99,22 +110,15 @@ class WeightReader:
     def reduce(self, key: str, t: torch.Tensor) -> torch.Tensor:
         """To float32 on the device; per-embodiment projector weights reduced to LIBERO's row. Also
         for other per-parameter files with the same layout (e.g. a Fisher file)."""
-        t = t.to(self.device, torch.float32)
-        if _PER_EMBODIMENT.match(key) and t.ndim >= 2 and t.shape[0] == 32:
-            t = t[self._embodiment]
-        return t
+        return live_part(key, t.to(self.device, torch.float32), self._embodiment)
 
 
 # --- Grouping ------------------------------------------------------------------------------------
 
-_LLM_LAYER = re.compile(r"^backbone\.model\.language_model\.model\.layers\.(\d+)\.")
 _DIT_BLOCK = re.compile(r"^action_head\.model\.transformer_blocks\.(\d+)\.")
 # GR00T N1.6's AlternateVLDiT (attend_text_every_n_blocks=2): blocks cycle cross-attention to the
 # text tokens, self-attention, cross-attention to the image tokens, self-attention.
 DIT_BLOCK_KIND = {0: "x-text", 1: "self", 2: "x-image", 3: "self"}
-
-
-_VISION_LAYER = re.compile(r"^backbone\.model\.vision_model\.vision_model\.encoder\.layers\.(\d+)\.")
 
 
 def module_of(key: str) -> str:
@@ -133,13 +137,13 @@ def module_of(key: str) -> str:
 
 
 def layer_of(key: str) -> str:
-    if m := _VISION_LAYER.match(key):
+    if m := VISION_LAYER.match(key):
         return f"vision.layer{int(m[1]):02d}"
     if key.startswith("backbone.model.mlp1."):
         return "vl_projector"
     if key.startswith("backbone.model.vision_model."):
         return "vision.other"
-    if m := _LLM_LAYER.match(key):
+    if m := LLM_LAYER.match(key):
         return f"vlm.layer{int(m[1]):02d}"
     if m := _DIT_BLOCK.match(key):
         i = int(m[1])

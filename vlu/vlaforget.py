@@ -46,7 +46,6 @@ from dataclasses import asdict
 import copy
 import json
 import math
-import re
 import time
 
 import numpy as np
@@ -56,6 +55,7 @@ from torch.utils.data import DataLoader
 from vlu import lora
 from vlu.config import Recipe
 from vlu.data import Frames, OpBatches, make_sample
+from vlu.drift.weights import LLM_LAYER, VISION_LAYER
 from vlu.model import add_frozen_overrides
 from vlu.ops import OpContext
 from vlu.train import jsonl_logger, probe_losses
@@ -66,19 +66,17 @@ STAGES = ("vision", "projector", "reasoning")
 
 # --- Where things are in GR00T N1.6 -------------------------------------------------------------
 
-_VISION_LAYER = re.compile(r"^backbone\.model\.vision_model\.vision_model\.encoder\.layers\.(\d+)\.")
-_LLM_LAYER = re.compile(r"^backbone\.model\.language_model\.model\.layers\.(\d+)\.")
 
 
 def candidates(model, trainable_names: set[str], vision_blocks: int) -> dict[str, list[str]]:
     """Linear layers each stage may select (names as in model.named_modules())."""
     linears = [n for n, m in model.named_modules() if isinstance(m, torch.nn.Linear)]
-    n_vision = 1 + max(int(m[1]) for n in linears if (m := _VISION_LAYER.match(n)))
-    trainable_llm = {int(m[1]) for n in trainable_names if (m := _LLM_LAYER.match(n))}
+    n_vision = 1 + max(int(m[1]) for n in linears if (m := VISION_LAYER.match(n)))
+    trainable_llm = {int(m[1]) for n in trainable_names if (m := LLM_LAYER.match(n))}
     out = {
-        "vision": [n for n in linears if (m := _VISION_LAYER.match(n)) and int(m[1]) >= n_vision - vision_blocks],
+        "vision": [n for n in linears if (m := VISION_LAYER.match(n)) and int(m[1]) >= n_vision - vision_blocks],
         "projector": [n for n in linears if n.startswith("backbone.model.mlp1.")],
-        "reasoning": [n for n in linears if ((m := _LLM_LAYER.match(n)) and int(m[1]) in trainable_llm)
+        "reasoning": [n for n in linears if ((m := LLM_LAYER.match(n)) and int(m[1]) in trainable_llm)
                       or n.startswith("action_head.model.")],
     }
     for stage, names in out.items():
@@ -242,7 +240,8 @@ def boundary_set(ctx: OpContext, ref, ref_taps, forget_task: str, retain_tasks: 
             feats.append(h.reshape(len(chunk), -1, h.shape[-1]).mean(dim=1))
         return torch.nn.functional.normalize(torch.cat(feats), dim=1)
 
-    f_feats, r_feats = pooled(forget_pool), pooled(retain_pool)
+    with torch.random.fork_rng(devices=[torch.cuda.current_device()]):  # leave the global RNG as it was
+        f_feats, r_feats = pooled(forget_pool), pooled(retain_pool)
     if was_training:
         ctx.processor.train()
     sims = f_feats @ r_feats.T
@@ -343,17 +342,20 @@ def run(ctx: OpContext, probes: dict, recipe: Recipe, forget_task: str, retain_t
 
     # Merge, and check that the merged model computes what the adapted model computed.
     before = probe_losses(model, probes)
-    changed = lora.merge(model, adapters)
+    retained = lora.merge(model, adapters)
     after = probe_losses(model, probes)
     for name, p in model.named_parameters():
         p.requires_grad_(flags[name])
-    overrides = sorted(set(changed) - trainable)
+    overrides = sorted(set(retained) - trainable)
     add_frozen_overrides(model, overrides)
     rel = {t: abs(after[t] - before[t]) / max(abs(before[t]), 1e-12) for t in before}
-    report["merge"] = {"changed_weights": changed, "frozen_overrides": overrides, "probe_before": before,
+    report["merge"] = {"retained_delta_fraction": retained, "frozen_overrides": overrides, "probe_before": before,
                        "probe_after": after, "max_relative_change": max(rel.values())}
-    if max(rel.values()) > 0.01:
-        print(f"WARNING: merging the adapters changed a probe loss by {max(rel.values()):.2%} (bf16 rounding?)", flush=True)
-    log({"step": done, "stage": "merged", "probe": after})
+    log({"step": done, "stage": "merged", "probe": after, "min_retained_delta": min(retained.values())})
     (node.dir / "vlaforget.json").write_text(json.dumps(report, indent=2, default=str) + "\n")
+    if max(rel.values()) > cfg.merge_tolerance:
+        # The merged model is not the model that was trained (e.g. bf16 weights lost the deltas): do not
+        # save it as this node. vlaforget.json shows how much of each delta survived.
+        raise RuntimeError(f"merging the adapters changed a probe loss by {max(rel.values()):.2%} "
+                           f"(> {cfg.merge_tolerance:.0%}); see {node.dir / 'vlaforget.json'}")
     return report
