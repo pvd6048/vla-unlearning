@@ -60,7 +60,7 @@ Every unlearning method gets the **same step budget per U op**. "Loss" here mean
    - Check that the action normalization statistics look sane.
 3. **Fine-tune.** Use the CL-paper recipe (lr 1e-4, batch 16, AdamW, cosine decay) for 10k steps with the default trainable scope.
    - Save checkpoints at 2k, 5k and 10k steps.
-   - Log the training loss and the flow-matching loss on a few held-out demos.
+   - Log the training loss and the flow-matching loss on fixed probe frames of every task (implemented: 32 frames per task taken from the training demos; no demos are held out, so all 50 are used for training).
 4. **Evaluate each checkpoint.** Run 50 rollouts per checkpoint from LIBERO's fixed initial states, with the standard step limit.
    - Record SR and wall-clock time.
    - Save ~5 rollout videos to inspect by eye.
@@ -115,10 +115,10 @@ These choices come from our reading of the 2025–26 literature; there is no sin
 | Cross-entropy on action tokens | GR00T's flow-matching loss |
 | Gradient ascent on the forget set | Gradient ascent on the flow-matching loss for the forget task |
 | KL to the base model (retain / mismatch terms) | Distance between current and base model's predicted velocity field on the same noisy inputs |
-| Stage 1: late vision-encoder layers | Late layers of N1.6's vision encoder |
-| Stage 2: projector | N1.6's VLM → action-head projection |
-| Stage 3: upper LLM blocks | Top 4 VLM layers + selected DiT blocks |
-| Gradient-score layer selection, LoRA, PCGrad | Kept as is |
+| Stage 1: late vision-encoder layers | Linear layers of the last 4 (of 27) SigLIP2 layers of N1.6's vision encoder; top 2 by the paper's ratio score |
+| Stage 2: projector (vision → LLM) | N1.6's vision → LLM projector (`mlp1`, 2 linear layers), the counterpart of OpenVLA's projector |
+| Stage 3: upper LLM blocks | Linear layers of the 4 trainable LLM layers and of the DiT (which generates GR00T's actions); top 3 by the paper's significance score |
+| Gradient-score layer selection, LoRA, PCGrad | Kept as in the authors' code (their PCGrad projects onto already-projected gradients); both models run without dropout so the KL terms compare like with like |
 
 ### Bridge check on OpenVLA
 
@@ -184,7 +184,7 @@ Everything is computed from one **success matrix** `c[i,k]`: the success rate (S
 
 ### D. Cheap offline metrics (no rollouts)
 
-- **Flow-matching loss** on held-out demos of forget and kept tasks. A rise on forget plus flat on kept is good. This is also our stand-in for VLA-Forget's FC metric.
+- **Flow-matching loss** on fixed probe frames of forget and kept tasks (from the training demos; none are held out). A rise on forget plus flat on kept is good. This is also our stand-in for VLA-Forget's FC metric.
 - **Action distance to the oracle** on forget-task states: how close the unlearned model's actions are to the never-trained model's.
 - Both are fast, so they're used to tune hyperparameters before spending rollouts.
 
@@ -239,7 +239,7 @@ As far as we found, **no work compares forgetting and unlearning drift directly,
 
 ## 4. Item 1 — Drift taxonomy
 
-Every drift is measured between two checkpoints θ, θ′ on a fixed **probe set**: held-out states from every task, including the forget task, plus base-model reference states. Each is reported **globally, per module (VLM-top / projector / DiT) and per layer.**
+Every drift is measured between two checkpoints θ, θ′ on a fixed **probe set**: the same 64 frames of every task for every checkpoint (from the training demos; none are held out), including the forget task, plus the base model as a reference checkpoint. Each is reported **globally, per module (VLM-top / projector / DiT) and per layer.**
 
 | Drift type | What changes | Magnitude metric | Direction / similarity metric |
 |---|---|---|---|

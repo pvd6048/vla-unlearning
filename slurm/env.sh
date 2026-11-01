@@ -33,9 +33,17 @@ export PYTHONPATH="$VLU_PROJECT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 # Jobs never download: everything is fetched once by setup_cluster.sh.
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 
-# MuJoCo rendering. MIG slices have no graphics API, so render with Mesa's software EGL.
+# GPU numbering: nvidia-smi / EGL order everywhere (CUDA's default puts the fastest GPU first).
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+
+# MuJoCo rendering (EGL). VLU_RENDER=mesa (default): Mesa's software EGL, needed on the cluster's MIG
+# slices, which have no graphics API. VLU_RENDER=gpu: the NVIDIA EGL driver of a full GPU
+# (scripts/run_local.sh picks it when a test render works).
 export MUJOCO_GL=egl PYOPENGL_PLATFORM=egl
+export VLU_RENDER="${VLU_RENDER:-mesa}"
 MESA_EGL=/usr/share/glvnd/egl_vendor.d/50_mesa.json
-[ -f "$MESA_EGL" ] && export __EGL_VENDOR_LIBRARY_FILENAMES="$MESA_EGL"
+if [ "$VLU_RENDER" = mesa ] && [ -f "$MESA_EGL" ]; then
+    export __EGL_VENDOR_LIBRARY_FILENAMES="$MESA_EGL"
+fi
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"   # simulator workers: one thread each

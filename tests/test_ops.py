@@ -35,6 +35,59 @@ def context(path: str, model) -> OpContext:
     return OpContext(node, model, demos, proc, mcfg, seed=0)
 
 
+# --- Recipe overrides in op tokens (hyperparameter variants as separate nodes) ---------------------------
+from vlu.nodes import Op
+from vlu.ops import recipe_for
+
+op = Op.parse("UB-npo@unlearn_lr=3e-5+npo_beta=1+vlaforget.lr=5e-5+replay_per_task=None")
+assert (op.kind, op.task, op.method) == ("U", "B", "npo") and str(op) == "UB-npo@unlearn_lr=3e-5+npo_beta=1+vlaforget.lr=5e-5+replay_per_task=None"
+r = recipe_for(op, RECIPE)
+assert (r.unlearn_lr, r.npo_beta, r.vlaforget.lr, r.replay_per_task) == (3e-5, 1.0, 5e-5, None)
+assert (r.unlearn_steps, r.vlaforget.lambda_forget) == (RECIPE.unlearn_steps, RECIPE.vlaforget.lambda_forget)  # rest unchanged
+assert recipe_for(Op.parse("UB-ga"), RECIPE) is RECIPE and Op.parse("UB-ga") == Op("U", "B", "ga")
+assert recipe_for(Op.parse("LA@learn_steps=5000"), RECIPE).learn_steps == 5000
+for bad in ["UB-ga@no_such_field=1", "UB-ga@unlearn_lr", "UB-ga@vlaforget.nope=1"]:
+    try:
+        Op.parse(bad)
+        raise AssertionError(bad)
+    except ValueError:
+        pass
+try:
+    recipe_for(Op.parse("UB-ga@unlearn_steps=2.5"), RECIPE)
+    raise AssertionError("a non-integer step count must be rejected")
+except ValueError:
+    pass
+plan = plan_op(Node.from_path("ops", "LA/LB/UB-ga@unlearn_lr=3e-5+unlearn_steps=200"), recipe)
+assert (plan.lr, plan.steps, plan.probe_every) == (3e-5, 200, recipe.unlearn_probe_every)
+print("overrides: parsed, printed back, typed, validated, applied to the op only")
+
+# --- ER (Liu et al.'s continual-GR00T): full batch of the new task + equally many replay-buffer frames --
+import vlu.data
+from vlu.data import ReplayBuffer
+
+er = dataclasses.replace(recipe, replay_per_task=10)
+plan = plan_op(Node.from_path("ops", "LA/LB/LC"), er)
+slots = plan.parts["train"]
+assert slots[:4] == [("C",)] * 4 and slots[4:] == [ReplayBuffer(("A", "B"), 10)] * 4, slots
+assert plan_op(Node.from_path("ops", "LA"), er).parts["train"] == [("A",)] * 4  # nothing to replay yet
+buffer = ReplayBuffer(("A", "B"), 10)
+frames = buffer.frames(demos, run_seed=0)
+assert len(frames) == 20 and {f[0] for f in frames} == {"A", "B"} and len(set(frames)) == 20
+assert buffer.frames(demos, run_seed=0) == frames and buffer.frames(demos, run_seed=1) != frames
+assert ReplayBuffer(("A", "B", "C"), 10).frames(demos, 0)[:20] == frames  # a task's buffer does not depend on the others
+drawn = []
+real_make_sample = vlu.data.make_sample
+vlu.data.make_sample = lambda processor, mcfg, demos_, episode, step, text=None: drawn.append((demos_.letter, episode, step)) or real_make_sample(processor, mcfg, demos_, episode, step)
+for op_seed in (5, 6):
+    data = OpBatches(demos, plan.parts, proc, mcfg, seed=op_seed, num_steps=20, run_seed=0)
+    assert data.buffers[buffer] == frames  # the same buffer in every op of the run
+    for t in range(20):
+        data[t]
+vlu.data.make_sample = real_make_sample
+replayed = [f for f in drawn if f[0] != "C"]
+assert len(replayed) == 2 * 20 * 4 and set(replayed) <= set(frames), "replay must come from the fixed buffer only"
+print("ER: 4 new + 4 replay per batch (16 + 16 in the recipe), fixed per-task buffers, replay drawn only from them")
+
 # --- NPO: theta == reference at step 0, in train mode (DiT dropout on) ------------------------------
 model = Fake().cuda().train()
 ctx = context("LA/LB/UB-npo", model)
@@ -64,6 +117,11 @@ ctx = context("LA/LB/UB-salun", model)
 plan = plan_op(ctx.node, recipe)
 plan.prepare(ctx)
 mask = plan.grad_mask
+assert plan.notes["batch_forget_retain"] == [2, 2], plan.notes  # forget B: 40 frames, retain A: 40 -> 4 * 40/80 = 2
+assert len(plan.parts["forget"]) == 2 and len(plan.parts["retain"]) == 2
+p3 = plan_op(Node.from_path("ops", "LA/LB/LC/UB-salun"), recipe)  # retain A + C: 80 frames -> 4 * 40/120 = 1.3 -> 1
+p3.prepare(context("LA/LB/LC/UB-salun", Fake().cuda()))
+assert p3.notes["batch_forget_retain"] == [1, 3], p3.notes
 assert all(m.dtype == torch.bool for m in mask.values())
 assert not mask[STATE][dead].any(), "rows that never get a gradient must not be selected"
 assert 0.4 < plan.notes["kept_fraction"] < 0.6, plan.notes

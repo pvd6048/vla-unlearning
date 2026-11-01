@@ -58,9 +58,10 @@ class Recipe:
     weight_decay: float = 1e-5
     warmup_ratio: float = 0.05  # NVIDIA finetune.sh default
     max_grad_norm: float = 1.0  # NVIDIA TrainingConfig default
-    # ER: this fraction of every L-op batch is drawn from the retained earlier tasks
-    # (task chosen uniformly, then a uniform frame of that task). 0.5 = the 1:1 mix.
-    replay_fraction: float = 0.5
+    # ER as in Liu et al.'s continual-GR00T: each L-op batch = batch_size frames of the new task +
+    # batch_size frames from a fixed replay buffer of replay_per_task random frames per retained task
+    # (their n_memories = 1000; None = all frames).
+    replay_per_task: int | None = 1_000
 
     # --- Unlearning (U ops) -----------------------------------------------------------------------
     # PROVISIONAL: same step budget for every method; values still to be agreed (see README).
@@ -68,7 +69,7 @@ class Recipe:
     unlearn_lr: float = 1e-5
     # Method hyperparameters, PROVISIONAL (each paper's default, mapped to the flow-matching loss):
     npo_beta: float = 0.1  # NPO paper default; log-likelihood stand-in = -sum of squared FM errors of a chunk
-    ssd_alpha: float = 10.0  # SSD paper defaults: dampen weights with I_forget > alpha * I_all ...
+    ssd_alpha: float = 5.0  # SSD official code: 10 for ResNet, 5 for ViT (transformers); dampen weights with I_forget > alpha * I_all ...
     ssd_lambda: float = 1.0  # ... by the factor min(lambda * I_all / I_forget, 1)
     salun_keep: float = 0.5  # SalUn paper default: update the 50% most salient weights
     importance_batches: int = 64  # batches for SSD's Fisher importances and SalUn's saliency
@@ -78,7 +79,8 @@ class Recipe:
     num_workers: int = 8  # DataLoader processes building batches
     log_every: int = 50
     save_every: int = 1_000  # resumable checkpoint (weights + optimizer)
-    probe_every: int = 500  # flow-matching loss on a fixed batch of every task
+    probe_every: int = 500  # flow-matching loss on a fixed batch of every task (L ops)
+    unlearn_probe_every: int = 50  # the same for U ops, which are short
     probe_size: int = 32
 
     # --- Evaluation (LIBERO) ----------------------------------------------------------------------

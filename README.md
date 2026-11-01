@@ -40,8 +40,10 @@ scripts/             setup_cluster.sh, prepare_data.py, submit.py (plan + worker
   A node is done when its `weights.safetensors` exists. Weights hold only the trainable
   parameters (fp32); the frozen rest is always the base checkpoint.
 - **Run**: one seed of everything (`goal_s0`, `goal_s1`, ...). The seed is fixed in `runs/<run>/run.json`.
-- **Replay / retain set** of a node = tasks learned and not unlearned since. L ops replay them (ER,
-  half of every batch); U ops use them as the retain set. Unlearned tasks are never replayed.
+- **Replay / retain set** of a node = tasks learned and not unlearned since. L ops replay them with
+  ER as in Liu et al.'s continual-GR00T: each batch is 16 frames of the new task plus 16 frames from a
+  fixed buffer of 1000 random frames per retained task. U ops use the retained tasks (all their demos)
+  as the retain set. Unlearned tasks are never replayed.
 - **Frozen overrides**: an op may change weights that are frozen during learning (VLA-Forget edits the
   vision tower and the vision-language projector). The node's weights file then also stores those
   weights (listed in the file's metadata), every descendant node carries them forward, and loading
@@ -96,6 +98,15 @@ Known risks (the smoke test shows which ones bite):
   needs a C compiler and kernel headers on the login node.
 
 Slurm resources for training and eval jobs are in `RESOURCES` at the top of `scripts/submit.py`.
+
+## Calibration on another machine (no Slurm)
+
+`CALIBRATION.md` is the one-page instruction for someone running our hyperparameter calibration on
+their own GPU machine: `scripts/setup_cluster.sh`, then `scripts/run_local.sh`, which runs the base
+tests, the calibration plan (`scripts/calibrate.py`: LA with 2k/5k/10k snapshots, LA/LB, 19 unlearning
+variants of B) with one local worker per GPU, and packs `summary.md` plus all logs into one `.tar.gz`
+(`scripts/calibration_report.py`). Hyperparameter variants are ordinary nodes with recipe overrides in
+their op token, e.g. `LA/LB/UB-ga@unlearn_lr=3e-5` (`vlu/nodes.py`, `vlu.ops.recipe_for`).
 
 ## Day 1: smoke test
 
@@ -154,7 +165,8 @@ python scripts/metrics.py --stream S1 --methods purge,ga,graddiff,npo,ssd,salun,
 This plans the shared prefix once, every method's tail, the oracles (`LA/LC`, `LA/LC/LD`), and an
 eval after every op on every task seen so far. `results.py` prints the raw success rates.
 `metrics.py` turns them into the PLAN's metrics per method, averaged over runs (`--runs goal_s0,goal_s1`).
-NaN means an eval it needs is missing.
+NaN means an eval it needs is missing, or the metric is undefined for the stream (e.g. relapse when
+no op follows an unlearning). `results.py --ci` adds 95% Wilson intervals to the raw success rates.
 
 ## Drift metrics
 
@@ -210,4 +222,4 @@ How the methods map onto GR00T's flow-matching loss (PROVISIONAL values in `vlu/
 - A–E task mapping (`vlu/tasks.py`): currently LIBERO-Goal tasks 0–4.
 - Unlearning budget and lr (`vlu/config.py`): 1000 steps at 1e-5 for every method.
 - GA stopping rule / loss ceiling; NPO's β (depends on the scale of L_FM, see the probe losses); SSD's α, λ.
-- ER: total batch 16 (8 new + 8 replay), replay from all demos of retained tasks.
+- U ops draw retain data from all demos of the retained tasks, not from the 1000-frame replay buffer.

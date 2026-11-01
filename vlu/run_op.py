@@ -19,7 +19,7 @@ from vlu.config import PROJECT_DIR, RECIPE
 from vlu.data import OpBatches, fixed_batch, load_demos
 from vlu.model import build_processor, describe, gr00t_config, load_model, modality_configs, save_weights
 from vlu.nodes import Node, run_seed
-from vlu.ops import ZERO_STEP_METHODS, OpContext, plan_op
+from vlu.ops import ZERO_STEP_METHODS, OpContext, plan_op, recipe_for
 from vlu.train import train
 
 
@@ -61,7 +61,8 @@ def main():
         print(f"{node}: {op.method} trains nothing; copied the parent's weights")
         return
 
-    plan = plan_op(node, RECIPE)
+    recipe = recipe_for(op, RECIPE)  # the frozen recipe plus this op's overrides (if any)
+    plan = plan_op(node, recipe)
     if args.steps is not None and plan.steps > 0:  # zero-step methods (SSD) stay zero-step
         plan.steps = args.steps
     save_at = {int(s) for s in args.save_at.split(",") if s}
@@ -80,7 +81,7 @@ def main():
     model = load_model(config, node.parent.weights_file())
     mcfg = modality_configs(config)
     demos = load_demos(mcfg)
-    probes = {t: fixed_batch(d, RECIPE.probe_size, processor, mcfg) for t, d in demos.items()}
+    probes = {t: fixed_batch(d, recipe.probe_size, processor, mcfg) for t, d in demos.items()}
     if plan.prepare is not None:  # method-specific setup on the parent model (see vlu/ops.py)
         plan.prepare(OpContext(node, model, demos, processor, mcfg, seed))
 
@@ -92,9 +93,10 @@ def main():
             "run_seed": seed,
             "steps": plan.steps,
             "lr": plan.lr,
-            "parts": {name: [list(s) for s in slots] for name, slots in plan.parts.items()},
+            "parts": {name: [list(s) if isinstance(s, tuple) else str(s) for s in slots] for name, slots in plan.parts.items()},
             "notes": plan.notes,
-            "recipe": asdict(RECIPE),
+            "recipe": asdict(recipe),
+            "overrides": dict(op.overrides),
             "model": describe(model),
             "git": git_commit(),
             "slurm_job": os.environ.get("SLURM_JOB_ID"),
@@ -106,8 +108,9 @@ def main():
         plan.custom_train(OpContext(node, model, demos, processor, mcfg, seed), probes)
         save_weights(model, node.weights_path)
     else:
-        batches = OpBatches(demos, plan.parts, processor, mcfg, seed=seed * 1000 + node.depth, num_steps=plan.steps)
-        train(node, model, plan, batches, probes, RECIPE, save_at)
+        batches = OpBatches(demos, plan.parts, processor, mcfg, seed=seed * 1000 + node.depth, num_steps=plan.steps,
+                            run_seed=seed)
+        train(node, model, plan, batches, probes, recipe, save_at)
     print(f"{node} done: {node.weights_path}")
 
 

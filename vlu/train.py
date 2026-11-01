@@ -119,7 +119,7 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
             record.update({k: v / window_steps for k, v in window_metrics.items()})
             record["steps_per_s"] = window_steps / elapsed
             record["peak_mem_gb"] = torch.cuda.max_memory_allocated() / 2**30
-            if done % recipe.probe_every == 0 or done == plan.steps:
+            if done % (plan.probe_every or recipe.probe_every) == 0 or done == plan.steps:
                 record["probe"] = probe_losses(model, probes)
             log(record)
             window_start, window_steps, window_metrics = time.time(), 0, {}

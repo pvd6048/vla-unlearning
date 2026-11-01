@@ -31,7 +31,8 @@ from vlu.config import PROJECT_DIR, RUNS_DIR
 from vlu.drift.paths import features_path, fisher_path
 from vlu.nodes import Node
 
-JOB = os.environ.get("SLURM_JOB_ID", f"local{os.getpid()}")
+# Who holds a claim: the Slurm job, or (without Slurm) this process on this host.
+JOB = os.environ.get("SLURM_JOB_ID") or f"local{os.getpid()}@{socket.gethostname()}"
 
 
 def item_key(item: dict) -> str:
@@ -104,10 +105,34 @@ def status(run: str, item: dict) -> str:
 
 
 def _job_alive(job: str) -> bool:
-    out = subprocess.run(["squeue", "-h", "-j", job, "-o", "%T"], capture_output=True, text=True)
+    if job.startswith("local"):  # a worker without Slurm: a process on some host
+        pid, _, host = job[len("local"):].partition("@")
+        if host != socket.gethostname():
+            return True  # cannot check another machine's processes: assume alive, to be safe
+        try:
+            os.kill(int(pid), 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+    try:
+        out = subprocess.run(["squeue", "-h", "-j", job, "-o", "%T"], capture_output=True, text=True)
+    except FileNotFoundError:
+        return True  # no Slurm here: assume alive, to be safe
     if out.returncode == 0:
         return bool(out.stdout.strip())
     return "Invalid job id" not in out.stderr  # squeue itself failed: assume alive, to be safe
+
+
+def someone_working(run: str) -> bool:
+    """Whether any claim of the run belongs to a live worker (or is being created right now)."""
+    claims = RUNS_DIR / run / "_claims"
+    for claim in claims.iterdir() if claims.exists() else []:
+        owner = claim / "owner.json"
+        if not owner.exists() or _job_alive(json.loads(owner.read_text())["job"]):
+            return True
+    return False
 
 
 def try_claim(claim: Path) -> bool:
@@ -174,9 +199,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", required=True)
     parser.add_argument("--kinds", default="train,eval,features", help="item kinds this worker may run")
+    parser.add_argument("--wait", action="store_true",
+                        help="when nothing is ready, wait while other workers are busy (several workers on one machine)")
     args = parser.parse_args()
     kinds = set(args.kinds.split(","))
 
+    idle_checks = 0
     while True:
         pending = [i for i in load_plan(args.run) if i["kind"] in kinds and status(args.run, i) in ("ready", "waiting", "claimed")]
         if not pending:
@@ -184,9 +212,16 @@ def main():
             return
         item = next((i for i in pending if is_ready(args.run, i) and try_claim(claim_dir(args.run, i))), None)
         if item is None:
-            print(f"{len(pending)} item(s) left, but none is ready and free (they wait for other workers, "
-                  f"or for a failed item); exiting", flush=True)
-            return
+            # Three idle checks a minute apart, so a worker between two items (or still starting) does
+            # not look idle.
+            idle_checks = 0 if args.wait and someone_working(args.run) else idle_checks + 1
+            if not args.wait or idle_checks >= 3:
+                print(f"{len(pending)} item(s) left, but none is ready and free (they wait for other workers, "
+                      f"or for a failed item); exiting", flush=True)
+                return
+            time.sleep(60)
+            continue
+        idle_checks = 0
         run_item(args.run, item)
 
 
