@@ -1,8 +1,9 @@
 """Reading the trainable weights of any checkpoint tensor by tensor, and grouping them by module/layer.
 
-A checkpoint reference is written  [run:]path[@weights]
+A checkpoint reference is written  [run:]path[#weights]
     LA/LB/LC                 node of the default run, final weights
-    goal_s1:LA/LB@step_002000  node of another run, a snapshot
+    goal_s1:LA/LB#step_002000  node of another run, a snapshot
+    LA/LB/UB-ga@unlearn_lr=3e-5  a hyperparameter variant ("@" belongs to the op token, vlu/nodes.py)
     base  (or an empty path) the base GR00T-N1.6-3B checkpoint
 A node file holds only the trainable parameters; for the base model they are read from the HF
 checkpoint shards under the same names, so no model has to be built.
@@ -20,6 +21,9 @@ from vlu.config import BASE_MODEL, EMBODIMENT
 from vlu.nodes import Node
 
 
+_RUN_NAME = re.compile(r"[A-Za-z0-9_.\-]+")  # run directory names: no "/", "@", "=", "#"
+
+
 @dataclass(frozen=True)
 class Ref:
     run: str
@@ -28,13 +32,16 @@ class Ref:
 
     @classmethod
     def parse(cls, text: str, default_run: str) -> "Ref":
-        run, _, rest = text.rpartition(":")
-        path, _, weights = rest.partition("@")
+        rest, _, weights = text.partition("#")
+        run, colon, path = rest.partition(":")
+        if not colon or not _RUN_NAME.fullmatch(run):  # no run prefix (a ":" may sit in an override value)
+            run, path = "", rest
         path = "" if path in ("", "base") else path
+        Node.from_path(run or default_run, path)  # validates the op tokens
         return cls(run or default_run, path, weights or "final")
 
     def __str__(self) -> str:
-        return f"{self.run}:{self.path or 'base'}" + (f"@{self.weights}" if self.weights != "final" else "")
+        return f"{self.run}:{self.path or 'base'}" + (f"#{self.weights}" if self.weights != "final" else "")
 
     @property
     def node(self) -> Node:

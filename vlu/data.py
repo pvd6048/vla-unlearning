@@ -1,17 +1,19 @@
 """Training batches: LIBERO-Goal demos grouped by task, and the batch stream of one op.
 
 All demos of the tasks A–E are decoded into RAM once when a job starts (roughly 2 GB per task).
-A batch is described by a list of "slots", one per sample; each slot lists the tasks that sample
-may be drawn from. For example an L_D op with A and C retained uses
+A batch is described by a list of "slots", one per sample. A slot is either a tuple of tasks the
+sample may come from (task chosen uniformly, then a uniform frame of it) or a ReplayBuffer (a
+uniform frame of a fixed replay buffer). For example an L_D op with A and C retained uses
 
-    {"train": [("D",)] * 8 + [("A", "C")] * 8}
+    {"train": [("D",)] * 16 + [ReplayBuffer(("A", "C"), 1000)] * 16}
 
-i.e. 8 frames of D plus 8 replay frames (task chosen uniformly, then a uniform frame of it).
+i.e. 16 frames of D plus 16 frames from the replay buffer of A and C (Liu et al. 2026's ER).
 Batch number t of an op depends only on (seed, t), so a resumed job sees the same batches it
 would have seen without the interruption.
 """
 
 import dataclasses
+from dataclasses import dataclass
 
 import av
 import numpy as np
@@ -25,7 +27,26 @@ from gr00t.data.types import EmbodimentTag, MessageType
 from vlu.config import EMBODIMENT, GOAL_DATASET, VIDEO_BACKEND
 from vlu.tasks import TASKS, instruction
 
-Slots = list[tuple[str, ...]]
+Slots = list  # of tuple[str, ...] (tasks) or ReplayBuffer
+
+
+@dataclass(frozen=True)
+class ReplayBuffer:
+    """A slot drawing one frame from the replay buffer of `tasks`: per task, `per_task` frames chosen
+    once from (run seed, task) and reused by every op of the run (as Liu et al.'s continual-GR00T:
+    n_memories random transitions per previous task, fixed). per_task=None: all frames."""
+
+    tasks: tuple[str, ...]
+    per_task: int | None
+
+    def frames(self, demos: dict, run_seed: int) -> list[tuple[str, int, int]]:
+        out = []
+        for letter in self.tasks:
+            index = demos[letter].index
+            n = len(index) if self.per_task is None else min(self.per_task, len(index))
+            rng = np.random.default_rng([run_seed, ord(letter)])
+            out += [(letter, *index[i]) for i in sorted(rng.choice(len(index), n, replace=False))]
+        return out
 
 
 class Frames(list):
@@ -97,9 +118,16 @@ class OpBatches(Dataset):
     """Item t is batch number t of the op: {part name: model inputs}. Used with a DataLoader with
     batch_size=None, so worker processes build (and augment) whole batches in parallel."""
 
-    def __init__(self, demos, parts: dict[str, Slots], processor, modality_configs, seed: int, num_steps: int):
+    def __init__(self, demos, parts: dict[str, Slots], processor, modality_configs, seed: int, num_steps: int,
+                 run_seed: int | None = None):
+        """seed: of this op's batches; run_seed: of the run, fixes the replay buffers (needed if a part uses one)."""
         self.demos, self.parts, self.processor = demos, parts, processor
         self.modality_configs, self.seed, self.num_steps = modality_configs, seed, num_steps
+        buffers = {slot for slots in parts.values() if not isinstance(slots, Frames) for slot in slots
+                   if isinstance(slot, ReplayBuffer)}
+        if buffers and run_seed is None:
+            raise ValueError("a replay buffer needs the run seed")
+        self.buffers = {b: b.frames(demos, run_seed) for b in buffers}
 
     def __len__(self) -> int:
         return self.num_steps
@@ -112,8 +140,12 @@ class OpBatches(Dataset):
                 picks = [slots[i] for i in rng.integers(len(slots), size=slots.per_batch)]
             else:
                 picks = []
-                for tasks in slots:
-                    letter = tasks[rng.integers(len(tasks))]
+                for slot in slots:
+                    if isinstance(slot, ReplayBuffer):
+                        frames = self.buffers[slot]
+                        picks.append(frames[rng.integers(len(frames))])
+                        continue
+                    letter = slot[rng.integers(len(slot))]
                     episode, t = self.demos[letter].index[rng.integers(len(self.demos[letter].index))]
                     picks.append((letter, episode, t))
             samples = [make_sample(self.processor, self.modality_configs, self.demos[letter], episode, t)

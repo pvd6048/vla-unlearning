@@ -5,7 +5,7 @@
         --fisher "FB=LA/LB/LC:B" --subspace-k 8 --out params_UB.csv
 
 A drift "name=X..Y" is theta_Y - theta_X over the trainable parameters, with X and Y checkpoint
-references ([run:]path[@weights], see vlu/drift/weights.py). Noise floors are just more drifts, e.g.
+references ([run:]path[#weights], see vlu/drift/weights.py). Noise floors are just more drifts, e.g.
 the same op in a seed-twin run ("goal_s1:LA/LB/LC..goal_s1:LA/LB/LC/UB-ga"). --random adds a Gaussian
 direction as the "unrelated" baseline. --fisher NAME=REF:TASK uses the diagonal Fisher saved by
 vlu.drift.extract (ref's <node>/drift/fisher_<task>.safetensors) as a metric.

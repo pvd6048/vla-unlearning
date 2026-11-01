@@ -33,4 +33,5 @@ def instruction(letter: str) -> str:
 # stream is expanded for one unlearning method, e.g. "UB" -> "UB-ga".
 STREAMS = {
     "S1": ["LA", "LB", "LC", "UB", "LD", "LE", "UE"],
+    "CAL": ["LA", "LB", "UB"],  # hyperparameter calibration (scripts/calibrate.py)
 }

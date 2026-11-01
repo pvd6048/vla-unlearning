@@ -3,6 +3,8 @@
 An op is a token:
     L<task>            learn a task, e.g. "LB"
     U<task>-<method>   unlearn a task with a method, e.g. "UB-ga"
+optionally followed by recipe overrides for that op, e.g. "UB-ga@unlearn_lr=3e-5+unlearn_steps=500"
+(hyperparameter variants: separate nodes sharing their parent).
 
 A node is the model obtained by applying a sequence of ops to the base GR00T checkpoint. It lives at
 RUNS_DIR/<run>/<op1>/<op2>/..., so shared prefixes are trained once and branches sit side by side:
@@ -20,12 +22,14 @@ Files inside a node directory:
     eval/<weights>_seed<k>/<task>.json   LIBERO rollout results
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 import json
 from pathlib import Path
 
-from vlu.config import RUNS_DIR
+from vlu.config import RUNS_DIR, Recipe, VLAForgetConfig
 from vlu.tasks import TASKS
+
+_RECIPE_KEYS = {f.name for f in fields(Recipe)} | {f"vlaforget.{f.name}" for f in fields(VLAForgetConfig)}
 
 
 @dataclass(frozen=True)
@@ -33,10 +37,16 @@ class Op:
     kind: str  # "L" or "U"
     task: str  # task letter
     method: str | None = None  # unlearning method, only for U ops
+    # Recipe overrides for this op only, e.g. (("unlearn_lr", "3e-5"),): hyperparameter variants are
+    # separate nodes that share their parent (used for calibration sweeps). Applied by
+    # vlu.ops.recipe_for; keys are Recipe fields or "vlaforget.<field>".
+    overrides: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def parse(cls, token: str) -> "Op":
-        kind, rest = token[0], token[1:]
+        """L<task>, U<task>-<method>, each optionally followed by @key=value[+key=value...]."""
+        head, _, extra = token.partition("@")
+        kind, rest = head[0], head[1:]
         task, _, method = rest.partition("-")
         if kind not in ("L", "U") or task not in TASKS:
             raise ValueError(f"Bad op {token!r}: expected L<task> or U<task>-<method>, tasks {list(TASKS)}")
@@ -44,10 +54,17 @@ class Op:
             raise ValueError(f"U op {token!r} needs a method, e.g. U{task}-ga")
         if kind == "L" and method:
             raise ValueError(f"L op {token!r} takes no method")
-        return cls(kind, task, method or None)
+        overrides = []
+        for item in filter(None, extra.split("+")):
+            key, eq, value = item.partition("=")
+            if not eq or not value or key not in _RECIPE_KEYS:
+                raise ValueError(f"Bad override {item!r} in {token!r}: expected <recipe field>=<value>")
+            overrides.append((key, value))
+        return cls(kind, task, method or None, tuple(overrides))
 
     def __str__(self) -> str:
-        return f"{self.kind}{self.task}" + (f"-{self.method}" if self.method else "")
+        base = f"{self.kind}{self.task}" + (f"-{self.method}" if self.method else "")
+        return base + ("@" + "+".join(f"{k}={v}" for k, v in self.overrides) if self.overrides else "")
 
 
 @dataclass(frozen=True)

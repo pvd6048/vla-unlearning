@@ -60,7 +60,7 @@ Every unlearning method gets the **same step budget per U op**. "Loss" here mean
    - Check that the action normalization statistics look sane.
 3. **Fine-tune.** Use the CL-paper recipe (lr 1e-4, batch 16, AdamW, cosine decay) for 10k steps with the default trainable scope.
    - Save checkpoints at 2k, 5k and 10k steps.
-   - Log the training loss and the flow-matching loss on a few held-out demos.
+   - Log the training loss and the flow-matching loss on fixed probe frames of every task (implemented: 32 frames per task taken from the training demos; no demos are held out, so all 50 are used for training).
 4. **Evaluate each checkpoint.** Run 50 rollouts per checkpoint from LIBERO's fixed initial states, with the standard step limit.
    - Record SR and wall-clock time.
    - Save ~5 rollout videos to inspect by eye.
@@ -86,13 +86,118 @@ Every unlearning method gets the **same step budget per U op**. "Loss" here mean
 - Training steps/sec and rollouts/hour, to finalize the week-1 compute budget.
 - A frozen config file for all later runs.
 
-**Deliverable:** for each method, SR on A–E after each op, plus four summary numbers:
+**Deliverable:** for each method, SR on A–E after each op, plus the metrics in "Evaluation metrics" below (NBT, oracle gap, collateral, relapse, unlearning score). The headline numbers are:
 - **Forget SR:** on B and E, compared with the oracle
 - **Retain SR:** on the tasks that should still be known
 - **Relapse:** does B come back after `L_D L_E`?
 - **Cost:** GPU-minutes per unlearn op
 
 **If compute is short:** cut to 5k steps per task (after checking that SR has saturated) and 20 rollouts for intermediate evals.
+
+## Weeks 2–3: add state-of-the-art unlearning methods
+
+The week-1 methods (GA, Gradient Difference, NPO, SSD, SalUn) are **standard baselines**, not state of the art. For ICML we add the following, run on the same stream, tasks, step budget and metrics as week 1.
+
+| Method | Why it's included | Porting work |
+|---|---|---|
+| **VLA-Forget** (2026) | The only dedicated VLA unlearning method we found | **Done:** ported in `vlu/vlaforget.py` (staged LoRA, PCGrad, velocity-KL) |
+| **LACU** (ECCV 2026) | State of the art for *continual* unlearning in diffusion models, and GR00T's action head is diffusion-family | Medium: replace "nearest concept" with "nearest kept task" in GR00T feature space |
+| **RMU-style representation unlearning** | Strong recent method family, and listed in the team doc. Pushes forget-task features toward a random vector while keeping retain features unchanged. | Low |
+| **Task-vector negation** | Needed anyway for the core forgetting-vs-unlearning question (§5) | Low: subtract task B's fine-tuning delta |
+| *Optional:* SimNPO, FIT, AKLN | Improved NPO; methods built for repeated unlearning requests | Add if time allows |
+
+These choices come from our reading of the 2025–26 literature; there is no single shared leaderboard, and rankings vary by benchmark.
+
+### Porting VLA-Forget to GR00T
+
+| VLA-Forget on OpenVLA | Our version on GR00T |
+|---|---|
+| Cross-entropy on action tokens | GR00T's flow-matching loss |
+| Gradient ascent on the forget set | Gradient ascent on the flow-matching loss for the forget task |
+| KL to the base model (retain / mismatch terms) | Distance between current and base model's predicted velocity field on the same noisy inputs |
+| Stage 1: late vision-encoder layers | Linear layers of the last 4 (of 27) SigLIP2 layers of N1.6's vision encoder; top 2 by the paper's ratio score |
+| Stage 2: projector (vision → LLM) | N1.6's vision → LLM projector (`mlp1`, 2 linear layers), the counterpart of OpenVLA's projector |
+| Stage 3: upper LLM blocks | Linear layers of the 4 trainable LLM layers and of the DiT (which generates GR00T's actions); top 3 by the paper's significance score |
+| Gradient-score layer selection, LoRA, PCGrad | Kept as in the authors' code (their PCGrad projects onto already-projected gradients); both models run without dropout so the KL terms compare like with like |
+
+### Bridge check on OpenVLA
+
+This guards against the reviewer question "did your port break their method?".
+
+1. Run the authors' code ([github.com/raviranjan-ai/VLA-Forget](https://github.com/raviranjan-ai/VLA-Forget)) on a public OpenVLA-7B checkpoint fine-tuned on LIBERO-Goal. Do a single unlearning step on task B and check the results look reasonable.
+2. Run the week-1 stream on OpenVLA with VLA-Forget and GA.
+3. If VLA-Forget beats GA on OpenVLA in our setup and the GR00T port behaves similarly, the port is credible.
+
+OpenVLA-7B with LoRA fits on the 96 GB GPU. VLA-Forget's FC/FAD metrics are defined on token cross-entropy, so the headline comparison uses success-rate metrics shared by both models. For GR00T, the rise in flow-matching loss on the forget set stands in for FC.
+
+### Schedule
+
+| Week | Work |
+|---|---|
+| 2 | Short N1.5 sanity run (reproduce Liu et al.). Implement task-vector negation and RMU-style. Start the VLA-Forget port. |
+| 3 | Finish the VLA-Forget port + OpenVLA bridge check. Implement LACU. Run all new methods on the week-1 stream. |
+
+**Deliverable:** the week-1 results table extended with the state-of-the-art rows.
+
+## Evaluation metrics (used from week 1 onward)
+
+Everything is computed from one **success matrix** `c[i,k]`: the success rate (SR) on task *i* after op *k*. After every op we evaluate every task seen so far, including unlearned ones, so this costs no extra training.
+
+**Code:** `vlu/stream_metrics.py`, with hand-checked tests in `tests/test_stream_metrics.py`. Print the table with `python scripts/metrics.py --stream S1 --methods purge,ga,graddiff --runs goal_s0,goal_s1`. Implementation details:
+- Purge nodes are not evaluated, so they take their parent's success rates.
+- The oracle gap is measured at every U op, against that op's retrain oracle (the node `scripts/submit.py` already trains and evaluates), over all tasks unlearned so far.
+- A task that is relearned later (S5) counts as kept again: relapse stops at the relearning op.
+- Plasticity, recovery ratio and robustness are not computed yet; they need extra runs.
+
+**Notation:**
+- `K_k`: the tasks that *should* be known after op *k* (learned and not unlearned).
+- `F_k`: the tasks unlearned by op *k*.
+- `k_X`: the op where task X was learned; `u_X`: the op where it was unlearned.
+- `N`: the final op.
+
+### A. Continual-learning metrics (is the kept knowledge safe?)
+
+| Metric | Definition | Good |
+|---|---|---|
+| **Final retain SR** (ACC) | Mean of `c[i,N]` over `i ∈ K_N` | High |
+| **NBT** (negative backward transfer, Liu et al.) | For each kept task i: mean over later ops k of `c[i,k_i] − c[i,k]`, then averaged over tasks. Positive = forgetting, negative = it improved. | ≈ 0 |
+| **NBT split by cause** | NBT from L ops (ordinary CL forgetting) vs. NBT from U ops (**collateral damage** from unlearning) | Both ≈ 0 |
+| **Max forgetting** | Largest single drop `max_k (c[i,k_i] − c[i,k])` for a kept task | Low |
+| **Retain AUC** | Mean retain SR averaged over every op in the stream, i.e. how good the model was *throughout*, not just at the end | High |
+| **Plasticity** (forward transfer) | SR on a new task right after learning it, minus SR of a model trained on that task alone | ≈ 0 or positive |
+
+### B. Unlearning metrics (is the removed task really gone?)
+
+| Metric | Definition | Good |
+|---|---|---|
+| **Forget SR** | `c[X,u_X]`, measured right after unlearning X | Low |
+| **Oracle gap** | `|c[X,k] − c_oracle[X,k]|`, where the oracle is a model never trained on X. The true unlearning target, since the oracle may still succeed somewhat by generalization. | ≈ 0 |
+| **Unlearning collateral** | Mean drop on kept tasks caused by the U op itself: `c[i,u_X−1] − c[i,u_X]` for i ∈ K | ≈ 0 |
+| **Relapse / forgetting rebound** (UnCLe, ICU-Bench) | `max_{k>u_X} c[X,k] − c[X,u_X]`: does X come back as new tasks are learned? | ≈ 0 |
+| **Retain stability rate** (ICU-Bench) | Average size of change in retain SR from one op to the next | Low |
+| **Forward failure** (Plasticity Collapse) | Unlearning quality (oracle gap) plotted against how many U ops came before | Flat |
+| **Recovery ratio** (relearning attack) | Steps to regain peak SR on X when fine-tuning the unlearned model, divided by the steps needed from the oracle. Near 1 = truly erased; ≪ 1 = only hidden. | ≈ 1 |
+
+### C. One-number summary
+
+**Unlearning score** = harmonic mean of `(1 − oracle gap)` and `final retain SR`. The harmonic mean punishes a method that does well on only one side, e.g. erasing everything including the kept tasks.
+
+### D. Cheap offline metrics (no rollouts)
+
+- **Flow-matching loss** on fixed probe frames of forget and kept tasks (from the training demos; none are held out). A rise on forget plus flat on kept is good. This is also our stand-in for VLA-Forget's FC metric.
+- **Action distance to the oracle** on forget-task states: how close the unlearned model's actions are to the never-trained model's.
+- Both are fast, so they're used to tune hyperparameters before spending rollouts.
+
+### E. Robustness (from week 3)
+
+- **Quantization:** forget SR after 8-bit and 4-bit quantization. Unlearning that is only skin-deep often comes back here.
+- **Relearning attack:** the recovery ratio above, with 100 / 500 / 1000 fine-tuning steps.
+
+### F. Reporting rules
+
+- Every SR comes with a 95% confidence interval: Wilson interval over the 50 rollouts per eval, and bootstrap over seeds once we have more than one seed.
+- At 50 rollouts the SR standard error is up to ~7 points, so smaller differences are not claimed as real.
+- Cost (GPU-minutes per U op) is reported next to every method.
 
 ## 1. Research agenda
 
@@ -134,7 +239,7 @@ As far as we found, **no work compares forgetting and unlearning drift directly,
 
 ## 4. Item 1 — Drift taxonomy
 
-Every drift is measured between two checkpoints θ, θ′ on a fixed **probe set**: held-out states from every task, including the forget task, plus base-model reference states. Each is reported **globally, per module (VLM-top / projector / DiT) and per layer.**
+Every drift is measured between two checkpoints θ, θ′ on a fixed **probe set**: the same 64 frames of every task for every checkpoint (from the training demos; none are held out), including the forget task, plus the base model as a reference checkpoint. Each is reported **globally, per module (VLM-top / projector / DiT) and per layer.**
 
 | Drift type | What changes | Magnitude metric | Direction / similarity metric |
 |---|---|---|---|
@@ -245,18 +350,7 @@ The same infrastructure, packaged as **L/U op streams over LIBERO**.
 | S6 | `L_A L_B U_B L_B'` with B' similar to B | Boundary relapse |
 | S7 | Random streams of length 15–20 on LIBERO-10 | Scale |
 
-**Metrics** come from the success matrix `c[i,k]`, built by evaluating every seen task, including unlearned ones, after every op:
-
-- Retain SR, forget SR, and Δ-to-oracle
-- NBT, split into collateral damage from L ops and from U ops
-- Relapse / forgetting rebound
-- Retain stability rate
-- Recovery ratio
-- Plasticity (SR on the next new task)
-- Cost in GPU-minutes per U op
-- Quantization robustness
-
-Several drift metrics from §4 are logged as part of the benchmark too.
+**Metrics:** the full set defined in "Evaluation metrics" (after weeks 2–3), all computed from the success matrix. Several drift metrics from §4 are logged as part of the benchmark too.
 
 ## 9. Phases
 

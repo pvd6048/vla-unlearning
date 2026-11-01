@@ -10,6 +10,8 @@ python tests/test_drift_params.py    # vlu/drift/{metrics,weights,params}.py
 python tests/test_drift_extract.py   # vlu/drift/{extract,compare}.py
 python tests/test_ops.py             # NPO/SSD/SalUn plans (vlu/ops.py), vlu/train.py with a mask, vlu/run_op.py checks
 python tests/test_vlaforget.py       # vlu/{vlaforget,lora}.py, frozen overrides in vlu/model.py
+python tests/test_stream_metrics.py  # vlu/stream_metrics.py (plain Python, no torch needed)
+python tests/test_calibration.py     # local workers (no Slurm), calibration plan and report (plain Python)
 ```
 
 What they cannot check: anything that needs real GR00T weights, the dataset or the simulator. That is

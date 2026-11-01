@@ -29,6 +29,15 @@ for shape in [(300, 200), (200, 300), (2048, 1536)]:
 assert top_singular_subspace(torch.zeros(5, 4), 2) is None
 print("metrics: CKA invariances, PCA shift, exact singular subspaces OK")
 
+# --- checkpoint references: runs, snapshots and hyperparameter-variant nodes ----------------------------
+from vlu.drift.weights import Ref
+assert Ref.parse("LA/LB", "r0") == Ref("r0", "LA/LB", "final")
+assert Ref.parse("goal_s1:LA/LB#step_002000", "r0") == Ref("goal_s1", "LA/LB", "step_002000")
+assert Ref.parse("base", "r0") == Ref("r0", "", "final")
+assert Ref.parse("LA/LB/UB-ga@unlearn_lr=3e-5", "r0") == Ref("r0", "LA/LB/UB-ga@unlearn_lr=3e-5", "final")
+assert Ref.parse("s1:LA/UA-vlaforget@vlaforget.stage_ratio=60:60:90#final", "r0") == Ref("s1", "LA/UA-vlaforget@vlaforget.stage_ratio=60:60:90", "final")
+print("refs: run prefix, #snapshot and @overrides parse unambiguously")
+
 # --- params.py on fake checkpoints ---------------------------------------------------------------
 base, runs = stubs.TMP / "base", stubs.TMP / "runs" / "toy"
 shapes = {"backbone.model.language_model.model.layers.12.mlp.down_proj.weight": (40, 30),
