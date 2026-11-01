@@ -27,6 +27,9 @@ class NodePolicy(Gr00tPolicy):
     def __init__(self, model, processor, strict: bool = True):
         BasePolicy.__init__(self, strict=strict)
         model.eval()
+        # bf16, as NVIDIA's Gr00tPolicy. Training and the probe losses run under bf16 autocast, which
+        # casts every linear layer's weights to bf16 per matmul, so this does not hide weight changes
+        # that training-time outputs could see (only LayerNorm weights and biases lose precision).
         self.model = model.to(dtype=torch.bfloat16)
         processor.eval()
         self.processor = processor

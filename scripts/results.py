@@ -7,6 +7,7 @@ eval (PLAN.md reporting rules). Runs anywhere (no GPU, no GR00T imports).
 """
 
 import argparse
+import csv
 import json
 from pathlib import Path
 import sys
@@ -49,7 +50,8 @@ def main():
     for line in lines:
         print(line[0].ljust(width), *(c.rjust(cell_width) for c in line[1:]))
     if args.csv:
-        Path(args.csv).write_text("\n".join(",".join(line) for line in lines) + "\n")
+        with open(args.csv, "w", newline="") as f:  # csv quotes cells such as "80% [67%,89%]"
+            csv.writer(f).writerows(lines)
 
 
 if __name__ == "__main__":

@@ -148,7 +148,8 @@ for path in ["LA", "LA/LB"]:
     save_weights(Fake(), node.weights_path)
 cases = [(["--node", "LA/LB/UB-vlaforget", "--save-at", "5"], "own training loop"),
          (["--node", "LA/LB/UB-ssd", "--steps", "10", "--save-at", "5"], "(0 steps"),
-         (["--node", "LA/LB/UB-ga", "--save-at", "5000"], "(1000 steps")]
+         (["--node", "LA/LB/UB-ga", "--save-at", "5000"], "(1000 steps"),
+         (["--node", "LA/LB/UC-purge"], "cannot unlearn C")]
 for argv, expected in cases:
     sys.argv = ["run_op", "--run", "args", *argv]
     try:
@@ -156,5 +157,5 @@ for argv, expected in cases:
         raise AssertionError(f"{argv} should have been rejected")
     except ValueError as e:
         assert expected in str(e), (argv, str(e))
-print("run_op: --save-at rejected for VLA-Forget, for SSD (still 0 steps under --steps) and beyond the step budget")
+print("run_op: --save-at rejected for VLA-Forget, for SSD (still 0 steps under --steps) and beyond the step budget; purge of a task never learned rejected")
 print("ALL OPS CHECKS PASSED")

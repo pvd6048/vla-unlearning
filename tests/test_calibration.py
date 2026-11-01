@@ -62,6 +62,45 @@ assert not someone_working("two") and try_claim(claim), "the dead worker's claim
 assert someone_working("two") and not try_claim(claim), "our own live claim must hold"
 print("claims: a dead local worker's claim is taken over, a live one holds")
 
+# Many workers racing to take over the same stale claim: exactly one may win.
+race_item = {"kind": "train", "node": "LD", "save_at": []}
+race = claim_dir("two", race_item); race.mkdir(parents=True)
+(race / "owner.json").write_text(json.dumps({"job": f"local{dead.pid}@{os.uname().nodename}"}))
+RACER = r"""
+import sys, time
+import vlu.worker as w
+real_alive = w._job_alive
+def slow_alive(job):  # everyone checks the owner first, then all act one after another
+    alive = real_alive(job)
+    time.sleep(max(0.0, float(sys.argv[1]) + 0.5 - time.time()) + 0.05 * int(sys.argv[2]))
+    return alive
+w._job_alive = slow_alive
+time.sleep(float(sys.argv[1]) - time.time())  # start together
+won = w.try_claim(w.claim_dir("two", {"kind": "train", "node": "LD", "save_at": []}))
+print("WON" if won else "lost", flush=True)
+time.sleep(max(0.0, float(sys.argv[1]) + 2.0 - time.time()))  # a winner keeps working: its claim stays live
+"""
+start = str(time.time() + 6)  # time for every process to start (imports) before the race
+racers = [subprocess.Popen([sys.executable, "-c", RACER, start, str(i)], env=ENV, stdout=subprocess.PIPE, text=True) for i in range(8)]
+results = [r.communicate(timeout=60)[0].strip() for r in racers]
+assert sum(r.endswith("WON") for r in results) == 1 and sum(r == "lost" for r in results) == 7, results
+assert json.loads((race / "owner.json").read_text())["job"].startswith("local")
+(race / "owner.json").write_text("")  # a half-written owner file is "being created", not a crash
+assert someone_working("two")
+print("claims: 8 workers racing for one stale claim -> exactly 1 wins; a half-written owner file does not crash")
+
+# A stream that unlearns everything it learned has the base model as retrain oracle (S3-like).
+import argparse
+import submit
+submit.STREAMS["ALL_GONE"] = ["LA", "UA"]
+ns = argparse.Namespace(run="two", nodes="", stream="ALL_GONE", methods="ga", no_oracle=False, zero_shot="", save_at="",
+                        eval_weights="final,step_002000", eval_seeds="0", videos=0, no_eval=False, features=False, fisher=[])
+built = submit.build_items(ns)
+base_evals = [i for i in built if i["kind"] == "eval" and i["node"] == ""]
+assert [i["weights"] for i in base_evals] == ["final"] and base_evals[0]["tasks"] == ["A"], base_evals
+assert not any(i["kind"] == "train" and i["node"] == "" for i in built)
+print("submit: a base-model oracle is evaluated (final weights only), not trained")
+
 # --- The calibration plan --------------------------------------------------------------------------
 cal = items()
 trains = [i["node"] for i in cal if i["kind"] == "train"]
@@ -111,4 +150,13 @@ assert "CUDA out of memory" in next((out / "failed").iterdir()).read_text()
 assert (out / "nodes" / "LA" / "train_log.jsonl").exists() and (out / "nodes" / "base" / "eval").exists()
 assert not list(out.rglob("*.safetensors")), "the report must not contain weights"
 print("report: summary.md with every section, failed-item logs, per-node files, no weights")
+
+# results.py --ci --csv: every row has one field per column although cells contain commas.
+import csv
+table = stubs_csv = Path(tempfile.mkdtemp()) / "sr.csv"
+subprocess.run([sys.executable, str(ROOT / "scripts" / "results.py"), "--run", "cal", "--ci", "--csv", str(table)],
+               env=ENV, check=True, capture_output=True)
+rows = list(csv.reader(open(table)))
+assert len(rows) > 3 and all(len(r) == len(rows[0]) == 6 for r in rows) and "[" in rows[2][1], rows[:3]
+print("results: --ci CSV has 6 well-formed columns per row")
 print("ALL CALIBRATION CHECKS PASSED")

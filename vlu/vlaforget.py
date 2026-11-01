@@ -303,7 +303,7 @@ def run(ctx: OpContext, probes: dict, recipe: Recipe, forget_task: str, retain_t
                             prefetch_factor=4, pin_memory=True, multiprocessing_context="fork")
         generator = torch.Generator().manual_seed(ctx.seed * 1000 + s_index)
         model.eval()  # no dropout (module docstring); gradients still flow
-        window, window_start = {}, time.time()
+        window, window_steps, window_start = {}, 0, time.time()
         for step, batch in zip(range(steps), loader):
             out_f, mine_f, ref_f = paired_forward(model, ref, taps, ref_taps, batch["forget"])
             forget_fm, mismatch = out_f["loss"], velocity_kl(out_f, mine_f, ref_f)
@@ -328,14 +328,16 @@ def run(ctx: OpContext, probes: dict, recipe: Recipe, forget_task: str, retain_t
             for k, v in metrics.items():
                 window[k] = window.get(k, 0.0) + v
             done += 1
-            if (step + 1) % recipe.log_every == 0 or step + 1 == steps:
-                n = recipe.log_every if (step + 1) % recipe.log_every == 0 else (step + 1) % recipe.log_every
-                record = {"step": done, "stage": stage, **{k: v / n for k, v in window.items()},
-                          "steps_per_s": n / (time.time() - window_start), "peak_mem_gb": torch.cuda.max_memory_allocated() / 2**30}
-                if step + 1 == steps or (step + 1) % recipe.unlearn_probe_every == 0:  # aligned with log_every
+            window_steps += 1
+            # Log and probe on the op's global step (as vlu/train.py), plus at the end of each stage.
+            if done % recipe.log_every == 0 or step + 1 == steps:
+                record = {"step": done, "stage": stage, **{k: v / window_steps for k, v in window.items()},
+                          "steps_per_s": window_steps / (time.time() - window_start),
+                          "peak_mem_gb": torch.cuda.max_memory_allocated() / 2**30}
+                if done % recipe.unlearn_probe_every == 0 or step + 1 == steps:
                     record["probe"] = probe_losses(model, probes)
                 log(record)
-                window, window_start = {}, time.time()
+                window, window_steps, window_start = {}, 0, time.time()
         top = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:10]
         report["stages"][stage] = {"steps": steps, "candidates": len(scores), "selected": chosen, "top_scores": top,
                                    "minutes": (time.time() - started) / 60}

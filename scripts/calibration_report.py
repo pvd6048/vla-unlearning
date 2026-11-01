@@ -19,7 +19,7 @@ from calibrate import VARIANTS  # noqa: E402
 from vlu.config import PROJECT_DIR, RUNS_DIR  # noqa: E402
 from vlu.nodes import Node  # noqa: E402
 from vlu.stream_metrics import wilson_interval  # noqa: E402
-from vlu.worker import failed_file, item_key, load_plan, status  # noqa: E402
+from vlu.worker import failed_file, file_name, item_key, load_plan, status  # noqa: E402
 
 COPY = ["op.json", "train_log.jsonl", "vlaforget.json", "vlaforget_boundary.json"]
 
@@ -87,7 +87,7 @@ def main():
             info = json.loads(failed_file(run, item).read_text())
             log = Path(info["log"])
             tail = "\n".join(log.read_text().splitlines()[-300:]) if log.exists() else "(log missing)"
-            name = item_key(item).replace("/", "~").replace(":", "_").replace("<base>", "base")
+            name = file_name(item)
             (out / "failed" / f"{name}.log").write_text(json.dumps(info, indent=1) + "\n\n" + tail + "\n")
 
     # --- Learning ------------------------------------------------------------------------------

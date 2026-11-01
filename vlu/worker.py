@@ -18,6 +18,8 @@ until `scripts/submit.py --retry-failed`. Each item's output goes to _logs/<item
 """
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -44,7 +46,7 @@ def item_key(item: dict) -> str:
     return f"eval:{node}:{item['weights']}:s{item['seed']}"
 
 
-def _file_name(item: dict) -> str:
+def file_name(item: dict) -> str:
     """item_key made shell-friendly, e.g. eval_LA~LB_final_s0."""
     return item_key(item).replace("<base>", "base").replace("/", "~").replace(":", "_")
 
@@ -59,11 +61,11 @@ def load_plan(run: str) -> list[dict]:
 
 
 def claim_dir(run: str, item: dict) -> Path:
-    return RUNS_DIR / run / "_claims" / _file_name(item)
+    return RUNS_DIR / run / "_claims" / file_name(item)
 
 
 def failed_file(run: str, item: dict) -> Path:
-    return RUNS_DIR / run / "_failed" / f"{_file_name(item)}.json"
+    return RUNS_DIR / run / "_failed" / f"{file_name(item)}.json"
 
 
 # --- Item status -------------------------------------------------------------------------------
@@ -125,34 +127,53 @@ def _job_alive(job: str) -> bool:
     return "Invalid job id" not in out.stderr  # squeue itself failed: assume alive, to be safe
 
 
+def _owner_job(claim: Path) -> str | None:
+    """The job holding a claim, or None if its owner file is missing or not readable yet."""
+    try:
+        return json.loads((claim / "owner.json").read_text())["job"]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def _claim_is_live(claim: Path) -> bool:
+    job = _owner_job(claim)
+    if job is None:  # being created by another worker right now, unless it has been like this for long
+        try:
+            return time.time() - claim.stat().st_mtime < 120
+        except FileNotFoundError:
+            return False
+    return _job_alive(job)
+
+
 def someone_working(run: str) -> bool:
     """Whether any claim of the run belongs to a live worker (or is being created right now)."""
     claims = RUNS_DIR / run / "_claims"
-    for claim in claims.iterdir() if claims.exists() else []:
-        owner = claim / "owner.json"
-        if not owner.exists() or _job_alive(json.loads(owner.read_text())["job"]):
-            return True
-    return False
+    return any(_claim_is_live(c) for c in claims.iterdir() if c.is_dir()) if claims.exists() else False
+
+
+@contextmanager
+def _claims_lock(claims: Path):
+    """Serializes claiming between the workers of a run (taking over a stale claim is a read-then-write)."""
+    claims.mkdir(parents=True, exist_ok=True)
+    with open(claims / ".lock", "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def try_claim(claim: Path) -> bool:
-    claim.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        claim.mkdir()
-    except FileExistsError:
-        owner = claim / "owner.json"
-        if not owner.exists():
-            if time.time() - claim.stat().st_mtime < 120:  # another worker is just creating it
+    with _claims_lock(claim.parent):
+        if claim.exists():
+            if _claim_is_live(claim):
                 return False
-        elif _job_alive(json.loads(owner.read_text())["job"]):
-            return False
-        print(f"taking over the stale claim {claim.name}", flush=True)
-        shutil.rmtree(claim, ignore_errors=True)
-        try:
-            claim.mkdir()
-        except FileExistsError:
-            return False
-    (claim / "owner.json").write_text(json.dumps({"job": JOB, "host": socket.gethostname(), "time": time.time()}))
+            print(f"taking over the stale claim {claim.name}", flush=True)
+            shutil.rmtree(claim, ignore_errors=True)
+        claim.mkdir()
+        tmp = claim / "owner.json.tmp"  # written atomically: readers never see half a file
+        tmp.write_text(json.dumps({"job": JOB, "host": socket.gethostname(), "time": time.time()}))
+        tmp.replace(claim / "owner.json")
     return True
 
 
@@ -177,7 +198,7 @@ def command(run: str, item: dict) -> list[str]:
 
 def run_item(run: str, item: dict) -> None:
     key = item_key(item)
-    log = RUNS_DIR / run / "_logs" / f"{_file_name(item)}.{JOB}.log"
+    log = RUNS_DIR / run / "_logs" / f"{file_name(item)}.{JOB}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     cmd = command(run, item)
     print(f"[{time.strftime('%H:%M:%S')}] start {key}\n    {' '.join(cmd)}\n    log: {log}", flush=True)

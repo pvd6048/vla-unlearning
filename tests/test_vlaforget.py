@@ -113,6 +113,8 @@ changed = {k for k in base_state if not torch.equal(base_state[k], after_state[k
 assert changed == set(report["merge"]["retained_delta_fraction"]), (changed, report["merge"]["retained_delta_fraction"])
 log = [json.loads(l) for l in open(node.dir / "train_log.jsonl")]
 assert log[0]["stage"] == "start" and log[-1]["stage"] == "merged" and any(r.get("conflicts", 0) > 0 for r in log)
+# Logged on the op's global step (every log_every = 5) and at each stage end (6, 12, 21), as vlu/train.py.
+assert [r["step"] for r in log if "stage" in r and r["stage"] in vf.STAGES] == [5, 6, 10, 12, 15, 20, 21], [r["step"] for r in log]
 print("5. op: selections", sel)
 print("   adapters merged, flags restored, overrides", sorted(ov), "merge rel. change", report["merge"]["max_relative_change"])
 

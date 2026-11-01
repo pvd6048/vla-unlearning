@@ -78,9 +78,10 @@ def build_items(args) -> list[dict]:
             items.append({"kind": "train", "node": ancestor, "save_at": save_at if depth == node.depth else []})
             if args.features:
                 items.append({"kind": "features", "node": ancestor, "weights": "final", "fisher": []})
-        if args.no_eval or node.last_op.method == "purge":
+        if args.no_eval or (not node.is_base and node.last_op.method == "purge"):
             continue
-        for weights in args.eval_weights.split(","):
+        # The base model (the retrain oracle when nothing is retained) has no snapshots.
+        for weights in ["final"] if node.is_base else args.eval_weights.split(","):
             for seed in map(int, args.eval_seeds.split(",")):
                 items.append({"kind": "eval", "node": path, "weights": weights, "seed": seed,
                               "tasks": targets[path], "videos": args.videos})

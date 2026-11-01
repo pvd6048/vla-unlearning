@@ -52,6 +52,8 @@ def main():
         raise RuntimeError(f"parent {node.parent} is not done; train it first")
 
     op = node.last_op
+    if op.kind == "U" and op.task not in node.parent.retained_tasks():  # as every method's plan checks
+        raise ValueError(f"{node}: cannot unlearn {op.task}, it is not retained by the parent")
     if op.kind == "U" and op.method in ZERO_STEP_METHODS:
         node.write_json("op.json", {"op": str(op), "parent": node.parent.path, "steps": 0, "git": git_commit()})
         try:  # hard link: same bytes, no extra disk
@@ -62,7 +64,7 @@ def main():
         return
 
     recipe = recipe_for(op, RECIPE)  # the frozen recipe plus this op's overrides (if any)
-    plan = plan_op(node, recipe)
+    plan = plan_op(node, RECIPE)  # applies the same overrides itself
     if args.steps is not None and plan.steps > 0:  # zero-step methods (SSD) stay zero-step
         plan.steps = args.steps
     save_at = {int(s) for s in args.save_at.split(",") if s}
