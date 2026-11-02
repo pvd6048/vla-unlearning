@@ -2,6 +2,8 @@
 
 Forgetting vs. unlearning in VLAs: GR00T N1.6 on LIBERO-Goal. The research plan is [PLAN.md](PLAN.md).
 This file explains how to run things. Everything runs on the Slurm cluster.
+How each unlearning method compares with its paper and the authors' code, difference by difference:
+[METHODS.md](METHODS.md).
 
 ## Layout
 
@@ -209,7 +211,7 @@ the parent model (a reference copy, importances, a weight mask) gives its plan a
 How the methods map onto GR00T's flow-matching loss (PROVISIONAL values in `vlu/config.py`):
 - **NPO**: log-likelihood of a chunk := −(sum of squared flow-matching errors); θ and the frozen
   reference see the same noise and timesteps; β = 0.1.
-- **SSD**: diagonal Fisher of L_FM gradients on the forget task vs. on all the parent's tasks; α = 10, λ = 1; no training steps.
+- **SSD**: diagonal Fisher of L_FM gradients on the forget task vs. on all the parent's tasks; α = 5 (the official ViT setting), λ = 1; no training steps.
 - **VLA-Forget**: three stages of LoRA unlearning (vision tower → vision-language projector → LLM/DiT
   layers), each on the top-scored layers, with retain, forget, mismatch and feature losses combined by
   PCGrad; KL terms become velocity differences between the model and its pre-op copy. The mapping
@@ -220,6 +222,6 @@ How the methods map onto GR00T's flow-matching loss (PROVISIONAL values in `vlu/
 ## Open decisions (provisional values in the code)
 
 - A–E task mapping (`vlu/tasks.py`): currently LIBERO-Goal tasks 0–4.
-- Unlearning budget and lr (`vlu/config.py`): 1000 steps at 1e-5 for every method.
+- Unlearning budget and lr (`vlu/config.py`): 1000 steps for every method; lr 1e-5 (VLA-Forget: 2e-4, its paper's value); set by the calibration run.
 - GA stopping rule / loss ceiling; NPO's β (depends on the scale of L_FM, see the probe losses); SSD's α, λ.
 - U ops draw retain data from all demos of the retained tasks, not from the 1000-frame replay buffer.

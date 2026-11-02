@@ -37,6 +37,8 @@ holder = nn.Module(); holder.l = lin
 ref_out = lin(x).detach().clone()
 ad = lora.attach(holder, ["l"], r=4, alpha=4.0, dropout=0.0)
 assert torch.equal(holder.l(x), ref_out), "fresh adapter must not change the output"
+big = lora.attach(nn.ModuleDict({"l": nn.Linear(4096, 8).cuda()}), ["l"], r=16, alpha=16.0, dropout=0.0)["l"]
+assert abs(big.lora_A.std().item() - 1 / 16) < 0.002 and abs(big.lora_A.mean().item()) < 0.002, "peft 'gaussian' init: A ~ N(0, 1/r^2)"
 with torch.no_grad():
     ad["l"].lora_B.normal_()
 adapted = holder.l(x).detach().clone()
@@ -49,7 +51,7 @@ ad = lora.attach(holder, ["l"], r=4, alpha=4.0, dropout=0.0)
 with torch.no_grad():
     ad["l"].lora_B.fill_(1e-6)
 assert lora.merge(holder, ad)["l.weight"] < 0.5
-print("2. LoRA: identity at init, merged == adapted, retained delta 1 (fp32) / reported lost (bf16)")
+print("2. LoRA: gaussian init, identity at init, merged == adapted, retained delta 1 (fp32) / reported lost (bf16)")
 
 # --- 3. Fake GR00T-shaped model --------------------------------------------------------------
 from fakes import Demos, Fake, P, Proc, collate, install, make_sample  # noqa: E402

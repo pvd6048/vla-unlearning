@@ -15,18 +15,26 @@ us how to set our hyperparameters. You don't need to interpret anything: run it 
 
 ## Steps
 
+Everything is installed and written inside the folder you clone into: Python environments, dataset,
+model, results. Nothing goes elsewhere (except `uv`, installed to `~/.local/bin` if missing). So first
+`cd` to any disk with about 100 GB free (`df -h .` shows the free space), then:
+
 ```bash
-git clone https://github.com/pvd6048/vla-unlearning.git && cd vla-unlearning
-echo 'export VLU_STORE=/path/with/100GB/free/vla-unlearning' > slurm/env.local.sh
-bash scripts/setup_cluster.sh     # one time, roughly 30-60 minutes (installs into VLU_STORE)
-bash scripts/run_local.sh         # the whole calibration; expect about a day
+git clone https://github.com/pvd6048/vla-unlearning.git
+cd vla-unlearning
+tmux new -s cal                                  # so it keeps running if the terminal closes
+bash scripts/setup_cluster.sh 2>&1 | tee setup.log   # one time, roughly 30-60 minutes
+bash scripts/run_local.sh                        # the whole calibration; expect about a day
 ```
 
-Use `tmux` or `nohup bash scripts/run_local.sh &` so it survives a closed terminal.
+To leave tmux running, press Ctrl-b then d; `tmux attach -t cal` brings it back.
 
-When it finishes, it prints the file to send back:
-`<VLU_STORE>/calibration_<hostname>.tar.gz` (a few MB; logs, tables and a few short videos, no model
-weights).
+When it finishes, it prints the file to send back, `calibration_<hostname>.tar.gz`, in the
+`vla-unlearning` folder (a few MB; logs, tables and a few short videos, no model weights).
+
+If the disk with space is not where you want the code, you can instead put the large files elsewhere:
+`echo 'export VLU_STORE=/big/disk/vla-unlearning' > slurm/env.local.sh` before the setup step. The
+`.tar.gz` is then written to that directory.
 
 ## If something goes wrong
 
@@ -34,7 +42,8 @@ weights).
   kept and interrupted work resumes.
 - **It reports an error:** it still writes the `.tar.gz` with the logs. Please send that; it is what
   we need to fix the problem.
-- **Setup failed:** send the terminal output of `bash scripts/setup_cluster.sh`.
+- **Setup failed:** send `setup.log` (in the `vla-unlearning` folder). Rerunning the setup is safe;
+  finished steps are skipped.
 - **Progress while it runs:** `source slurm/env.sh && $MAIN_PY scripts/submit.py --run cal --workers none`
   lists every step as done / ready / waiting / claimed (running) / failed.
 

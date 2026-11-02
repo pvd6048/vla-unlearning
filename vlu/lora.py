@@ -1,11 +1,10 @@
 """Minimal LoRA (Hu et al. 2021) for nn.Linear layers, with merging back into the base weights.
 
-Used by VLA-Forget (vlu/vlaforget.py). Same parametrization and initialization as peft: the output is
-    base(x) + (alpha / r) * B(A(dropout(x))),   A ~ kaiming_uniform(a=sqrt(5)), B = 0,
+Used by VLA-Forget (vlu/vlaforget.py). Same parametrization as peft, with the initialization of the
+authors' OpenVLA script (peft's init_lora_weights="gaussian"): the output is
+    base(x) + (alpha / r) * B(A(dropout(x))),   A ~ N(0, (1/r)^2), B = 0,
 so a freshly attached adapter leaves the model unchanged. A and B are fp32 (like our trainable weights).
 """
-
-import math
 
 import torch
 from torch import nn
@@ -18,7 +17,7 @@ class LoRALinear(nn.Module):
         self.scale = alpha / r
         self.lora_A = nn.Parameter(torch.empty(r, base.in_features, device=base.weight.device, dtype=torch.float32))
         self.lora_B = nn.Parameter(torch.zeros(base.out_features, r, device=base.weight.device, dtype=torch.float32))
-        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        nn.init.normal_(self.lora_A, std=1 / r)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

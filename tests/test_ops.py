@@ -2,6 +2,7 @@
 gradient mask, and of vlu/run_op.py's argument checks, on the fake GR00T-shaped model.
     python tests/test_ops.py
 """
+import copy
 import dataclasses
 import sys
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from vlu.config import RECIPE
 from vlu.data import OpBatches
 from vlu.model import save_weights, trainable_named_parameters
 from vlu.nodes import Node, run_seed
+import vlu.ops
 from vlu.ops import OpContext, plan_op
 import vlu.run_op
 from vlu.train import train
@@ -98,6 +100,25 @@ with torch.autocast("cuda", dtype=torch.bfloat16):
 assert metrics["log_ratio"] == 0.0 and metrics["npo_weight"] == 1.0, metrics
 print("NPO: log-ratio exactly 0 at step 0 with dropout on (the reference replays the same random numbers)")
 
+# Known answer: the official loss (licong-lin/negative-preference-optimization@1207bbe, TOFU/dataloader.py:255-270)
+#   neg_log_ratios = NLL_current - NLL_ref;  loss = -logsigmoid(beta * neg_log_ratios).mean() * 2 / beta
+# with NLL := the chunk's SSE and both models on the same noise and timesteps.
+ref = copy.deepcopy(model).requires_grad_(False)  # = the reference prepare() copied
+with torch.no_grad():
+    for p in trainable_named_parameters(model).values():
+        p.add_(0.01 * torch.randn_like(p))
+torch.manual_seed(7)
+nll_cur = model(probes["B"])["action_loss"].float().sum(dim=(1, 2))
+torch.manual_seed(7)
+with torch.no_grad():
+    nll_ref = ref(probes["B"])["action_loss"].float().sum(dim=(1, 2))
+official = -torch.nn.functional.logsigmoid(recipe.npo_beta * (nll_cur - nll_ref)).mean() * 2 / recipe.npo_beta
+torch.manual_seed(7)
+ours, _ = plan.loss_fn(model, {"forget": probes["B"]})
+assert 1 < (recipe.npo_beta * (nll_cur - nll_ref)).abs().max() < 20, (nll_cur - nll_ref)  # the regime where the weighting matters
+assert torch.allclose(ours, official, rtol=1e-5, atol=1e-6), (ours.item(), official.item())
+print(f"NPO: loss equals the official formula on a perturbed model ({ours.item():.6f} vs {official.item():.6f})")
+
 # --- SSD: zero steps, only shrinks weights, never touches rows that cannot change --------------------
 model = Fake().cuda()
 before = {n: p.detach().clone() for n, p in trainable_named_parameters(model).items()}
@@ -110,6 +131,39 @@ for n, p in trainable_named_parameters(model).items():
 dead = [r for r in range(32) if r != LIBERO]
 assert torch.equal(dict(model.named_parameters())[STATE][dead], before[STATE][dead])
 print(f"SSD: shrink-only, dead embodiment rows untouched, dampened fraction {plan.notes['dampened_fraction']:.3f}")
+
+
+# Known answer: given the same importances, SSD must change the weights exactly as the official code.
+def official_modify_weight(params, original_importance, forget_importance, selection_weighting, dampening_constant):
+    """if-loops/selective-synaptic-dampening@cdfdc0e, src/ssd.py:199-218 (exponent 1, lower_bound 1)."""
+    with torch.no_grad():
+        for n, p in params.items():
+            oimp, fimp = original_importance[n], forget_importance[n]
+            oimp_norm = oimp.mul(selection_weighting)
+            locations = torch.where(fimp > oimp_norm)
+            weight = ((oimp.mul(dampening_constant)).div(fimp)).pow(1)
+            update = weight[locations]
+            min_locs = torch.where(update > 1)
+            update[min_locs] = 1
+            p[locations] = p[locations].mul(update)
+
+
+model = Fake().cuda()
+params = trainable_named_parameters(model)
+imp = {s: {n: torch.rand_like(p, dtype=torch.float32) ** 4 for n, p in params.items()} for s in (0, 1)}  # 0: forget, 1: all
+expected = copy.deepcopy(params)
+official_modify_weight(expected, imp[1], imp[0], recipe.ssd_alpha, recipe.ssd_lambda)
+real_accumulate = vlu.ops.accumulate_grads
+vlu.ops.accumulate_grads = lambda ctx, slots, n, stream, square: imp[stream]
+try:
+    ctx = context("LA/LB/UB-ssd", model)
+    plan = plan_op(ctx.node, recipe)
+    plan.prepare(ctx)
+finally:
+    vlu.ops.accumulate_grads = real_accumulate
+assert 0 < plan.notes["dampened_fraction"] < 1, plan.notes
+assert all(torch.equal(params[n], expected[n]) for n in params), "SSD differs from the official modify_weight"
+print(f"SSD: bit-identical to the official modify_weight on the same importances (dampened {plan.notes['dampened_fraction']:.3f})")
 
 # --- SalUn: mask over the weights that can change; bool; reused on resume; masked weights frozen -----
 model = Fake().cuda()

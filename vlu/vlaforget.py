@@ -27,7 +27,8 @@ Mapping to GR00T (OpenVLA -> GR00T):
     h_V, h_P             -> vision tower output (post-layernorm), projector (mlp1) output
 
 Choices where the paper and the authors' code differ or say nothing (recorded in vlaforget.json):
-    - LoRA r=16, alpha=16 on the selected layers (paper; the small script updates them directly)
+    - LoRA r=16, alpha=16, gaussian init on the selected layers (paper and the authors' OpenVLA script;
+      VLA-Forget-main.py updates them directly)
     - both models run in eval mode (no dropout): GR00T's DiT has dropout 0.2, and with dropout the
       adapted model and the frozen copy draw different masks, so the KL terms would measure dropout
       noise rather than drift. Hence also no LoRA dropout (paper: 0.05).
