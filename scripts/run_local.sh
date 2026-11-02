@@ -1,6 +1,7 @@
 #!/bin/bash
 # Calibration on a machine without Slurm (see CALIBRATION.md). After scripts/setup_cluster.sh:
 #   bash scripts/run_local.sh
+#   bash scripts/run_local.sh --pack    only pack what exists now (e.g. while a stuck run is still going)
 # Safe to rerun: finished work is skipped and interrupted work resumes. Everything to send back ends up
 # in $VLU_STORE/calibration_<host>/ and $VLU_STORE/calibration_<host>.tar.gz (no model weights).
 set -uo pipefail
@@ -13,10 +14,16 @@ exec > >(tee -a "$OUT/run_local.log") 2>&1
 echo "=== $(date)  run $RUN  output $OUT"
 
 package() {
+    cp -f "$VLU_PROJECT_DIR/setup.log" "$OUT/" 2>/dev/null || true
     "$MAIN_PY" scripts/calibration_report.py --run "$RUN" --out "$OUT" || echo "WARNING: report failed"
     tar czf "$OUT.tar.gz" -C "$(dirname "$OUT")" "$(basename "$OUT")"
     echo "=== $(date)  done. Please send back: $OUT.tar.gz ($(du -h "$OUT.tar.gz" | cut -f1))"
 }
+if [ "${1:-}" = "--pack" ]; then
+    [ -f "$OUT/environment.txt" ] || nvidia-smi > "$OUT/environment.txt" 2>&1
+    package
+    exit 0
+fi
 
 # 1. Environment ---------------------------------------------------------------------------------
 {

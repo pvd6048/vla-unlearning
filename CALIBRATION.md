@@ -39,14 +39,20 @@ If the disk with space is not where you want the code, you can instead put the l
 
 ## If something goes wrong
 
-- **It stopped (crash, reboot, Ctrl-C):** just run `bash scripts/run_local.sh` again. Finished work is
-  kept and interrupted work resumes.
-- **It reports an error:** it still writes the `.tar.gz` with the logs. Please send that; it is what
-  we need to fix the problem.
-- **Setup failed:** send `setup.log` (in the `vla-unlearning` folder). Rerunning the setup is safe;
-  finished steps are skipped.
+In every case below, `bash scripts/run_local.sh --pack` (run in the `vla-unlearning` folder) writes
+the same `.tar.gz` from whatever exists so far: all logs, including `setup.log`. Sending us that file is
+always enough for us to see what happened.
+
+- **Setup failed:** run `bash scripts/run_local.sh --pack` and send the `.tar.gz`. Rerunning the setup
+  is safe; finished steps are skipped.
+- **It reports an error:** it packs the `.tar.gz` itself; please send it.
+- **It stopped (crash, reboot, Ctrl-C):** run `bash scripts/run_local.sh` again. Finished work is kept
+  and interrupted work resumes. If it stops again at the same point, send the `--pack` file.
+- **It seems stuck** (no progress for more than 2 hours): leave it running, run
+  `bash scripts/run_local.sh --pack` in a second terminal and send that file.
 - **Progress while it runs:** `source slurm/env.sh && $MAIN_PY scripts/submit.py --run cal --workers none`
   lists every step as done / ready / waiting / claimed (running) / failed.
+- **The disk fills up:** stop it (Ctrl-C), free space, and run `bash scripts/run_local.sh` again.
 
 ## What it does (for reference)
 
