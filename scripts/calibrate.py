@@ -9,9 +9,12 @@ Run `cal` (seed 0), tasks A and B of LIBERO-Goal:
                 and 1                                             -> steps per task, pass bar on A,
                                                                      eval noise, B never trained
     LA/LB       learn B with A replayed; A, B with seeds 0 and 1   -> theta0 of the unlearning variants
-    LA/LB/UB-v  every unlearning variant v below (1000 steps; probe losses every 50 steps; snapshots at
-                250 / 500 where the method trains with the standard loop); A and B evaluated (seed 0).
-                LA is their retrain oracle (it never saw B).
+    LA/LB/UB-v  every unlearning variant v below (1000 steps; probe losses every 50 steps, which show
+                how many steps a method needs); A and B evaluated (seed 0). LA is their retrain oracle
+                (it never saw B).
+
+Disk: a node's weights are ~6.5 GB (1.62B trainable parameters in fp32), so only weights that are
+evaluated are saved: LA's 2k/5k snapshots and every node's final weights (about 145 GB in all).
 """
 
 import argparse
@@ -36,7 +39,6 @@ VARIANTS = [
     *[f"salun@unlearn_lr={lr}" for lr in ("1e-5", "3e-5", "1e-4")],
     *[f"vlaforget@vlaforget.lr={lr}" for lr in ("5e-5", "2e-4")],  # the paper's two values
 ]
-SNAPSHOT_METHODS = {"ga", "graddiff", "npo", "salun"}  # trained by the standard loop
 
 
 def eval_item(node: str, weights: str, seed: int, videos: int = 0) -> dict:
@@ -54,9 +56,8 @@ def items() -> list[dict]:
     for variant in VARIANTS:
         path = f"LA/LB/UB-{variant}"
         Node.from_path("cal", path)  # validates the token (method, override keys)
-        method = variant.split("@")[0]
-        out.append({"kind": "train", "node": path, "save_at": [250, 500] if method in SNAPSHOT_METHODS else []})
-        if method != "purge":  # purge does not change the weights: its results are LA/LB's
+        out.append({"kind": "train", "node": path, "save_at": []})
+        if variant != "purge":  # purge does not change the weights: its results are LA/LB's
             out.append(eval_item(path, "final", 0, videos=2))
     return out
 

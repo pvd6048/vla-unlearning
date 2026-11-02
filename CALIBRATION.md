@@ -10,14 +10,15 @@ us how to set our hyperparameters. You don't need to interpret anything: run it 
   training; smaller GPUs (e.g. an RTX A5000) are used for evaluation. All GPUs are used, so please
   don't run other jobs on them at the same time.
 - NVIDIA driver 570 or newer (CUDA 12.8); 525 or newer usually works too.
-- About 100 GB of free disk, 64 GB of RAM or more, internet access during setup (about 12 GB is downloaded).
+- About 200 GB of free disk (it fills to about 175 GB: 25 GB of software, model and data, 150 GB of
+  trained model weights), 64 GB of RAM or more, internet access during setup (about 15 GB is downloaded).
 - `git`, `curl` and a C compiler (`build-essential` on Ubuntu). No root access or Slurm is needed.
 
 ## Steps
 
 Everything is installed and written inside the folder you clone into: Python environments, dataset,
 model, results. Nothing goes elsewhere (except `uv`, installed to `~/.local/bin` if missing). So first
-`cd` to any disk with about 100 GB free (`df -h .` shows the free space), then:
+`cd` to any disk with about 200 GB free (`df -h .` shows the free space), then:
 
 ```bash
 git clone https://github.com/pvd6048/vla-unlearning.git
