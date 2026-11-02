@@ -39,8 +39,15 @@ def sr(node: Node, task: str, weights: str = "final", seed: int = 0) -> str:
 
 
 def train_log(node: Node) -> list[dict]:
+    """The node's log records; a line still being written (report made during the run) is skipped."""
     path = node.dir / "train_log.jsonl"
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()] if path.exists() else []
+    records = []
+    for line in path.read_text().splitlines() if path.exists() else []:
+        try:
+            records.append(json.loads(line))
+        except ValueError:
+            pass
+    return records
 
 
 def probes(log: list[dict]) -> dict[int, dict]:

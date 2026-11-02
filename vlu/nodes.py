@@ -29,7 +29,7 @@ from pathlib import Path
 from vlu.config import RUNS_DIR, Recipe, VLAForgetConfig
 from vlu.tasks import TASKS
 
-_RECIPE_KEYS = {f.name for f in fields(Recipe)} | {f"vlaforget.{f.name}" for f in fields(VLAForgetConfig)}
+_RECIPE_KEYS = ({f.name for f in fields(Recipe)} - {"vlaforget"}) | {f"vlaforget.{f.name}" for f in fields(VLAForgetConfig)}
 
 
 @dataclass(frozen=True)

@@ -57,7 +57,7 @@ always enough for us to see what happened.
 ## What it does (for reference)
 
 1. Records the machine (GPUs, driver, library versions) and picks GPU rendering for the simulator if a
-   test render works, else software rendering.
+   test render works on every GPU, else software rendering.
 2. Runs the code's self-tests (a few minutes). If one fails it stops here and packs the logs.
 3. Trains task A (with checkpoints at 2k, 5k, 10k steps), then task B, then 19 unlearning variants of
    task B, and evaluates each in the simulator. One worker runs per GPU.

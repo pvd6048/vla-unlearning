@@ -60,6 +60,13 @@ def load_plan(run: str) -> list[dict]:
     return json.loads(path.read_text()) if path.exists() else []
 
 
+def write_plan(run: str, plan: list[dict]) -> None:
+    """Atomically: workers read the plan while it is being extended."""
+    tmp = plan_path(run).with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(plan, indent=1) + "\n")
+    tmp.replace(plan_path(run))
+
+
 def claim_dir(run: str, item: dict) -> Path:
     return RUNS_DIR / run / "_claims" / file_name(item)
 
@@ -106,6 +113,11 @@ def status(run: str, item: dict) -> str:
 # --- Claims ------------------------------------------------------------------------------------
 
 
+# squeue states of a job whose processes are gone (COMPLETING: only the epilog is still running).
+ENDED_STATES = ("COMPLETING", "COMPLETED", "CANCELLED", "FAILED", "TIMEOUT", "NODE_FAIL", "PREEMPTED",
+                "BOOT_FAIL", "DEADLINE", "OUT_OF_MEMORY")
+
+
 def _job_alive(job: str) -> bool:
     if job.startswith("local"):  # a worker without Slurm: a process on some host
         pid, _, host = job[len("local"):].partition("@")
@@ -122,8 +134,8 @@ def _job_alive(job: str) -> bool:
         out = subprocess.run(["squeue", "-h", "-j", job, "-o", "%T"], capture_output=True, text=True)
     except FileNotFoundError:
         return True  # no Slurm here: assume alive, to be safe
-    if out.returncode == 0:
-        return bool(out.stdout.strip())
+    if out.returncode == 0:  # listed while pending, running, ... and briefly after it ended
+        return out.stdout.strip() not in ("", *ENDED_STATES)
     return "Invalid job id" not in out.stderr  # squeue itself failed: assume alive, to be safe
 
 
@@ -174,6 +186,18 @@ def try_claim(claim: Path) -> bool:
         tmp = claim / "owner.json.tmp"  # written atomically: readers never see half a file
         tmp.write_text(json.dumps({"job": JOB, "host": socket.gethostname(), "time": time.time()}))
         tmp.replace(claim / "owner.json")
+    return True
+
+
+def take(run: str, item: dict) -> bool:
+    """Claim an item that still needs running. Checked again once claimed: another worker may have
+    finished or failed it (and then released its claim) after this worker listed its pending items."""
+    claim = claim_dir(run, item)
+    if not try_claim(claim):
+        return False
+    if is_done(run, item) or failed_file(run, item).exists():
+        shutil.rmtree(claim, ignore_errors=True)
+        return False
     return True
 
 
@@ -231,7 +255,7 @@ def main():
         if not pending:
             print("nothing left to do", flush=True)
             return
-        item = next((i for i in pending if is_ready(args.run, i) and try_claim(claim_dir(args.run, i))), None)
+        item = next((i for i in pending if is_ready(args.run, i) and take(args.run, i)), None)
         if item is None:
             # Three idle checks a minute apart, so a worker between two items (or still starting) does
             # not look idle.

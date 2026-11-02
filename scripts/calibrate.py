@@ -18,7 +18,6 @@ evaluated are saved: LA's 2k/5k snapshots and every node's final weights (about 
 """
 
 import argparse
-import json
 from pathlib import Path
 import sys
 
@@ -26,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from submit import merge  # noqa: E402
 from vlu.nodes import Node, run_seed  # noqa: E402
-from vlu.worker import load_plan, plan_path  # noqa: E402
+from vlu.worker import load_plan, plan_path, write_plan  # noqa: E402
 
 # Each variant is <method>[@<recipe overrides>] (vlu/nodes.py). Grids around each paper's default.
 VARIANTS = [
@@ -68,9 +67,7 @@ def main():
     args = parser.parse_args()
     run_seed(args.run, 0)
     plan = merge(load_plan(args.run), items())
-    tmp = plan_path(args.run).with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(plan, indent=1) + "\n")
-    tmp.replace(plan_path(args.run))
+    write_plan(args.run, plan)
     print(f"calibration plan {plan_path(args.run)}: {len(plan)} items, {len(VARIANTS)} unlearning variants")
 
 

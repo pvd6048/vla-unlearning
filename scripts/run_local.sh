@@ -37,11 +37,15 @@ fi
 } > "$OUT/environment.txt" 2>&1
 cat "$OUT/environment.txt"
 
-# 2. Rendering: the GPU's EGL driver if a test render works, else Mesa (software) ---------------------
-render_test() {
-    VLU_RENDER="$1" bash -c 'source slurm/env.sh; CUDA_VISIBLE_DEVICES="" MUJOCO_EGL_DEVICE_ID=0 "$SIM_PY" - <<"PY"
+# 2. Rendering: the GPUs' EGL driver if a test render works on every GPU (each GPU's worker renders its
+#    evals there, see slurm/eval.sbatch), else Mesa (software, one device: 0) -----------------------
+render_test() {  # render_test <gpu|mesa> <EGL device>
+    VLU_RENDER="$1" RENDER_DEVICE="$2" bash -c 'source slurm/env.sh; CUDA_VISIBLE_DEVICES="" MUJOCO_EGL_DEVICE_ID=$RENDER_DEVICE "$SIM_PY" - <<"PY"
+import os
 import sys
 sys.path.insert(0, ".")
+print("render test: VLU_RENDER", os.environ["VLU_RENDER"], "EGL device", os.environ["MUJOCO_EGL_DEVICE_ID"],
+      "EGL vendor file", os.environ.get("__EGL_VENDOR_LIBRARY_FILENAMES", "(system default)"))
 from vlu.eval.libero_client import LIBERO_NOOP, make_env
 env, init_states = make_env("A")
 env.reset()
@@ -52,8 +56,14 @@ assert image.shape == (256, 256, 3) and image.std() > 1, "blank render"
 print("render OK", image.shape, float(image.mean()))
 PY'
 }
-if render_test gpu >> "$OUT/environment.txt" 2>&1; then export VLU_RENDER=gpu
-elif render_test mesa >> "$OUT/environment.txt" 2>&1; then export VLU_RENDER=mesa
+gpu_render_ok() {
+    local index
+    for index in $(nvidia-smi --query-gpu=index --format=csv,noheader); do
+        render_test gpu "$index" >> "$OUT/environment.txt" 2>&1 || return 1
+    done
+}
+if gpu_render_ok; then export VLU_RENDER=gpu
+elif render_test mesa 0 >> "$OUT/environment.txt" 2>&1; then export VLU_RENDER=mesa
 else echo "ERROR: LIBERO cannot render with the GPU or with Mesa (see environment.txt)"; package; exit 1; fi
 echo "rendering: $VLU_RENDER" | tee -a "$OUT/environment.txt"
 

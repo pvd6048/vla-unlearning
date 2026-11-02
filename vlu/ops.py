@@ -259,7 +259,9 @@ def _plan_salun(node: Node, recipe: Recipe) -> OpPlan:
             threshold = top_fraction_threshold({n: live_part(n, s, embodiment) for n, s in saliency.items()}, recipe.salun_keep)
             masks = {name: (s >= threshold) & (s > 0) for name, s in saliency.items()}
             ctx.node.dir.mkdir(parents=True, exist_ok=True)
-            torch.save(masks, mask_path)
+            tmp = mask_path.with_name(mask_path.name + ".tmp")  # atomic: a resumed op trusts an existing mask
+            torch.save(masks, tmp)
+            tmp.replace(mask_path)
         kept = sum(int(live_part(n, m, embodiment).sum()) for n, m in masks.items())
         total = sum(live_part(n, m, embodiment).numel() for n, m in masks.items())
         plan.notes["kept_fraction"] = kept / total

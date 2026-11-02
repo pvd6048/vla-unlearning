@@ -44,6 +44,8 @@ export VLU_RENDER="${VLU_RENDER:-mesa}"
 MESA_EGL=/usr/share/glvnd/egl_vendor.d/50_mesa.json
 if [ "$VLU_RENDER" = mesa ] && [ -f "$MESA_EGL" ]; then
     export __EGL_VENDOR_LIBRARY_FILENAMES="$MESA_EGL"
+else  # e.g. inherited from a shell that sourced this file in mesa mode: it would hide the GPU driver
+    unset __EGL_VENDOR_LIBRARY_FILENAMES
 fi
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"   # simulator workers: one thread each

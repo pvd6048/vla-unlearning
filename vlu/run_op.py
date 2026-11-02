@@ -58,8 +58,10 @@ def main():
         node.write_json("op.json", {"op": str(op), "parent": node.parent.path, "steps": 0, "git": git_commit()})
         try:  # hard link: same bytes, no extra disk
             os.link(node.parent.weights_path, node.weights_path)
-        except OSError:
-            shutil.copyfile(node.parent.weights_path, node.weights_path)
+        except OSError:  # via a temporary file: a partial weights file would mark the node done
+            tmp = node.weights_path.with_name(node.weights_path.name + ".tmp")
+            shutil.copyfile(node.parent.weights_path, tmp)
+            tmp.replace(node.weights_path)
         print(f"{node}: {op.method} trains nothing; copied the parent's weights")
         return
 

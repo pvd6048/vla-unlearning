@@ -251,7 +251,9 @@ def boundary_set(ctx: OpContext, ref, ref_taps, forget_task: str, retain_tasks: 
     summary = {"forget_pool": len(forget_pool), "retain_pool": len(retain_pool), "distinct_frames": len(set(frames)),
                "mean_cosine": float(best.values.mean()), "tasks": {t: sum(f[0] == t for f in frames) for t in retain_tasks}}
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"summary": summary, "frames": frames}) + "\n")
+    tmp = path.with_name(path.name + ".tmp")  # atomic: a rerun trusts an existing cache
+    tmp.write_text(json.dumps({"summary": summary, "frames": frames}) + "\n")
+    tmp.replace(path)
     return frames, summary
 
 
@@ -269,7 +271,7 @@ def run(ctx: OpContext, probes: dict, recipe: Recipe, forget_task: str, retain_t
     requires_grad flags, and frozen overrides registered for the edited frozen weights."""
     cfg = recipe.vlaforget
     model, node = ctx.model, ctx.node
-    log = jsonl_logger(node.dir / "train_log.jsonl")
+    log = jsonl_logger(node.dir / "train_log.jsonl")  # a rerun starts from the parent: fresh log
     flags = {n: p.requires_grad for n, p in model.named_parameters()}
     trainable = {n for n, f in flags.items() if f}
     ref = copy.deepcopy(model).eval()

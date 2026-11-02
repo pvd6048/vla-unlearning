@@ -156,7 +156,9 @@ def main():
                 sr = float(np.mean([e["success"] for e in done]))
                 summary = {"task": r["task"], "instruction": instruction(r["task"]), "success_rate": sr,
                            "episodes": done, "wall_s_since_start": time.time() - start}
-                (out / f"{r['task']}.json").write_text(json.dumps(summary, indent=2) + "\n")
+                tmp = out / f"{r['task']}.json.tmp"  # atomic: the result file marks the task as evaluated
+                tmp.write_text(json.dumps(summary, indent=2) + "\n")
+                tmp.replace(out / f"{r['task']}.json")
                 print(f"== {r['task']}: SR {sr:.2%}", flush=True)
 
 

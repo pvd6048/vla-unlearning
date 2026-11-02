@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from vlu.config import PROJECT_DIR, RUNS_DIR  # noqa: E402
 from vlu.nodes import Node, expand_stream, oracle_path, run_seed  # noqa: E402
 from vlu.tasks import STREAMS  # noqa: E402
-from vlu.worker import failed_file, item_key, load_plan, plan_path, status  # noqa: E402
+from vlu.worker import failed_file, item_key, load_plan, plan_path, status, write_plan  # noqa: E402
 
 # Worker pools, from the IIT Guwahati GPU facility job templates. "kinds" = what a worker may run:
 # training needs a big slice; a small slice only evaluates.
@@ -73,15 +73,18 @@ def build_items(args) -> list[dict]:
         items.append({"kind": "features", "node": "", "weights": "final", "fisher": []})
     for path in sorted(targets, key=lambda p: (p.count("/"), p)):
         node = Node.from_path(args.run, path)
+        # --save-at / snapshot evals are for L ops: U ops have their own, shorter step budget (and SSD
+        # and VLA-Forget cannot save snapshots at all).
+        snapshots = not node.is_base and node.last_op.kind == "L"
         for depth in range(1, node.depth + 1):  # missing ancestors first (done ones are skipped later)
             ancestor = "/".join(str(op) for op in node.ops[:depth])
-            items.append({"kind": "train", "node": ancestor, "save_at": save_at if depth == node.depth else []})
+            items.append({"kind": "train", "node": ancestor, "save_at": save_at if depth == node.depth and snapshots else []})
             if args.features:
                 items.append({"kind": "features", "node": ancestor, "weights": "final", "fisher": []})
         if args.no_eval or (not node.is_base and node.last_op.method == "purge"):
             continue
-        # The base model (the retrain oracle when nothing is retained) has no snapshots.
-        for weights in ["final"] if node.is_base else args.eval_weights.split(","):
+        # The base model (the retrain oracle when nothing is retained) and U ops have no snapshots.
+        for weights in args.eval_weights.split(",") if snapshots else ["final"]:
             for seed in map(int, args.eval_seeds.split(",")):
                 items.append({"kind": "eval", "node": path, "weights": weights, "seed": seed,
                               "tasks": targets[path], "videos": args.videos})
@@ -174,9 +177,7 @@ def main():
         if args.retry_failed:
             for item in plan:
                 failed_file(args.run, item).unlink(missing_ok=True)
-        tmp = plan_path(args.run).with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(plan, indent=1) + "\n")
-        tmp.replace(plan_path(args.run))
+        write_plan(args.run, plan)
 
     counts = Counter(status(args.run, i) for i in plan)
     print(f"plan {plan_path(args.run)}: {len(plan)} items, " + ", ".join(f"{n} {s}" for s, n in sorted(counts.items())))

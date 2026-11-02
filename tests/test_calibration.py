@@ -101,6 +101,54 @@ assert [i["weights"] for i in base_evals] == ["final"] and base_evals[0]["tasks"
 assert not any(i["kind"] == "train" and i["node"] == "" for i in built)
 print("submit: a base-model oracle is evaluated (final weights only), not trained")
 
+# --save-at and snapshot evals apply to L ops only (U ops have their own short budget; SSD/VLA-Forget save none).
+submit.STREAMS["SNAP"] = ["LA", "LB", "UB"]
+built = submit.build_items(argparse.Namespace(**{**vars(ns), "stream": "SNAP", "methods": "ssd,ga", "save_at": "2000"}))
+assert all(i["save_at"] == [] for i in built if i["kind"] == "train" and "/U" in i["node"]), built
+assert {i["weights"] for i in built if i["kind"] == "eval" and "/U" in i["node"]} == {"final"}
+assert any(i["save_at"] == [2000] for i in built if i["kind"] == "train" and i["node"] == "LA/LB")
+assert {i["weights"] for i in built if i["kind"] == "eval" and i["node"] == "LA/LB"} == {"final", "step_002000"}
+print("submit: --save-at and snapshot evals only for L ops")
+
+# A worker re-checks an item after claiming it: another worker may have just finished or failed it.
+import vlu.worker as w  # noqa: E402
+done_item = {"kind": "eval", "node": "LA", "weights": "final", "seed": 7, "tasks": ["A"], "videos": 0}
+out_dir = Node.from_path("two", "LA").eval_dir("final", 7)
+out_dir.mkdir(parents=True, exist_ok=True)
+(out_dir / "A.json").write_text("{}")
+failed_item = {**done_item, "seed": 8}
+w.failed_file("two", failed_item).parent.mkdir(parents=True, exist_ok=True)
+w.failed_file("two", failed_item).write_text("{}")
+assert not w.take("two", done_item) and not w.take("two", failed_item)
+assert not w.claim_dir("two", done_item).exists() and not w.claim_dir("two", failed_item).exists()
+print("worker: a claimed item that turns out done or failed is released, not run again")
+
+# Slurm: a job that has ended (still COMPLETING, or gone) does not hold its claims.
+from types import SimpleNamespace  # noqa: E402
+real_run = w.subprocess.run
+try:
+    for state, alive in [("RUNNING", True), ("PENDING", True), ("COMPLETING", False), ("TIMEOUT", False), ("", False)]:
+        w.subprocess.run = lambda *a, state=state, **k: SimpleNamespace(returncode=0, stdout=state + "\n", stderr="")
+        assert w._job_alive("12345") is alive, state
+finally:
+    w.subprocess.run = real_run
+print("worker: Slurm jobs in RUNNING/PENDING hold claims; COMPLETING/ended ones do not")
+
+# An override must name a hyperparameter, not the whole VLA-Forget config.
+from vlu.nodes import Op  # noqa: E402
+try:
+    Op.parse("UB-vlaforget@vlaforget=1")
+    raise AssertionError("'vlaforget' is not a hyperparameter")
+except ValueError:
+    pass
+print("op tokens: '@vlaforget=...' rejected (only vlaforget.<field>)")
+
+# env.sh in GPU render mode must clear a Mesa EGL override inherited from a mesa-mode shell.
+egl = subprocess.run(["bash", "-c", 'source slurm/env.sh; echo "${__EGL_VENDOR_LIBRARY_FILENAMES-unset}"'], cwd=ROOT, text=True,
+                     capture_output=True, env={**ENV, "VLU_RENDER": "gpu", "__EGL_VENDOR_LIBRARY_FILENAMES": "/x/50_mesa.json"})
+assert egl.stdout.strip() == "unset", egl
+print("env.sh: GPU rendering clears an inherited Mesa EGL vendor override")
+
 # --- The calibration plan --------------------------------------------------------------------------
 cal = items()
 trains = [i["node"] for i in cal if i["kind"] == "train"]
@@ -109,7 +157,7 @@ assert all(Node.from_path("cal", n).parent.path == "LA/LB" for n in trains[2:]) 
 assert {i["node"] for i in cal if i["kind"] == "eval"} == {"", "LA", "LA/LB"} | {n for n in trains[2:] if "purge" not in n}
 la = next(i for i in cal if i["node"] == "LA" and i["kind"] == "train")
 assert la["save_at"] == [2000, 5000] and next(i for i in cal if i["node"].endswith("UB-ssd@ssd_alpha=5"))["save_at"] == []
-print(f"calibration plan: LA, LA/LB and {len(VARIANTS)} variants of UB sharing LA/LB; snapshots only where the standard loop trains")
+print(f"calibration plan: LA, LA/LB and {len(VARIANTS)} variants of UB sharing LA/LB; snapshots only of LA (the evaluated ones)")
 
 # --- The report on a fake calibration run ----------------------------------------------------------
 random.seed(0)

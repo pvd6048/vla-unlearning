@@ -20,8 +20,22 @@ from vlu.nodes import Node
 from vlu.ops import OpPlan, fm_loss
 
 
-def jsonl_logger(path):
-    """log(record): append record (plus a timestamp) to a JSON-lines file and print it."""
+def jsonl_logger(path, keep_through: int = -1):
+    """log(record): append record (plus a timestamp) to a JSON-lines file and print it. Records already
+    in the file for steps after `keep_through` (left by an interrupted attempt) are dropped first, so
+    a resumed op logs each step once; the default drops them all (a fresh start)."""
+
+    def keep(line: str) -> bool:
+        try:
+            return json.loads(line)["step"] <= keep_through
+        except (ValueError, KeyError):  # e.g. a line cut off by a crash
+            return False
+
+    if path.exists():
+        kept = [line for line in path.read_text().splitlines() if keep(line)]
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text("".join(line + "\n" for line in kept))
+        tmp.replace(path)
 
     def log(record: dict):
         record["time"] = time.time()
@@ -90,7 +104,7 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
         pin_memory=True,
         multiprocessing_context="fork",
     )
-    log = jsonl_logger(node.dir / "train_log.jsonl")
+    log = jsonl_logger(node.dir / "train_log.jsonl", keep_through=start if start > 0 else -1)
     if start == 0:
         log({"step": 0, "probe": probe_losses(model, probes)})
 

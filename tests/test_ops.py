@@ -4,6 +4,7 @@ gradient mask, and of vlu/run_op.py's argument checks, on the fake GR00T-shaped 
 """
 import copy
 import dataclasses
+import json
 import sys
 from types import SimpleNamespace
 
@@ -212,4 +213,29 @@ for argv, expected in cases:
     except ValueError as e:
         assert expected in str(e), (argv, str(e))
 print("run_op: --save-at rejected for VLA-Forget, for SSD (still 0 steps under --steps) and beyond the step budget; purge of a task never learned rejected")
+
+# Purge where hard links fail: the weights are copied through a temporary file (a partial file would mark the node done).
+real_link = vlu.run_op.os.link
+vlu.run_op.os.link = lambda *a: (_ for _ in ()).throw(OSError("no hard links here"))
+try:
+    sys.argv = ["run_op", "--run", "args", "--node", "LA/LB/UB-purge"]
+    vlu.run_op.main()
+finally:
+    vlu.run_op.os.link = real_link
+purged = Node.from_path("args", "LA/LB/UB-purge")
+assert purged.weights_path.read_bytes() == purged.parent.weights_path.read_bytes()
+assert not purged.weights_path.is_symlink() and not list(purged.dir.glob("*.tmp"))
+print("run_op: purge without hard links copies the parent's weights via a temporary file")
+
+# --- The training log after an interrupted attempt -----------------------------------------------------
+from vlu.train import jsonl_logger  # noqa: E402
+
+log_path = Node.from_path("args", "LA").dir / "log_test.jsonl"
+log_path.write_text("".join(json.dumps({"step": s}) + "\n" for s in range(6)) + '{"step": 6, "lo')
+log = jsonl_logger(log_path, keep_through=3)  # resumed from the checkpoint at step 3
+log({"step": 4})
+assert [json.loads(line)["step"] for line in log_path.read_text().splitlines()] == [0, 1, 2, 3, 4]
+jsonl_logger(log_path)  # a fresh start
+assert log_path.read_text() == ""
+print("train log: a resumed op drops the records after its checkpoint (and a cut-off line); a fresh start empties it")
 print("ALL OPS CHECKS PASSED")
