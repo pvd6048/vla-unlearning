@@ -110,6 +110,41 @@ assert any(i["save_at"] == [2000] for i in built if i["kind"] == "train" and i["
 assert {i["weights"] for i in built if i["kind"] == "eval" and i["node"] == "LA/LB"} == {"final", "step_002000"}
 print("submit: --save-at and snapshot evals only for L ops")
 
+# An op that cannot be applied is rejected when planning (here: SSD on the parent's only task, S3-like),
+# not later in a worker job.
+submit.STREAMS["ONLY"] = ["LA", "UA"]
+for method, ok in (("ssd", False), ("salun", False), ("ga", True)):
+    try:
+        submit.build_items(argparse.Namespace(**{**vars(ns), "stream": "ONLY", "methods": method}))
+        assert ok, f"{method} on a parent's only task must be rejected at plan time"
+    except ValueError as error:
+        assert not ok and "needs a retained task" in str(error), (method, error)
+print("submit: SSD / SalUn on a parent's only task rejected when planning; GA accepted")
+
+# A trained node whose op.json records other values for the fields its op depends on is reported.
+from dataclasses import asdict  # noqa: E402
+from vlu.config import RECIPE  # noqa: E402
+
+
+def trained(path, recipe):
+    node = Node.from_path("two", path)
+    node.dir.mkdir(parents=True, exist_ok=True)
+    node.write_json("op.json", {"op": str(node.last_op), "recipe": recipe})
+    node.weights_path.write_text("x")
+    return {"kind": "train", "node": path, "save_at": []}
+
+
+current = json.loads(json.dumps(asdict(RECIPE)))
+old_ssd = {k: v for k, v in current.items() if k != "ssd_reference"}  # trained before the field existed
+items_ = [trained("LA", {**current, "save_every": 1000, "ssd_alpha": 99.0}),  # L op: neither field matters
+          trained("LA/LB/UB-ssd@ssd_alpha=10", {**old_ssd, "ssd_alpha": 10.0}),
+          trained("LA/LB/UB-ga", {**current, "unlearn_lr": 3e-5}),
+          trained("LA/LB/UB-vlaforget", {**current, "vlaforget": {**current["vlaforget"], "lr": 5e-5}})]
+warnings = submit.warn_recipe_changes("two", items_)
+assert len(warnings) == 3 and "UB-ssd@ssd_alpha=10" in warnings[0] and "ssd_reference: '<not recorded>' -> now 'retain'" in warnings[0], warnings
+assert "unlearn_lr: 3e-05 -> now 1e-05" in warnings[1] and "vlaforget.lr: 5e-05 -> now 0.0002" in warnings[2], warnings
+print("submit: trained nodes with another recipe in the fields their op uses are reported (bookkeeping and other ops' fields ignored)")
+
 # A worker re-checks an item after claiming it: another worker may have just finished or failed it.
 import vlu.worker as w  # noqa: E402
 done_item = {"kind": "eval", "node": "LA", "weights": "final", "seed": 7, "tasks": ["A"], "videos": 0}
@@ -149,6 +184,20 @@ egl = subprocess.run(["bash", "-c", 'source slurm/env.sh; echo "${__EGL_VENDOR_L
 assert egl.stdout.strip() == "unset", egl
 print("env.sh: GPU rendering clears an inherited Mesa EGL vendor override")
 
+# env.sh sets OMP_NUM_THREADS=1, which GNU nproc honours: the CPU count must not come from plain nproc
+# (in the calibration it made every eval run 1 simulator process; on Slurm it would give 0 workers).
+cpus = subprocess.run(["bash", "-c", 'source slurm/env.sh; echo "$VLU_CPUS $(nproc)"'], cwd=ROOT, text=True,
+                      capture_output=True, env={**ENV, "OMP_NUM_THREADS": "1"}).stdout.split()
+# The reference is nproc without the OMP variables (it also counts a cgroup CPU limit, which the
+# affinity mask alone does not show).
+plain = subprocess.run(["nproc"], text=True, capture_output=True, check=True,
+                       env={k: v for k, v in ENV.items() if k not in ("OMP_NUM_THREADS", "OMP_THREAD_LIMIT")}).stdout.strip()
+assert cpus[0] == plain and cpus[1] == "1", (cpus, plain)
+workers = subprocess.run(["bash", "-c", 'for c in 1 2 3 24; do VLU_CPUS=$c; eval "$(grep -m1 "^WORKERS=" slurm/eval.sbatch)"; echo -n "$WORKERS "; done'],
+                         cwd=ROOT, text=True, capture_output=True, env={k: v for k, v in ENV.items() if k != "VLU_EVAL_WORKERS"}).stdout.split()
+assert workers == ["1", "1", "2", "23"], workers
+print(f"env.sh: VLU_CPUS = {cpus[0]} CPUs although nproc says 1; eval.sbatch workers for 1/2/3/24 CPUs: {workers}")
+
 # --- The calibration plan --------------------------------------------------------------------------
 cal = items()
 trains = [i["node"] for i in cal if i["kind"] == "train"]
@@ -156,8 +205,20 @@ assert trains[:2] == ["LA", "LA/LB"] and len(trains) == 2 + len(VARIANTS)
 assert all(Node.from_path("cal", n).parent.path == "LA/LB" for n in trains[2:])  # every variant shares LA/LB
 assert {i["node"] for i in cal if i["kind"] == "eval"} == {"", "LA", "LA/LB"} | {n for n in trains[2:] if "purge" not in n}
 la = next(i for i in cal if i["node"] == "LA" and i["kind"] == "train")
-assert la["save_at"] == [2000, 5000] and next(i for i in cal if i["node"].endswith("UB-ssd@ssd_alpha=5"))["save_at"] == []
+assert la["save_at"] == [2000, 5000] and next(i for i in cal if i["node"].endswith("UB-ssd@ssd_reference=retain"))["save_at"] == []
 print(f"calibration plan: LA, LA/LB and {len(VARIANTS)} variants of UB sharing LA/LB; snapshots only of LA (the evaluated ones)")
+
+# calibrate.py writes exactly the current calibration: items of an earlier round that are no longer
+# planned are dropped (their node directories stay), so they cannot run again under new code.
+prune_env = {**ENV, "VLU_RUNS_DIR": tempfile.mkdtemp(prefix="vlu_prune_")}
+stale = {"kind": "train", "node": "LA/LB/UB-ssd@ssd_alpha=20", "save_at": []}
+(Path(prune_env["VLU_RUNS_DIR"]) / "cal").mkdir(parents=True)
+(Path(prune_env["VLU_RUNS_DIR"]) / "cal" / "plan.json").write_text(json.dumps([stale, cal[1]]))
+out_p = subprocess.run([sys.executable, str(ROOT / "scripts" / "calibrate.py")], env=prune_env, text=True, capture_output=True, check=True).stdout
+written = json.loads((Path(prune_env["VLU_RUNS_DIR"]) / "cal" / "plan.json").read_text())
+assert "no longer planned (kept on disk, not run again): train:LA/LB/UB-ssd@ssd_alpha=20" in out_p, out_p
+assert stale not in written and len(written) == len(cal), (len(written), len(cal))
+print("calibrate: items of an earlier round no longer planned are dropped from the plan")
 
 # --- The report on a fake calibration run ----------------------------------------------------------
 random.seed(0)

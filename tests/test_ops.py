@@ -9,6 +9,7 @@ import sys
 from types import SimpleNamespace
 
 import stubs  # noqa: F401  (first: temp dirs + GR00T stand-ins)
+import numpy as np
 import torch
 
 from fakes import LIBERO, Demos, Fake, Proc, collate, install, make_sample
@@ -91,11 +92,31 @@ replayed = [f for f in drawn if f[0] != "C"]
 assert len(replayed) == 2 * 20 * 4 and set(replayed) <= set(frames), "replay must come from the fixed buffer only"
 print("ER: 4 new + 4 replay per batch (16 + 16 in the recipe), fixed per-task buffers, replay drawn only from them")
 
+# --- Which methods need a retained task: one list (vlu.nodes.NEEDS_RETAINED_TASK), checked by plan_op ----
+from vlu.nodes import NEEDS_RETAINED_TASK  # noqa: E402
+
+for method in vlu.ops.UNLEARN_METHODS:
+    try:
+        plan_op(Node.from_path("ops", f"LA/UA-{method}"), recipe)
+        rejected = False
+    except ValueError:
+        rejected = True
+    assert rejected == (method in NEEDS_RETAINED_TASK), method
+    plan_op(Node.from_path("ops", f"LA/LB/UA-{method}"), recipe)  # with B retained every method plans
+assert NEEDS_RETAINED_TASK <= set(vlu.ops.UNLEARN_METHODS)
+print(f"plan_op: unlearning a parent's only task is rejected exactly for {sorted(NEEDS_RETAINED_TASK)}")
+
 # --- NPO: theta == reference at step 0, in train mode (DiT dropout on) ------------------------------
 model = Fake().cuda().train()
 ctx = context("LA/LB/UB-npo", model)
 plan = plan_op(ctx.node, recipe)
 plan.prepare(ctx)
+state = next(c.cell_contents for c in plan.loss_fn.__closure__ if isinstance(c.cell_contents, dict) and "ref" in c.cell_contents)
+ref_params = dict(state["ref"].named_parameters())
+for name, p in model.named_parameters():
+    assert (ref_params[name] is p) == (not p.requires_grad), f"{name}: the reference must share exactly the frozen weights"
+assert not any(p.requires_grad for p in ref_params.values())
+print("NPO: the reference shares the frozen weights and copies the trainable ones")
 with torch.autocast("cuda", dtype=torch.bfloat16):
     loss, metrics = plan.loss_fn(model, {"forget": probes["B"]})
 assert metrics["log_ratio"] == 0.0 and metrics["npo_weight"] == 1.0, metrics
@@ -155,16 +176,88 @@ imp = {s: {n: torch.rand_like(p, dtype=torch.float32) ** 4 for n, p in params.it
 expected = copy.deepcopy(params)
 official_modify_weight(expected, imp[1], imp[0], recipe.ssd_alpha, recipe.ssd_lambda)
 real_accumulate = vlu.ops.accumulate_grads
-vlu.ops.accumulate_grads = lambda ctx, slots, n, stream, square: imp[stream]
-try:
-    ctx = context("LA/LB/UB-ssd", model)
-    plan = plan_op(ctx.node, recipe)
-    plan.prepare(ctx)
-finally:
-    vlu.ops.accumulate_grads = real_accumulate
+asked = {}  # stream -> the slots SSD computed importances on
+
+
+def fixed_importances(ctx, slots, n, stream, square):
+    asked[stream] = set(slots)
+    return {k: v.clone() for k, v in imp[stream].items()}  # SSD may change the importances it gets in place
+
+
+def run_ssd(path, model):
+    vlu.ops.accumulate_grads = fixed_importances
+    try:
+        ctx = context(path, model)
+        plan = plan_op(ctx.node, recipe_for(ctx.node.last_op, recipe))
+        plan.prepare(ctx)
+    finally:
+        vlu.ops.accumulate_grads = real_accumulate
+    return plan
+
+
+plan = run_ssd("LA/LB/UB-ssd", model)
 assert 0 < plan.notes["dampened_fraction"] < 1, plan.notes
 assert all(torch.equal(params[n], expected[n]) for n in params), "SSD differs from the official modify_weight"
 print(f"SSD: bit-identical to the official modify_weight on the same importances (dampened {plan.notes['dampened_fraction']:.3f})")
+
+# Reference data: the retained tasks by default. ssd_reference=all is the paper's D as the official code
+# computes it: full_train_dl = an unshuffled ConcatDataset(retain, forget) with the forget loader's batch
+# size, so its batches are all-retain or all-forget and I_full = (1 - s) * I_retain + s * I_forget, s the
+# forget share of the data (if-loops/selective-synaptic-dampening@cdfdc0e, forget_full_class_main.py:152-156).
+asked.clear(); run_ssd("LA/LB/LC/UB-ssd", Fake().cuda())
+assert asked == {0: {("B",)}, 1: {("A", "C")}}, asked
+model = Fake().cuda()
+params = trainable_named_parameters(model)
+expected = copy.deepcopy(params)
+asked.clear(); plan = run_ssd("LA/LB/LC/UB-ssd@ssd_reference=all", model)
+assert asked == {0: {("B",)}, 1: {("A", "C")}}, asked  # the forget part of I_full is the forget importance
+share = 40 / 120  # fakes.Demos: 40 frames per task; forget B, retain A and C
+assert plan.notes["forget_share"] == share, plan.notes
+full = {n: imp[1][n].clone().mul_(1 - share).add_(imp[0][n], alpha=share) for n in params}
+official_modify_weight(expected, full, imp[0], recipe.ssd_alpha, recipe.ssd_lambda)
+assert all(torch.equal(params[n], expected[n]) for n in params), "SSD (ssd_reference=all) differs from the official update"
+try:
+    run_ssd("LA/UA-ssd", Fake().cuda())
+    raise AssertionError("ssd needs a retained task")
+except ValueError:
+    pass
+print("SSD: I_ref on the retained tasks (default); ssd_reference=all = (1-s) I_retain + s I_forget as the official "
+      "unshuffled full loader, then the official update; no retained task -> error")
+
+# Known answer for ASSD: alpha = the official percentile of I_forget / I_ref (if-loops/adaptive-selective-
+# synaptic-dampening@f04c49d, error_unlearning.ipynb: p = 100 - ln(1 + share% ), np.nanpercentile of the
+# ratios without NaN/inf), then the official SSD update with that alpha. As in GR00T, the per-embodiment
+# rows that never get a gradient have zero importance (0/0 = NaN, left out by both).
+dead = [r for r in range(32) if r != LIBERO]
+for s in (0, 1):
+    for n, v in imp[s].items():
+        if vlu.ops.live_part(n, v, LIBERO) is not v:
+            v[dead] = 0
+model = Fake().cuda()
+params = trainable_named_parameters(model)
+expected = copy.deepcopy(params)
+plan = run_ssd("LA/LB/UB-ssd@ssd_adaptive=1", model)
+share = 40 / 80  # fakes.Demos: 40 frames per task; forget B, retain A
+ratios = np.concatenate([(imp[0][n] / imp[1][n]).flatten().cpu().numpy() for n in params])
+ratios = ratios[np.isfinite(ratios)]
+official_alpha = float(np.nanpercentile(ratios, 100 - np.log(1 + share * 100)))
+assert abs(plan.notes["assd_percentile"] - (100 - np.log(1 + share * 100))) < 1e-12, plan.notes
+assert abs(plan.notes["assd_alpha"] - official_alpha) <= 1e-5 * official_alpha, (plan.notes["assd_alpha"], official_alpha)
+official_modify_weight(expected, imp[1], imp[0], plan.notes["assd_alpha"], recipe.ssd_lambda)
+assert all(torch.equal(params[n], expected[n]) for n in params), "ASSD differs from the official update"
+# dampened_fraction counts the weights that can change (as SalUn's kept_fraction), so it is ASSD's target
+assert abs(plan.notes["dampened_fraction"] - np.log(1 + share * 100) / 100) < 2e-3, plan.notes
+# Degenerate importances (no finite ratio) must fail, not silently dampen nothing.
+imp_saved = imp
+imp = {s: {n: torch.zeros_like(v) for n, v in imp_saved[s].items()} for s in (0, 1)}
+try:
+    run_ssd("LA/LB/UB-ssd@ssd_adaptive=1", Fake().cuda())
+    raise AssertionError("ASSD with all-NaN ratios must fail")
+except RuntimeError:
+    pass
+imp = imp_saved
+print(f"ASSD: alpha {plan.notes['assd_alpha']:.4g} = the official percentile ({official_alpha:.4g}) at p = "
+      f"{plan.notes['assd_percentile']:.2f}; dampens the top {np.log(1 + share * 100):.2f}% of the weights; update as the official code")
 
 # --- SalUn: mask over the weights that can change; bool; reused on resume; masked weights frozen -----
 model = Fake().cuda()

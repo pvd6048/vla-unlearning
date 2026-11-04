@@ -8,7 +8,7 @@ set -euo pipefail
 source "${VLU_PROJECT_DIR:?export VLU_PROJECT_DIR (scripts/submit.py does)}/slurm/env.sh"
 
 RUN="$1"; KINDS="$2"
-echo "host $(hostname)  job ${SLURM_JOB_ID:-none}  run $RUN  kinds $KINDS  cpus $(nproc)"
+echo "host $(hostname)  job ${SLURM_JOB_ID:-none}  run $RUN  kinds $KINDS  cpus $VLU_CPUS"
 nvidia-smi -L || true
 
 queue_successor() {

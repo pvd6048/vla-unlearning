@@ -44,7 +44,6 @@ Choices where the paper and the authors' code differ or say nothing (recorded in
 """
 
 from dataclasses import asdict
-import copy
 import json
 import math
 import time
@@ -58,7 +57,7 @@ from vlu.config import Recipe
 from vlu.data import Frames, OpBatches, make_sample
 from vlu.drift.weights import LLM_LAYER, VISION_LAYER
 from vlu.model import add_frozen_overrides
-from vlu.ops import OpContext
+from vlu.ops import OpContext, frozen_reference
 from vlu.train import jsonl_logger, probe_losses
 
 EPS = 1e-8
@@ -235,9 +234,11 @@ def boundary_set(ctx: OpContext, ref, ref_taps, forget_task: str, retain_tasks: 
             torch.manual_seed(0)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 ref(dict(ctx.processor.collator(samples)["inputs"]))
-            h = ref_taps.out["vision"].float()  # (images, patches, C); images of a sample are contiguous
+            # SigLIP2 packs all images of the batch into one sequence, (1, patches, C), image by image
+            # (Eagle's extract_feature), and a sample's images are contiguous
+            h = ref_taps.out["vision"].float().flatten(0, -2)
             if h.shape[0] % len(chunk):
-                raise RuntimeError(f"{h.shape[0]} vision rows for {len(chunk)} samples")
+                raise RuntimeError(f"{h.shape[0]} vision tokens for {len(chunk)} samples")
             feats.append(h.reshape(len(chunk), -1, h.shape[-1]).mean(dim=1))
         return torch.nn.functional.normalize(torch.cat(feats), dim=1)
 
@@ -274,8 +275,7 @@ def run(ctx: OpContext, probes: dict, recipe: Recipe, forget_task: str, retain_t
     log = jsonl_logger(node.dir / "train_log.jsonl")  # a rerun starts from the parent: fresh log
     flags = {n: p.requires_grad for n, p in model.named_parameters()}
     trainable = {n for n, f in flags.items() if f}
-    ref = copy.deepcopy(model).eval()
-    ref.requires_grad_(False)
+    ref = frozen_reference(model).eval()  # theta0; shares the frozen weights with the model
     taps, ref_taps = Taps(model), Taps(ref)
     model.requires_grad_(False)
 
@@ -346,7 +346,9 @@ def run(ctx: OpContext, probes: dict, recipe: Recipe, forget_task: str, retain_t
                                    "minutes": (time.time() - started) / 60}
         print(f"VLA-Forget stage {stage}: {steps} steps on {chosen}", flush=True)
 
-    # Merge, and check that the merged model computes what the adapted model computed.
+    # Merge, and check that the merged model computes what the adapted model computed. The merge writes
+    # into frozen weights, which theta0 shares: theta0 is not used from here on, so drop it first.
+    del ref, ref_taps
     before = probe_losses(model, probes)
     retained = lora.merge(model, adapters)
     after = probe_losses(model, probes)

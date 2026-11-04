@@ -69,8 +69,15 @@ class Recipe:
     unlearn_lr: float = 1e-5
     # Method hyperparameters, PROVISIONAL (each paper's default, mapped to the flow-matching loss):
     npo_beta: float = 0.1  # NPO paper default; log-likelihood stand-in = -sum of squared FM errors of a chunk
-    ssd_alpha: float = 5.0  # SSD official code: 10 for ResNet, 5 for ViT (transformers); dampen weights with I_forget > alpha * I_all ...
-    ssd_lambda: float = 1.0  # ... by the factor min(lambda * I_all / I_forget, 1)
+    ssd_alpha: float = 5.0  # SSD official code: 10 for ResNet, 5 for ViT (transformers); dampen weights with I_forget > alpha * I_ref ...
+    ssd_lambda: float = 1.0  # ... by the factor min(lambda * I_ref / I_forget, 1)
+    # I_ref, the reference importance: "retain" = the retained tasks (default; METHODS.md section 4: the paper's
+    # full-data importance is ~ the retain importance at its forget shares of 1-5%, not at ours of 0.2-0.45),
+    # or "all" = all tasks the parent keeps, forget task included (the paper's literal D).
+    ssd_reference: str = "retain"
+    # ASSD (Schoepf, Foster & Brintrup 2024): alpha = the p-th percentile of I_forget / I_ref over the weights,
+    # p = 100 - ln(1 + 100 * forget share of the frames); ssd_alpha is then ignored, lambda as set (ASSD: 1).
+    ssd_adaptive: bool = False
     salun_keep: float = 0.5  # SalUn paper default: update the 50% most salient weights
     importance_batches: int = 64  # batches for SSD's Fisher importances and SalUn's saliency
     vlaforget: VLAForgetConfig = field(default_factory=VLAForgetConfig)
@@ -78,7 +85,7 @@ class Recipe:
     # --- Bookkeeping ------------------------------------------------------------------------------
     num_workers: int = 8  # DataLoader processes building batches
     log_every: int = 50
-    save_every: int = 1_000  # resumable checkpoint (weights + optimizer)
+    save_every: int = 2_500  # resumable checkpoint (weights + optimizer, ~20 GB, ~3 min to write)
     probe_every: int = 500  # flow-matching loss on a fixed batch of every task (L ops)
     unlearn_probe_every: int = 50  # the same for U ops, which are short
     probe_size: int = 32

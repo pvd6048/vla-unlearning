@@ -10,7 +10,8 @@ loaded and before training (NPO: frozen reference copy; SSD: the whole method; S
 """
 
 import copy
-from dataclasses import asdict, dataclass, field, replace
+import math
+from dataclasses import asdict, dataclass, field
 from typing import Callable
 
 import torch
@@ -19,7 +20,7 @@ from vlu.config import Recipe
 from vlu.data import OpBatches, ReplayBuffer, Slots
 from vlu.drift.weights import embodiment_index, live_part
 from vlu.model import trainable_named_parameters
-from vlu.nodes import Node, Op
+from vlu.nodes import Node, check_op, recipe_for  # noqa: F401  (recipe_for: used by vlu.run_op and the tests)
 
 # loss_fn(model, batch) -> (loss to minimize, {metric name: float}); batch = {part name: inputs}
 LossFn = Callable[[torch.nn.Module, dict], tuple[torch.Tensor, dict[str, float]]]
@@ -77,6 +78,17 @@ def fm_sse_per_sample(out: dict) -> torch.Tensor:
     return out["action_loss"].float().sum(dim=(1, 2))
 
 
+def frozen_reference(model: torch.nn.Module) -> torch.nn.Module:
+    """A frozen copy of the model as it is now (theta0), for methods that compare against it (NPO,
+    VLA-Forget). The weights that are frozen in `model` are shared, not copied (~3.3 GB in GR00T):
+    an op never changes them while it uses the reference. (VLA-Forget's final merge writes into
+    frozen weights, so it drops its reference first.)"""
+    shared = {id(p): p for p in model.parameters() if not p.requires_grad}
+    ref = copy.deepcopy(model, memo=shared)
+    ref.requires_grad_(False)
+    return ref
+
+
 def accumulate_grads(ctx: OpContext, slots: Slots, n: int, stream: int, square: bool) -> dict[str, torch.Tensor]:
     """Sum over n batches of each trainable parameter's L_FM gradient (square=False) or squared
     gradient (square=True, i.e. n x the diagonal empirical Fisher of batch gradients)."""
@@ -124,10 +136,10 @@ def _plan_learn(node: Node, recipe: Recipe) -> OpPlan:
 
 
 def _forget_retain(node: Node, recipe: Recipe) -> tuple[Slots, Slots]:
+    """Batch slots of the forget task and of the retained tasks (drawn uniformly); plan_op has
+    already checked that the op can be applied (check_op)."""
     task = node.last_op.task
     retain = tuple(t for t in node.parent.retained_tasks() if t != task)
-    if task not in node.parent.retained_tasks():
-        raise ValueError(f"{node}: cannot unlearn {task}, it is not retained by the parent")
     return [(task,)] * recipe.batch_size, ([retain] * recipe.batch_size if retain else [])
 
 
@@ -145,8 +157,6 @@ def _plan_ga(node: Node, recipe: Recipe) -> OpPlan:
 def _plan_graddiff(node: Node, recipe: Recipe) -> OpPlan:
     """Gradient difference: ascent on the forget task plus ordinary descent on the retained tasks."""
     forget, retain = _forget_retain(node, recipe)
-    if not retain:
-        raise ValueError(f"{node}: graddiff needs at least one retained task")
 
     def loss_fn(model, batch):
         forget_loss = fm_loss(model, batch["forget"])
@@ -168,9 +178,7 @@ def _plan_npo(node: Node, recipe: Recipe) -> OpPlan:
     state = {}
 
     def prepare(ctx: OpContext):
-        ref = copy.deepcopy(ctx.model)
-        ref.requires_grad_(False)
-        state["ref"] = ref
+        state["ref"] = frozen_reference(ctx.model)
 
     def loss_fn(model, batch):
         inputs, ref = batch["forget"], state["ref"]
@@ -193,30 +201,66 @@ def _plan_npo(node: Node, recipe: Recipe) -> OpPlan:
 
 def _plan_ssd(node: Node, recipe: Recipe) -> OpPlan:
     """Selective Synaptic Dampening (Foster et al. 2024), no training: with diagonal Fisher
-    importances I_f on the forget task and I_D on all the parent's training tasks (forget included),
-    every trainable weight with I_f > alpha * I_D is multiplied by min(lambda * I_D / I_f, 1)."""
+    importances I_f on the forget task and I_ref as the reference, every trainable weight with
+    I_f > alpha * I_ref is multiplied by min(lambda * I_ref / I_f, 1).
+
+    recipe.ssd_reference = "retain" (default): I_ref = I_r, the importance on the retained tasks.
+    "all": the paper's full training set D, computed as the official code does (an unshuffled
+    ConcatDataset of the retain and forget sets, so every batch is all-retain or all-forget):
+    I_ref = (1 - s) * I_r + s * I_f, with s the forget task's share of the frames. The paper's s is
+    1-5%, where I_D ~ I_r; ours is 0.2-0.45, where alpha >= 1/s can select nothing and the dampening
+    factor cannot go below lambda * s (METHODS.md section 4).
+    recipe.ssd_adaptive: alpha is ASSD's (Schoepf et al. 2024), the p-th percentile of I_f / I_ref over
+    the weights, p = 100 - ln(1 + 100 s)."""
     task = node.last_op.task
-    _forget_retain(node, recipe)  # checks that the task is retained
-    everything = tuple(node.parent.retained_tasks())
+    _, retain = _forget_retain(node, recipe)  # plan_op checked that there is a retained task (check_op)
+    if recipe.ssd_reference not in ("retain", "all"):
+        raise ValueError(f"ssd_reference must be 'retain' or 'all', not {recipe.ssd_reference!r}")
+    retain_tasks = retain[0]
     plan = OpPlan({}, lambda model, batch: None, 0, 0.0,
-                  {"ssd_alpha": recipe.ssd_alpha, "ssd_lambda": recipe.ssd_lambda, "importance_batches": recipe.importance_batches,
-                   "data_tasks": everything})
+                  {"ssd_alpha": "adaptive" if recipe.ssd_adaptive else recipe.ssd_alpha, "ssd_lambda": recipe.ssd_lambda,
+                   "ssd_reference": recipe.ssd_reference, "importance_batches": recipe.importance_batches,
+                   "retain_tasks": retain_tasks})
 
     def prepare(ctx: OpContext):
         n = recipe.importance_batches
         imp_f = accumulate_grads(ctx, [(task,)] * recipe.batch_size, n, stream=0, square=True)
-        imp_d = accumulate_grads(ctx, [everything] * recipe.batch_size, n, stream=1, square=True)
+        imp_ref = accumulate_grads(ctx, [retain_tasks] * recipe.batch_size, n, stream=1, square=True)
+        # |D_f| / |D| in frames, as the official codes count samples (SSD: the batches of the full set;
+        # ASSD: len(forget set) / (len(retain set) + len(forget set)))
+        n_forget = len(ctx.demos[task].index)
+        share = n_forget / (n_forget + sum(len(ctx.demos[t].index) for t in retain_tasks))
+        plan.notes["forget_share"] = share
+        if recipe.ssd_reference == "all":
+            for name, r in imp_ref.items():  # the same number of batches in both sums: the mean's 1/n cancels
+                r.mul_(1 - share).add_(imp_f[name], alpha=share)
+        embodiment = embodiment_index()
+        alpha = recipe.ssd_alpha
+        if recipe.ssd_adaptive:
+            # ASSD (if-loops/adaptive-selective-synaptic-dampening@f04c49d, error_unlearning.ipynb: ssd() and
+            # modify_weight): share in percent, natural log; np.nanpercentile of I_f / I_ref over the weights,
+            # NaN (0/0) and inf (x/0) left out.
+            percentile = 100 - math.log(1 + share * 100)
+            alpha = top_fraction_threshold({k: live_part(k, v, embodiment) for k, v in imp_f.items()}, 1 - percentile / 100,
+                                           divide_by={k: live_part(k, v, embodiment) for k, v in imp_ref.items()})
+            if not math.isfinite(alpha):
+                raise RuntimeError(f"ASSD: alpha is {alpha} (no finite importance ratio); the importances are degenerate")
+            plan.notes.update({"assd_percentile": percentile, "assd_alpha": alpha})
         dampened = total = 0
         with torch.no_grad():
             for name, p in trainable_named_parameters(ctx.model).items():
-                f, d = imp_f[name], imp_d[name]
-                selected = f > recipe.ssd_alpha * d
+                f, d = imp_f[name], imp_ref[name]
+                selected = f > alpha * d
                 factor = torch.clamp(recipe.ssd_lambda * d / f.clamp_min(1e-30), max=1.0)
                 p.mul_(torch.where(selected, factor, torch.ones_like(factor)).to(p.dtype))
-                dampened += int(selected.sum())
-                total += selected.numel()
+                # counted over the weights that can change (as SalUn's kept_fraction): the other
+                # embodiments' rows have zero importance and are never selected
+                live = live_part(name, selected, embodiment)
+                dampened += int(live.sum())
+                total += live.numel()
         plan.notes["dampened_fraction"] = dampened / total
-        print(f"SSD dampened {dampened:,} of {total:,} trainable weights ({dampened / total:.4%})", flush=True)
+        print(f"SSD (alpha {alpha:.4g}, reference {recipe.ssd_reference}, forget share {share:.3f}) dampened "
+              f"{dampened:,} of the {total:,} trainable weights that can change ({dampened / total:.4%})", flush=True)
 
     plan.prepare = prepare
     return plan
@@ -233,8 +277,6 @@ def _plan_salun(node: Node, recipe: Recipe) -> OpPlan:
     official code restores them after every step). The mask is saved in the node directory, so a
     resumed op uses the same one."""
     forget, retain = _forget_retain(node, recipe)
-    if not retain:
-        raise ValueError(f"{node}: salun needs at least one retained task")
     forget_task, retain_tasks = forget[0][0], retain[0]
     plan = OpPlan({}, None, recipe.unlearn_steps, recipe.unlearn_lr,
                   {"salun_keep": recipe.salun_keep, "importance_batches": recipe.importance_batches,
@@ -284,26 +326,35 @@ def _plan_salun(node: Node, recipe: Recipe) -> OpPlan:
     return plan
 
 
-def top_fraction_threshold(values: dict[str, torch.Tensor], keep: float, sample_size: int = 10_000_000) -> float:
-    """Value above which `keep` of all entries lie, estimated from a uniform random sample (an exact
-    quantile over ~1e9 entries does not fit torch.quantile)."""
+def top_fraction_threshold(values: dict[str, torch.Tensor], keep: float, sample_size: int = 10_000_000,
+                           divide_by: dict[str, torch.Tensor] | None = None) -> float:
+    """Value above which `keep` of all entries lie (NaN entries ignored), estimated from a uniform random
+    sample (an exact quantile over ~1e9 entries does not fit torch.quantile); exact when there are at
+    most `sample_size` entries. With divide_by, the entries are values / divide_by (non-finite ratios
+    ignored), computed only where sampled."""
     total = sum(v.numel() for v in values.values())
     generator = {}  # one fixed-seed generator per device: the global RNG is left untouched
 
-    def sample(v):
-        g = generator.setdefault(v.device, torch.Generator(device=v.device).manual_seed(0))
-        return v.flatten()[torch.randint(v.numel(), (max(1, round(sample_size * v.numel() / total)),), device=v.device, generator=g)]
+    def entries(name):
+        v = values[name].flatten()
+        if total > sample_size:
+            g = generator.setdefault(v.device, torch.Generator(device=v.device).manual_seed(0))
+            index = torch.randint(v.numel(), (max(1, round(sample_size * v.numel() / total)),), device=v.device, generator=g)
+        else:
+            index = slice(None)
+        x = v[index].float()
+        if divide_by is not None:
+            x = x / divide_by[name].flatten()[index].float()
+            x = torch.where(torch.isfinite(x), x, torch.nan)
+        return x
 
-    samples = [sample(v) for v in values.values()]
-    return torch.quantile(torch.cat(samples).float(), 1 - keep).item()
+    return torch.nanquantile(torch.cat([entries(name) for name in values]), 1 - keep).item()
 
 
 def _plan_vlaforget(node: Node, recipe: Recipe) -> OpPlan:
     """VLA-Forget (Ranjan & Polyzou 2026), staged LoRA unlearning of vision, projector and
     reasoning/action layers; see vlu/vlaforget.py for the port and its choices."""
     forget, retain = _forget_retain(node, recipe)
-    if not retain:
-        raise ValueError(f"{node}: vlaforget needs at least one retained task")
     task, retain_tasks = forget[0][0], retain[0]
     plan = OpPlan({}, None, recipe.unlearn_steps, recipe.vlaforget.lr, {"vlaforget": asdict(recipe.vlaforget)})
 
@@ -329,40 +380,9 @@ UNLEARN_METHODS: dict[str, Callable[[Node, Recipe], OpPlan]] = {
 ZERO_STEP_METHODS = {"purge"}
 
 
-def _convert(current, text: str):
-    """An override's text as the type of the recipe value it replaces."""
-    if text == "None":
-        return None
-    if isinstance(current, bool):
-        return text.lower() in ("1", "true", "yes")
-    if isinstance(current, int) or current is None:
-        value = float(text)
-        if value != int(value):
-            raise ValueError(f"{text!r} is not an integer")
-        return int(value)
-    if isinstance(current, float):
-        return float(text)
-    if isinstance(current, tuple):
-        return tuple(type(current[0])(x) for x in text.split(":"))
-    return text
-
-
-def recipe_for(op: Op, recipe: Recipe) -> Recipe:
-    """The recipe of one op: the frozen recipe with the op's overrides (vlu/nodes.py) applied."""
-    changes, vlaforget = {}, {}
-    for key, text in op.overrides:
-        if key.startswith("vlaforget."):
-            name = key.split(".", 1)[1]
-            vlaforget[name] = _convert(getattr(recipe.vlaforget, name), text)
-        else:
-            changes[key] = _convert(getattr(recipe, key), text)
-    if vlaforget:
-        changes["vlaforget"] = replace(recipe.vlaforget, **vlaforget)
-    return replace(recipe, **changes) if changes else recipe
-
-
 def plan_op(node: Node, recipe: Recipe) -> OpPlan:
     op = node.last_op
+    check_op(node)  # e.g. the methods in NEEDS_RETAINED_TASK need a retained task besides the forget task
     recipe = recipe_for(op, recipe)
     if op.kind == "L":
         return _plan_learn(node, recipe)

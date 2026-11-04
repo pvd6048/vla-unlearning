@@ -51,6 +51,10 @@ SIM_VENV="$(dirname "$(dirname "$SIM_PY")")"
 if [ ! -f "$SIM_VENV/.vlu_ok" ]; then
     rm -rf "$SIM_VENV"
     uv venv "$SIM_VENV" --python 3.10
+    # LIBERO needs egl-probe 1.0.2, whose setup.py runs a plain `cmake ..` on a CMakeLists.txt that asks
+    # for CMake 2.8.12; CMake >= 4.0 refuses that unless a policy minimum is set. CMake reads this
+    # environment variable itself (older CMake ignores it); a -D flag in CMAKE_ARGS would not reach it.
+    export CMAKE_POLICY_VERSION_MINIMUM=3.5
     sim_install() { uv pip install --python "$SIM_PY" --exclude-newer 2026-04-15T00:00:00Z "$@"; }
     sim_install --requirements "$LIBERO_REPO/requirements.txt"
     sim_install -e "$LIBERO_REPO" --config-settings editable_mode=compat

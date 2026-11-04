@@ -6,6 +6,8 @@ results and the few rollout videos. Model weights are not included. Plain Python
 """
 
 import argparse
+import contextlib
+import io
 import json
 from pathlib import Path
 import shutil
@@ -16,6 +18,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from calibrate import VARIANTS  # noqa: E402
+from submit import warn_recipe_changes  # noqa: E402
 from vlu.config import PROJECT_DIR, RUNS_DIR  # noqa: E402
 from vlu.nodes import Node  # noqa: E402
 from vlu.stream_metrics import wilson_interval  # noqa: E402
@@ -88,6 +91,12 @@ def main():
     plan = load_plan(run)
     states = [(item_key(i), status(run, i)) for i in plan]
     md += ["## Plan status", "", table(["item", "status"], states), ""]
+    with contextlib.redirect_stdout(io.StringIO()):
+        changed = warn_recipe_changes(run, plan)
+    if changed:
+        md += ["## Nodes trained with another recipe than the current code's", "",
+               "Their results (and those of nodes trained on top of them) are not what the code now describes.", "",
+               *[f"- {w.removeprefix('WARNING: ')}" for w in changed], ""]
     (out / "failed").mkdir(exist_ok=True)
     for item in plan:
         if failed_file(run, item).exists():
@@ -121,11 +130,12 @@ def main():
     for v in VARIANTS:
         node = Node.from_path(run, f"LA/LB/UB-{v}")
         p = probes(train_log(node))
-        final = p[max(p)] if p else {}
+        final = p[max(p)] if p and node.done else {}  # a failed or unfinished op has no final probe (its log may hold only step 0, the parent's)
         at = lambda step, task: fmt(p.get(step, {}).get(task))  # noqa: E731
         results_node = lalb if v == "purge" else node
         notes = json.loads((node.dir / "op.json").read_text()).get("notes", {}) if (node.dir / "op.json").exists() else {}
-        extra = {k: notes[k] for k in ("dampened_fraction", "kept_fraction", "batch_forget_retain") if k in notes}
+        extra = {k: notes[k] for k in ("dampened_fraction", "kept_fraction", "batch_forget_retain", "ssd_reference",
+                                       "forget_share", "assd_alpha", "assd_percentile") if k in notes}
         if (node.dir / "vlaforget.json").exists():
             vf = json.loads((node.dir / "vlaforget.json").read_text())
             extra["selected"] = {s: d["selected"] for s, d in vf["stages"].items()}

@@ -54,7 +54,7 @@ scripts/             setup_cluster.sh, prepare_data.py, submit.py (plan + worker
   never change between ops or branches.
 
 Every job is safe to rerun: done nodes and finished evals are skipped, interrupted training resumes
-from `resume.pt` (saved every 1000 steps), interrupted evals redo only unfinished tasks.
+from `resume.pt` (saved every 2500 steps), interrupted evals redo only unfinished tasks.
 
 ## One-time setup (login node)
 
@@ -105,7 +105,7 @@ Slurm resources for training and eval jobs are in `RESOURCES` at the top of `scr
 
 `CALIBRATION.md` is the one-page instruction for someone running our hyperparameter calibration on
 their own GPU machine: `scripts/setup_cluster.sh`, then `scripts/run_local.sh`, which runs the base
-tests, the calibration plan (`scripts/calibrate.py`: LA with 2k/5k/10k snapshots, LA/LB, 19 unlearning
+tests, the calibration plan (`scripts/calibrate.py`: LA with 2k/5k/10k snapshots, LA/LB, 28 unlearning
 variants of B) with one local worker per GPU, and packs `summary.md` plus all logs into one `.tar.gz`
 (`scripts/calibration_report.py`). Hyperparameter variants are ordinary nodes with recipe overrides in
 their op token, e.g. `LA/LB/UB-ga@unlearn_lr=3e-5` (`vlu/nodes.py`, `vlu.ops.recipe_for`).
@@ -211,7 +211,7 @@ the parent model (a reference copy, importances, a weight mask) gives its plan a
 How the methods map onto GR00T's flow-matching loss (PROVISIONAL values in `vlu/config.py`):
 - **NPO**: log-likelihood of a chunk := −(sum of squared flow-matching errors); θ and the frozen
   reference see the same noise and timesteps; β = 0.1.
-- **SSD**: diagonal Fisher of L_FM gradients on the forget task vs. on all the parent's tasks; α = 5 (the official ViT setting), λ = 1; no training steps.
+- **SSD**: diagonal Fisher of L_FM gradients on the forget task vs. on the retained tasks (the paper uses all data, which at its forget shares of 1–5% is about the same; see METHODS.md §4); α = 5 (the official ViT setting), λ = 1; `ssd_adaptive=1` gives ASSD's tuning-free α; no training steps.
 - **VLA-Forget**: three stages of LoRA unlearning (vision tower → vision-language projector → LLM/DiT
   layers), each on the top-scored layers, with retain, forget, mismatch and feature losses combined by
   PCGrad; KL terms become velocity differences between the model and its pre-op copy. The mapping

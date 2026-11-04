@@ -22,7 +22,7 @@ Files inside a node directory:
     eval/<weights>_seed<k>/<task>.json   LIBERO rollout results
 """
 
-from dataclasses import dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 import json
 from pathlib import Path
 
@@ -39,7 +39,7 @@ class Op:
     method: str | None = None  # unlearning method, only for U ops
     # Recipe overrides for this op only, e.g. (("unlearn_lr", "3e-5"),): hyperparameter variants are
     # separate nodes that share their parent (used for calibration sweeps). Applied by
-    # vlu.ops.recipe_for; keys are Recipe fields or "vlaforget.<field>".
+    # recipe_for (below); keys are Recipe fields or "vlaforget.<field>".
     overrides: tuple[tuple[str, str], ...] = ()
 
     @classmethod
@@ -180,3 +180,93 @@ def oracle_path(run: str, path: str) -> str:
     """The retrain oracle of a node: its L ops for the tasks it still retains, in order, so it has
     never seen any data of the tasks that were unlearned. E.g. LA/LB/LC/UB-ga/LD -> LA/LC/LD."""
     return "/".join(f"L{task}" for task in Node.from_path(run, path).retained_tasks())
+
+
+# --- Recipes of ops ----------------------------------------------------------------------------------
+
+
+def _convert(current, text: str):
+    """An override's text as the type of the recipe value it replaces."""
+    if text == "None":
+        return None
+    if isinstance(current, bool):
+        return text.lower() in ("1", "true", "yes")
+    if isinstance(current, int) or current is None:
+        value = float(text)
+        if value != int(value):
+            raise ValueError(f"{text!r} is not an integer")
+        return int(value)
+    if isinstance(current, float):
+        return float(text)
+    if isinstance(current, tuple):
+        return tuple(type(current[0])(x) for x in text.split(":"))
+    return text
+
+
+def recipe_for(op: Op, recipe: Recipe) -> Recipe:
+    """The recipe of one op: the frozen recipe with the op's overrides applied."""
+    changes, vlaforget = {}, {}
+    for key, text in op.overrides:
+        if key.startswith("vlaforget."):
+            name = key.split(".", 1)[1]
+            vlaforget[name] = _convert(getattr(recipe.vlaforget, name), text)
+        else:
+            changes[key] = _convert(getattr(recipe, key), text)
+    if vlaforget:
+        changes["vlaforget"] = replace(recipe.vlaforget, **vlaforget)
+    return replace(recipe, **changes) if changes else recipe
+
+
+# Unlearning methods that train on, or compare against, the retained tasks: they cannot unlearn a
+# parent's only task (vlu/ops.py's plans rely on this check, see plan_op).
+NEEDS_RETAINED_TASK = frozenset({"graddiff", "ssd", "salun", "vlaforget"})
+
+
+def check_op(node: Node) -> None:
+    """Raise ValueError if the node's last op cannot be applied to its parent. scripts/submit.py calls
+    this when planning, so an impossible op fails at once rather than in a worker job."""
+    op = node.last_op
+    if op.kind != "U":
+        return
+    kept = node.parent.retained_tasks()
+    if op.task not in kept:
+        raise ValueError(f"{node}: cannot unlearn {op.task}, it is not retained by the parent")
+    if op.method in NEEDS_RETAINED_TASK and kept == [op.task]:
+        raise ValueError(f"{node}: {op.method} needs a retained task besides {op.task}")
+
+
+# The recipe fields each kind of op depends on (bookkeeping such as logging, checkpoints and probes
+# is left out: it does not change the result).
+_TRAIN_KEYS = ("batch_size", "weight_decay", "warmup_ratio", "max_grad_norm")
+_UNLEARN_KEYS = ("unlearn_steps", "unlearn_lr") + _TRAIN_KEYS
+_KEYS_USED = {
+    "L": ("learn_steps", "lr", "replay_per_task") + _TRAIN_KEYS,
+    "ga": _UNLEARN_KEYS,
+    "graddiff": _UNLEARN_KEYS,
+    "npo": _UNLEARN_KEYS + ("npo_beta",),
+    "ssd": ("batch_size", "importance_batches", "ssd_alpha", "ssd_lambda", "ssd_reference", "ssd_adaptive"),
+    "salun": _UNLEARN_KEYS + ("salun_keep", "importance_batches"),
+    "vlaforget": ("unlearn_steps", "batch_size") + tuple(f"vlaforget.{f.name}" for f in fields(VLAForgetConfig)),
+    "purge": (),
+}
+
+
+def _flat(recipe: dict) -> dict:
+    return {**{k: v for k, v in recipe.items() if k != "vlaforget"},
+            **{f"vlaforget.{k}": v for k, v in recipe.get("vlaforget", {}).items()}}
+
+
+def recipe_changes(node: Node, recipe: Recipe) -> dict[str, tuple]:
+    """{field: (value recorded in the node's op.json, value the current code would use)} for the
+    fields its op depends on, if the node was trained with other values, e.g. because a default
+    changed since. A field missing from op.json (added later) counts as changed. Empty for a node
+    without op.json or with an unknown method."""
+    path = node.dir / "op.json"
+    if node.is_base or not path.exists():
+        return {}
+    recorded = json.loads(path.read_text()).get("recipe")
+    keys = _KEYS_USED.get("L" if node.last_op.kind == "L" else node.last_op.method, ())
+    if recorded is None or not keys:
+        return {}
+    recorded, current = _flat(recorded), _flat(json.loads(json.dumps(asdict(recipe_for(node.last_op, recipe)))))
+    return {k: (recorded.get(k, "<not recorded>"), current[k]) for k in keys if recorded.get(k, "<not recorded>") != current[k]}

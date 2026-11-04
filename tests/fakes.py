@@ -62,7 +62,8 @@ class Fake(nn.Module):
         lm.model.layers[2].requires_grad_(True)
 
     def forward(self, inputs):
-        pix = inputs["pixel_values"].cuda()                      # (B * 2 views, P, 3)
+        # (B * 2 views, P, 3) packed as SigLIP2 does: one sequence of all images' patches, image by image
+        pix = inputs["pixel_values"].cuda().reshape(1, -1, 3)
         h = self.backbone.model.vision_model.vision_model.patch(pix)
         for layer in self.backbone.model.vision_model.vision_model.encoder.layers:
             h = layer(h)

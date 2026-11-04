@@ -29,7 +29,7 @@ fi
 {
     echo "host $(hostname)  date $(date)  commit $(git rev-parse HEAD 2>/dev/null)$(git diff --quiet 2>/dev/null || echo -dirty)"
     nvidia-smi
-    nproc; free -g; df -h "$VLU_STORE"
+    echo "cpus $VLU_CPUS"; free -g; df -h "$VLU_STORE"
     "$MAIN_PY" -c "import torch, flash_attn, transformers; print('torch', torch.__version__, 'cuda', torch.version.cuda,
 'flash_attn', flash_attn.__version__, 'transformers', transformers.__version__,
 [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())])"
@@ -78,15 +78,24 @@ if [ "$TESTS_OK" = 0 ]; then echo "ERROR: a base test failed; not starting the r
 
 # 4. Plan ------------------------------------------------------------------------------------------
 "$MAIN_PY" scripts/calibrate.py --run "$RUN"
+# A rerun (e.g. after a code fix) tries earlier failures again.
+"$MAIN_PY" scripts/submit.py --run "$RUN" --retry-failed --workers none
 
-# 5. One worker per GPU: GPUs with >= 40 GB train and evaluate, smaller ones only evaluate --------------
-mapfile -t GPUS < <(nvidia-smi --query-gpu=index,memory.total --format=csv,noheader,nounits)
-export VLU_EVAL_WORKERS=$(( $(nproc) / ${#GPUS[@]} - 1 > 1 ? $(nproc) / ${#GPUS[@]} - 1 : 1 ))
+# 5. One worker per GPU: GPUs with >= TRAIN_FREE_MIB free train and evaluate, the others only evaluate
+#    (training peaks at ~34 GB, NPO's with its frozen reference at ~41 GB; CALIBRATION.md says 44 GB) ---
+TRAIN_FREE_MIB=44000
+mapfile -t GPUS < <(nvidia-smi --query-gpu=index,memory.free,memory.used --format=csv,noheader,nounits)
+export VLU_EVAL_WORKERS=$(( VLU_CPUS / ${#GPUS[@]} - 1 > 1 ? VLU_CPUS / ${#GPUS[@]} - 1 : 1 ))
+if ! printf '%s\n' "${GPUS[@]}" | awk -F', ' -v need="$TRAIN_FREE_MIB" '$2 >= need {ok = 1} END {exit !ok}'; then
+    echo "ERROR: no GPU has $TRAIN_FREE_MIB MiB free for training (nvidia-smi: ${GPUS[*]}); please stop other jobs on the GPUs"
+    package; exit 1
+fi
 PIDS=()
 for line in "${GPUS[@]}"; do
-    index="${line%%,*}"; mem="${line##*, }"
-    kinds=$([ "$mem" -ge 40000 ] && echo train,eval,features || echo eval)
-    echo "GPU $index (${mem} MiB): $kinds, $VLU_EVAL_WORKERS simulator processes per eval"
+    IFS=', ' read -r index free used <<< "$line"
+    kinds=$([ "$free" -ge "$TRAIN_FREE_MIB" ] && echo train,eval,features || echo eval)
+    [ "$used" -gt 1000 ] && echo "WARNING: GPU $index already has ${used} MiB in use by another program; a job started there later can still run out of memory"
+    echo "GPU $index (${free} MiB free): $kinds, $VLU_EVAL_WORKERS simulator processes per eval"
     CUDA_VISIBLE_DEVICES="$index" "$MAIN_PY" -m vlu.worker --run "$RUN" --kinds "$kinds" --wait \
         > "$OUT/worker_gpu$index.log" 2>&1 &
     PIDS+=($!)

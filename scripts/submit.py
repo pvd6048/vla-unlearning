@@ -30,8 +30,8 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from vlu.config import PROJECT_DIR, RUNS_DIR  # noqa: E402
-from vlu.nodes import Node, expand_stream, oracle_path, run_seed  # noqa: E402
+from vlu.config import PROJECT_DIR, RECIPE, RUNS_DIR  # noqa: E402
+from vlu.nodes import Node, check_op, expand_stream, oracle_path, recipe_changes, run_seed  # noqa: E402
 from vlu.tasks import STREAMS  # noqa: E402
 from vlu.worker import failed_file, item_key, load_plan, plan_path, status, write_plan  # noqa: E402
 
@@ -95,7 +95,27 @@ def build_items(args) -> list[dict]:
         for depth in range(1, node.depth + 1):  # the node must be trained (done ones are skipped later)
             items.append({"kind": "train", "node": "/".join(str(op) for op in node.ops[:depth]), "save_at": []})
         items.append({"kind": "features", "node": path, "weights": "final", "fisher": tasks.split(",")})
+    for item in items:  # an op that cannot be applied fails now, not in a worker job
+        if item["kind"] == "train":
+            check_op(Node.from_path(args.run, item["node"]))
     return items
+
+
+def warn_recipe_changes(run: str, plan: list[dict]) -> list[str]:
+    """Print (and return) a warning for every trained node of the plan whose op.json records other
+    values for the fields its op depends on than the current code would use (e.g. a default changed
+    after it was trained): its results, and everything trained on top of it, are then not what the
+    code now describes. Such a node is never retrained by itself: delete it to retrain it."""
+    warnings = []
+    for item in plan:
+        if item["kind"] == "train":
+            node = Node.from_path(run, item["node"])
+            changes = node.done and recipe_changes(node, RECIPE)
+            if changes:
+                text = ", ".join(f"{k}: {old!r} -> now {new!r}" for k, (old, new) in changes.items())
+                warnings.append(f"WARNING: {node} was trained with another recipe ({text})")
+                print(warnings[-1])
+    return warnings
 
 
 def merge(plan: list[dict], new: list[dict]) -> list[dict]:
@@ -169,7 +189,11 @@ def main():
     else:
         run_seed(args.run, args.seed)  # creates the run, or checks that --seed matches it
 
-    plan = merge(load_plan(args.run), build_items(args))
+    try:
+        plan = merge(load_plan(args.run), build_items(args))
+    except ValueError as error:
+        sys.exit(f"cannot plan: {error}")
+    warn_recipe_changes(args.run, plan)
     if args.dry_run:
         for item in plan:
             print(f"{status(args.run, item):8s} {item_key(item)}" + (f"  tasks {','.join(item['tasks'])}" if item["kind"] == "eval" else ""))

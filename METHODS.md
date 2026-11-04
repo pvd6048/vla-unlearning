@@ -113,12 +113,45 @@ Its limits:
 | | Official code | Ours | |
 |---|---|---|---|
 | Importance | Σ over batches of grad², ÷ number of batches, gradients of the batch-mean loss (`ssd.py:161-180`) | Σ over 64 batches of grad² of the batch-mean L_FM (same number of batches for both sets, so the ÷ cancels in the ratio) | Same |
-| Data | forget set; full training set including the forget data (`forget_full_class_main.py:152-156`) | forget task; all tasks the parent keeps, including the forget task | Same |
-| Selection | weights with I_forget > α · I_full (`ssd.py:206-207`) | same | Same |
-| Dampening | multiply by min(λ · I_full / I_forget, 1) (`ssd.py:210-218`) | same | Same |
-| α, λ | α = 10 · `model_size_scaler`, with scaler 0.5 for ViT, so α = 5 for transformers; λ = 1 (`forget_full_class_main.py:161-177`) | α = 5, λ = 1; α = 10 and 20 also in the calibration | Same, plus a calibration check |
+| Data | forget set; full training set including the forget data: `full_train_dl` is an unshuffled `ConcatDataset((retain, forget))` with the forget loader's batch size, so each batch is all-retain or all-forget (`forget_full_class_main.py:152-156`) | forget task; the **retained** tasks (`ssd_reference=retain`, default; batches draw the retained tasks uniformly, like every retain batch here; CIFAR's retain classes are equally large). `ssd_reference=all` is the paper's D as that loader computes it: I_full = (1 − s) · I_retain + s · I_forget, s = the forget task's share of the frames | **Adapted** (below) |
+| Selection | weights with I_forget > α · I_full (`ssd.py:206-207`) | same, with I_ref in place of I_full | Same |
+| Dampening | multiply by min(λ · I_full / I_forget, 1) (`ssd.py:210-218`) | same, with I_ref | Same |
+| α, λ | α = 10 · `model_size_scaler`, with scaler 0.5 for ViT, so α = 5 for transformers; λ = 1 (`forget_full_class_main.py:161-177`). The paper also uses α = 25 (ViT sub-class) and α = 50, λ = 0.1 (PinsFaceRecognition, "due to the much greater similarity between classes") | α = 5, λ = 1; the calibration also runs α = 10, α = 50 with λ = 0.1, ASSD, and the literal D | Same, plus a calibration check |
+| ASSD (optional, `ssd_adaptive=1`) | the authors' tuning-free follow-up (Schoepf, Foster & Brintrup 2024; `if-loops/adaptive-selective-synaptic-dampening@f04c49d`, `error_unlearning.ipynb`): λ = 1; α = the p-th percentile (`np.nanpercentile`, NaN and inf dropped) of I_forget / I_ref over all weights, p = 100 − ln(1 + 100 · \|D_f\|/\|D\|); I_ref from the retain loader | same; \|D_f\|/\|D\| from frame counts; percentile over the weights that can change (LIBERO's embodiment row), estimated from 10M sampled weights | Same; tested to be exact on the fake model |
 | Model mode | `model.eval()` | eval mode | Same |
 | Which weights | all parameters of the classifier | the trainable scope only (section 0) | **Choice** |
+
+**Why the reference importance is the retained tasks.** In the official code the full set's batches are
+all-retain or all-forget, so its importance is exactly I_full = (1 − s) · I_retain + s · I_forget, with
+s = |D_f| / |D|. This changes both steps:
+
+- **Selection.** I_forget > α · I_full is the same as I_forget / I_retain > α(1 − s)/(1 − α s), which is
+  impossible once α ≥ 1/s.
+- **Dampening.** The factor λ · I_full / I_forget can never fall below λ · s.
+
+In every setting of the paper the share is small: 1/100 for a CIFAR-100 class, 1/20 for a CIFAR-20 class,
+and "no more than 5–10% of data" in general (paper). At s = 1/100 and α = 5 the selection is
+I_forget > 5.2 · I_retain, and the dampening can go down to 1%. So the paper's α = 5 effectively meant
+"five times more important to the forget data than to the retained data", and its dampening can almost
+zero a weight.
+
+Our shares of the frames are 0.43 in the calibration (forget B of A, B), 0.30 at S1's U_B and 0.19 at
+U_E. With the literal D, α = 5 is at or above 1/s at the first two (selection impossible). At U_E it
+requires I_forget > 115 · I_retain. Either way, a weight that only the forget task uses is at most
+multiplied by 0.19–0.43.
+
+Using I_retain keeps both steps as they were in the paper's experiments: at s = 1/100, I_full is I_retain
+up to 1%, wherever the retained data matter. α then means the same at every U op of a stream. The
+authors' ASSD code also takes the reference importance from the retain loader.
+`ssd@ssd_alpha=5+ssd_reference=all` stays in the calibration as the literal version.
+
+**The first calibration's SSD runs** computed the literal D differently from the official code. Each
+batch mixed the kept tasks (drawn uniformly, s = 1/2), so the forget term entered I_full with a weight
+between s² and s: s² where the squared mean gradient dominates, s where the per-sample variance does.
+The selection bound was therefore between 1/s = 2 and 1/s² = 4, and α ≥ 5 could not select weights
+systematically either. That is what the run saw: 2% / 0.5% / 0.1% of all trainable weights dampened at
+α = 5 / 10 / 20 (falling like a noise tail), and B's success rate unchanged (0.98). `ssd_reference=all`
+now follows the official loader.
 
 ## 5. SalUn
 
@@ -192,6 +225,20 @@ mode. LoRA dropout (0.05 in the authors' OpenVLA script) is off for the same rea
   Both are in `tests/test_ops.py`.
 - **README.** It still said SSD α = 10 (changed to the ViT value 5 earlier) and "lr 1e-5 for every
   method" (VLA-Forget uses 2e-4). Both corrected.
+
+Found by the first calibration run on the real model:
+- **VLA-Forget's boundary set crashed.** GR00T's SigLIP2 packs all images of a batch into one sequence
+  of shape (1, all patches, C), image by image. We had assumed one row per image, and so had our fake
+  test model. Both are fixed, and the test now fails on the old code.
+- **NPO ran out of memory.** Its frozen reference copied the whole model; it now shares the frozen
+  weights and copies only the trainable ones (tested).
+- **SSD selected nothing systematically.** The paper's full-data importance is used at forget shares of
+  1–5%, ours are 0.2–0.45. The reference importance is now the retained tasks (section 4), with ASSD as
+  an option.
+- **The literal-D importance was not computed as the official code does.** Each of our batches mixed the
+  forget and retained tasks, while the official full loader's batches are all-retain or all-forget (an
+  unshuffled `ConcatDataset`), which makes its importance the mixture (1 − s) · I_retain + s · I_forget.
+  `ssd_reference=all` now computes exactly that (tested against the official update).
 
 Earlier rounds of the same comparison changed:
 - the replay batch to 16 + 16 from fixed 1000-frame buffers;
