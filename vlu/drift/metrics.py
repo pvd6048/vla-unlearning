@@ -60,16 +60,13 @@ def cosine(a: torch.Tensor, b: torch.Tensor) -> float:
 
 
 def top_singular_subspace(w: torch.Tensor, k: int) -> torch.Tensor | None:
-    """Top-k left singular vectors of a 2-D matrix, as orthonormal rows (k, rows); None if w = 0.
-    Exact, via the eigenvectors of the smaller Gram matrix (at most 2048 x 2048 for GR00T's weights)."""
+    """Top-k left singular vectors as orthonormal rows, capped at the numerical rank.
+    None if w = 0. SVD avoids reconstructing zero vectors from the Gram matrix's nullspace."""
     w = w.float()
     if not w.abs().max() > 0:
         return None
-    m, n = w.shape
-    k = min(k, m, n)
-    if m <= n:
-        _, vectors = torch.linalg.eigh(w @ w.T)  # ascending eigenvalues
-        return vectors[:, -k:].flip(-1).T
-    _, vectors = torch.linalg.eigh(w.T @ w)
-    u = w @ vectors[:, -k:].flip(-1)  # (m, k): left singular vectors up to scale
-    return (u / u.norm(dim=0, keepdim=True).clamp_min(1e-30)).T
+    u, s, _ = torch.linalg.svd(w, full_matrices=False)
+    tolerance = max(w.shape) * torch.finfo(s.dtype).eps * s[0]
+    rank = int((s > tolerance).sum().item())
+    k = min(k, rank)
+    return u[:, :k].T if k > 0 else None
