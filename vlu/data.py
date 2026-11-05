@@ -13,10 +13,13 @@ would have seen without the interruption.
 """
 
 import dataclasses
+from contextlib import contextmanager
 from dataclasses import dataclass
+import random
 
 import av
 import numpy as np
+import torch
 from torch.utils.data import Dataset
 
 from gr00t.data.dataset import lerobot_episode_loader
@@ -28,6 +31,27 @@ from vlu.config import EMBODIMENT, GOAL_DATASET, VIDEO_BACKEND
 from vlu.tasks import TASKS, instruction
 
 Slots = list  # of tuple[str, ...] (tasks) or ReplayBuffer
+
+
+@contextmanager
+def _step_randomness(processor, seed: int, step: int):
+    """Make preprocessing depend on the batch identity, not worker history or prefetch."""
+    py_state, np_state = random.getstate(), np.random.get_state()
+    aug_seed = int(np.random.SeedSequence([seed, step]).generate_state(1)[0])
+    try:
+        with torch.random.fork_rng(devices=[]):
+            random.seed(aug_seed)
+            np.random.seed(aug_seed)
+            # Workers only preprocess CPU data; do not initialize CUDA after fork.
+            torch.random.default_generator.manual_seed(aug_seed)
+            transform = getattr(processor, "train_image_transform", None)
+            for item in [transform, *(getattr(transform, "mask_transforms", None) or [])]:
+                if hasattr(item, "set_random_seed"):
+                    item.set_random_seed(aug_seed)
+            yield
+    finally:
+        random.setstate(py_state)
+        np.random.set_state(np_state)
 
 
 @dataclass(frozen=True)
@@ -133,6 +157,10 @@ class OpBatches(Dataset):
         return self.num_steps
 
     def __getitem__(self, step: int) -> dict[str, dict]:
+        with _step_randomness(self.processor, self.seed, step):
+            return self._batch(step)
+
+    def _batch(self, step: int) -> dict[str, dict]:
         rng = np.random.default_rng([self.seed, step])
         batch = {}
         for name, slots in self.parts.items():

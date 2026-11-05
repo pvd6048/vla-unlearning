@@ -8,8 +8,10 @@ and a rerun of the same op continues from there.
 
 import json
 import math
+import random
 import time
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from transformers import get_cosine_schedule_with_warmup
@@ -87,6 +89,8 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
     scheduler = get_cosine_schedule_with_warmup(optimizer, math.ceil(recipe.warmup_ratio * plan.steps), plan.steps)
 
     resume_path = node.dir / "resume.pt"
+    # Short ops (including the default 1000-step U ops) need a checkpoint before the end too.
+    save_every = min(recipe.save_every, max(1, plan.steps // 2))
     start = 0
     if resume_path.exists():
         state = torch.load(resume_path, map_location="cpu", weights_only=False)
@@ -99,6 +103,9 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
         scheduler.load_state_dict(state["scheduler"])
         torch.set_rng_state(state["cpu_rng"])
         torch.cuda.set_rng_state(state["cuda_rng"])
+        if "python_rng" in state:  # accept checkpoints written before these RNGs were recorded
+            random.setstate(state["python_rng"])
+            np.random.set_state(state["numpy_rng"])
         start = state["step"]
         print(f"resuming {node} at step {start}", flush=True)
 
@@ -110,6 +117,7 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
         prefetch_factor=4,
         pin_memory=True,
         multiprocessing_context="fork",
+        generator=torch.Generator().manual_seed(0),  # worker seeds must not consume the model's CPU RNG
     )
     log = jsonl_logger(node.dir / "train_log.jsonl", keep_through=start if start > 0 else -1)
     if start == 0:
@@ -149,7 +157,7 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
 
         if done in save_at:
             save_weights(model, node.dir / f"step_{done:06d}.safetensors")
-        if done % recipe.save_every == 0 and done < plan.steps:
+        if done % save_every == 0 and done < plan.steps:
             _check_optimizer_finite(optimizer)
             state = {
                 "step": done,
@@ -158,6 +166,8 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
                 "scheduler": scheduler.state_dict(),
                 "cpu_rng": torch.get_rng_state(),
                 "cuda_rng": torch.cuda.get_rng_state(),
+                "python_rng": random.getstate(),
+                "numpy_rng": np.random.get_state(),
             }
             tmp = resume_path.with_name("resume.pt.tmp")
             torch.save(state, tmp)
