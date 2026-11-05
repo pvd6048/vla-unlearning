@@ -99,6 +99,16 @@ def is_ready(run: str, item: dict) -> bool:
     return node.parent.done if item["kind"] == "train" else node.done
 
 
+def require_complete(run: str, kinds: set[str] | None = None) -> None:
+    """A successful exit must mean all required items, including failed ones, are done."""
+    plan = load_plan(run)
+    items = [i for i in plan if kinds is None or i["kind"] in kinds]
+    incomplete = [item_key(i) for i in items if not is_done(run, i)]
+    if not plan or incomplete:
+        detail = ", ".join(incomplete[:5]) if incomplete else "the plan is empty"
+        raise SystemExit(f"run {run} is incomplete: {detail}")
+
+
 def status(run: str, item: dict) -> str:
     """done / failed / claimed / ready / waiting (for logs and scripts/submit.py)."""
     if is_done(run, item):
@@ -246,13 +256,18 @@ def main():
     parser.add_argument("--kinds", default="train,eval,features", help="item kinds this worker may run")
     parser.add_argument("--wait", action="store_true",
                         help="when nothing is ready, wait while other workers are busy (several workers on one machine)")
+    parser.add_argument("--check-complete", action="store_true", help="check the whole plan without starting work")
     args = parser.parse_args()
+    if args.check_complete:
+        require_complete(args.run)
+        return
     kinds = set(args.kinds.split(","))
 
     idle_checks = 0
     while True:
         pending = [i for i in load_plan(args.run) if i["kind"] in kinds and status(args.run, i) in ("ready", "waiting", "claimed")]
         if not pending:
+            require_complete(args.run, kinds)
             print("nothing left to do", flush=True)
             return
         item = next((i for i in pending if is_ready(args.run, i) and take(args.run, i)), None)
@@ -263,6 +278,7 @@ def main():
             if not args.wait or idle_checks >= 3:
                 print(f"{len(pending)} item(s) left, but none is ready and free (they wait for other workers, "
                       f"or for a failed item); exiting", flush=True)
+                require_complete(args.run, kinds)
                 return
             time.sleep(60)
             continue

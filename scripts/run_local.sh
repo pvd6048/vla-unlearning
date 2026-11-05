@@ -77,9 +77,13 @@ done
 if [ "$TESTS_OK" = 0 ]; then echo "ERROR: a base test failed; not starting the runs"; package; exit 1; fi
 
 # 4. Plan ------------------------------------------------------------------------------------------
-"$MAIN_PY" scripts/calibrate.py --run "$RUN"
+if ! "$MAIN_PY" scripts/calibrate.py --run "$RUN"; then
+    echo "ERROR: calibration planning failed"; package; exit 1
+fi
 # A rerun (e.g. after a code fix) tries earlier failures again.
-"$MAIN_PY" scripts/submit.py --run "$RUN" --retry-failed --workers none
+if ! "$MAIN_PY" scripts/submit.py --run "$RUN" --retry-failed --workers none; then
+    echo "ERROR: writing the run plan failed"; package; exit 1
+fi
 
 # 5. One worker per GPU: GPUs with >= TRAIN_FREE_MIB free train and evaluate, the others only evaluate
 #    (training peaks at ~34 GB, NPO's with its frozen reference at ~41 GB; CALIBRATION.md says 44 GB) ---
@@ -101,8 +105,17 @@ for line in "${GPUS[@]}"; do
     PIDS+=($!)
     sleep 30  # start one at a time (each loads a 3B model)
 done
-wait "${PIDS[@]}"
+WORKERS_OK=1
+for pid in "${PIDS[@]}"; do
+    wait "$pid" || WORKERS_OK=0
+done
 
 # 6. Report ----------------------------------------------------------------------------------------
 "$MAIN_PY" scripts/submit.py --run "$RUN" --workers none
+if ! "$MAIN_PY" -m vlu.worker --run "$RUN" --check-complete; then
+    echo "ERROR: the experiment did not complete every planned item"; package; exit 1
+fi
+if [ "$WORKERS_OK" = 0 ]; then
+    echo "ERROR: a worker exited unsuccessfully"; package; exit 1
+fi
 package
