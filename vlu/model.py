@@ -141,6 +141,16 @@ def add_frozen_overrides(model, names) -> None:
     setattr(model, OVERRIDES_ATTR, frozen_overrides(model) | set(names))
 
 
+def check_finite(tensors: dict[str, torch.Tensor], context: str) -> None:
+    """Reject invalid updates/checkpoints, with one synchronization per tensor device."""
+    checks = {}
+    for tensor in tensors.values():
+        checks.setdefault(tensor.device, []).append(torch.isfinite(tensor.detach()).all())
+    if any(not torch.stack(values).all().item() for values in checks.values()):
+        bad = [name for name, tensor in tensors.items() if not torch.isfinite(tensor.detach()).all().item()]
+        raise FloatingPointError(f"{context}: non-finite tensors: {', '.join(bad[:5])}")
+
+
 def save_weights(model, path: Path) -> None:
     """Save the trainable parameters (fp32) and any frozen overrides atomically: a crash never leaves
     a half-written file under the final name, and the file's existence is what marks a node as done."""
@@ -148,6 +158,7 @@ def save_weights(model, path: Path) -> None:
     overrides = sorted(frozen_overrides(model))
     names = set(trainable_named_parameters(model)) | set(overrides)
     state = {name: params[name].detach().float().cpu().contiguous() for name in sorted(names)}
+    check_finite(state, f"cannot save {path}")
     tmp = path.with_name(path.name + ".tmp")
     save_file(state, str(tmp), metadata={"frozen_overrides": json.dumps(overrides)})
     tmp.replace(path)
@@ -158,6 +169,7 @@ def load_weights(model, path: Path) -> None:
     parameters (else it was saved with another trainable scope); its frozen overrides (listed in the
     file's metadata) must be frozen parameters of the model."""
     state = load_file(str(path))
+    check_finite(state, f"cannot load {path}")
     with safe_open(str(path), framework="pt") as f:
         overrides = set(json.loads((f.metadata() or {}).get("frozen_overrides", "[]")))
     all_params = dict(model.named_parameters())

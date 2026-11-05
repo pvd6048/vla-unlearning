@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 from transformers import get_cosine_schedule_with_warmup
 
 from vlu.config import Recipe
-from vlu.model import save_weights, trainable_named_parameters
+from vlu.model import check_finite, save_weights, trainable_named_parameters
 from vlu.nodes import Node
 from vlu.ops import OpPlan, fm_loss
 
@@ -56,6 +56,11 @@ def _optimizer(model, lr: float, weight_decay: float):
     return torch.optim.AdamW(groups, lr=lr)
 
 
+def _check_optimizer_finite(optimizer):
+    check_finite({f"{i}.{name}": value for i, state in enumerate(optimizer.state.values())
+                  for name, value in state.items() if isinstance(value, torch.Tensor)}, "optimizer state")
+
+
 @torch.no_grad()
 def probe_losses(model, probes: dict[str, dict]) -> dict[str, float]:
     """L_FM of each task's fixed probe batch, with fixed noise and no dropout, so values are
@@ -85,10 +90,12 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
     start = 0
     if resume_path.exists():
         state = torch.load(resume_path, map_location="cpu", weights_only=False)
+        check_finite(state["weights"], "resume weights")
         with torch.no_grad():
             for name, p in trainable_named_parameters(model).items():
                 p.copy_(state["weights"][name])
         optimizer.load_state_dict(state["optimizer"])
+        _check_optimizer_finite(optimizer)
         scheduler.load_state_dict(state["scheduler"])
         torch.set_rng_state(state["cpu_rng"])
         torch.cuda.set_rng_state(state["cuda_rng"])
@@ -113,12 +120,14 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
     for step, batch in zip(range(start, plan.steps), loader):
         with torch.autocast("cuda", dtype=torch.bfloat16):
             loss, metrics = plan.loss_fn(model, batch)
+        check_finite({"loss": loss}, f"training step {step + 1}")
         loss.backward()
         for p, mask in masked:  # SalUn: only the selected weights get a gradient
             if p.grad is not None:
                 p.grad.mul_(mask)
-        grad_norm = torch.nn.utils.clip_grad_norm_(params, recipe.max_grad_norm).item()
+        grad_norm = torch.nn.utils.clip_grad_norm_(params, recipe.max_grad_norm, error_if_nonfinite=True).item()
         optimizer.step()
+        check_finite(named, f"updated weights at step {step + 1}")
         scheduler.step()
         optimizer.zero_grad(set_to_none=True)
 
@@ -141,6 +150,7 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
         if done in save_at:
             save_weights(model, node.dir / f"step_{done:06d}.safetensors")
         if done % recipe.save_every == 0 and done < plan.steps:
+            _check_optimizer_finite(optimizer)
             state = {
                 "step": done,
                 "weights": {n: p.detach().cpu() for n, p in trainable_named_parameters(model).items()},

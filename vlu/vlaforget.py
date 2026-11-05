@@ -56,7 +56,7 @@ from vlu import lora
 from vlu.config import Recipe
 from vlu.data import Frames, OpBatches, make_sample
 from vlu.drift.weights import LLM_LAYER, VISION_LAYER
-from vlu.model import add_frozen_overrides
+from vlu.model import add_frozen_overrides, check_finite
 from vlu.ops import OpContext, frozen_reference
 from vlu.train import jsonl_logger, probe_losses
 
@@ -310,20 +310,25 @@ def run(ctx: OpContext, probes: dict, recipe: Recipe, forget_task: str, retain_t
         for step, batch in zip(range(steps), loader):
             out_f, mine_f, ref_f = paired_forward(model, ref, taps, ref_taps, batch["forget"])
             forget_fm, mismatch = out_f["loss"], velocity_kl(out_f, mine_f, ref_f)
+            check_finite({"forget_fm": forget_fm, "mismatch": mismatch}, f"VLA-Forget {stage} step {step + 1}")
             g2 = flat_grad(-cfg.lambda_forget * forget_fm, params, retain_graph=True)
             g3 = flat_grad(-cfg.lambda_mismatch * mismatch, params)
             out_r, mine_r, ref_r = paired_forward(model, ref, taps, ref_taps, batch["retain"])
             retain_fm, retain_kl = out_r["loss"], velocity_kl(out_r, mine_r, ref_r)
             feat_r = feature_loss(mine_r, ref_r, cfg.gamma)
+            check_finite({"retain_fm": retain_fm, "retain_kl": retain_kl, "feat_r": feat_r},
+                         f"VLA-Forget {stage} step {step + 1}")
             g1 = flat_grad(retain_fm + cfg.beta_kl * retain_kl, params, retain_graph=True)
             g4 = flat_grad(cfg.lambda_feat * feat_r, params)
             _, mine_m, ref_m = paired_forward(model, ref, taps, ref_taps, batch["boundary"])
             feat_m = feature_loss(mine_m, ref_m, cfg.gamma)
+            check_finite({"feat_m": feat_m}, f"VLA-Forget {stage} step {step + 1}")
             g4 = g4 + flat_grad(cfg.lambda_feat * feat_m, params)
             g, conflicts = pcgrad([g1, g2, g3, g4], generator)
             set_grads(params, g)
-            grad_norm = float(torch.nn.utils.clip_grad_norm_(params, cfg.max_grad_norm))
+            grad_norm = float(torch.nn.utils.clip_grad_norm_(params, cfg.max_grad_norm, error_if_nonfinite=True))
             optimizer.step()
+            check_finite({str(i): p for i, p in enumerate(params)}, f"VLA-Forget {stage} updated adapters")
             optimizer.zero_grad(set_to_none=True)
 
             metrics = {"forget_fm": forget_fm.item(), "mismatch": mismatch.item(), "retain_fm": retain_fm.item(),
@@ -357,6 +362,8 @@ def run(ctx: OpContext, probes: dict, recipe: Recipe, forget_task: str, retain_t
     overrides = sorted(set(retained) - trainable)
     add_frozen_overrides(model, overrides)
     rel = {t: abs(after[t] - before[t]) / max(abs(before[t]), 1e-12) for t in before}
+    if not all(math.isfinite(v) for values in (before, after, rel) for v in values.values()):
+        raise FloatingPointError("VLA-Forget merge produced non-finite probe losses or relative changes")
     report["merge"] = {"retained_delta_fraction": retained, "frozen_overrides": overrides, "probe_before": before,
                        "probe_after": after, "max_relative_change": max(rel.values())}
     log({"step": done, "stage": "merged", "probe": after, "min_retained_delta": min(retained.values())})
