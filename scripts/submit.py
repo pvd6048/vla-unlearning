@@ -120,14 +120,17 @@ def warn_recipe_changes(run: str, plan: list[dict]) -> list[str]:
 
 def merge(plan: list[dict], new: list[dict]) -> list[dict]:
     """Add new items to the plan, keeping its order. Repeated items are merged (union of snapshot
-    steps / tasks, max of videos)."""
+    steps / tasks, max of videos; required if either is)."""
     by_key = {item_key(i): i for i in plan}
     for item in new:
         old = by_key.get(item_key(item))
         if old is None:
             by_key[item_key(item)] = item
             plan.append(item)
-        elif item["kind"] == "train":
+            continue
+        if not item.get("optional"):
+            old.pop("optional", None)
+        if item["kind"] == "train":
             old["save_at"] = sorted(set(old.get("save_at", [])) | set(item["save_at"]))
         elif item["kind"] == "features":
             old["fisher"] = sorted(set(old.get("fisher", [])) | set(item["fisher"]))

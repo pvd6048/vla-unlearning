@@ -1,7 +1,8 @@
 #!/bin/bash
 # Calibration on a machine without Slurm (see CALIBRATION.md). After scripts/setup_cluster.sh:
 #   bash scripts/run_local.sh
-#   bash scripts/run_local.sh --pack    only pack what exists now (e.g. while a stuck run is still going)
+#   bash scripts/run_local.sh --pack    only pack what exists now (e.g. while a stuck run is still going;
+#                                       drift metrics are included only if they were computed before)
 # Safe to rerun: finished work is skipped and interrupted work resumes. Everything to send back ends up
 # in $VLU_STORE/calibration_<host>/ and $VLU_STORE/calibration_<host>.tar.gz (no model weights).
 set -uo pipefail
@@ -71,7 +72,8 @@ echo "rendering: $VLU_RENDER" | tee -a "$OUT/environment.txt"
 : > "$OUT/tests.txt"
 TESTS_OK=1
 for t in tests/test_stream_metrics.py tests/test_calibration.py tests/test_drift_params.py tests/test_drift_extract.py tests/test_ops.py \
-         tests/test_vlaforget.py tests/test_completion.py tests/test_resume.py tests/test_training_safety.py tests/test_rank_subspace.py; do
+         tests/test_vlaforget.py tests/test_completion.py tests/test_resume.py tests/test_training_safety.py tests/test_rank_subspace.py \
+         tests/test_calibration_drift.py; do
     if "$MAIN_PY" "$t" >> "$OUT/tests.txt" 2>&1; then echo "PASS $t" | tee -a "$OUT/tests.txt"
     else echo "FAIL $t" | tee -a "$OUT/tests.txt"; TESTS_OK=0; fi
 done
@@ -87,7 +89,9 @@ if ! "$MAIN_PY" scripts/submit.py --run "$RUN" --retry-failed --workers none; th
 fi
 
 # 5. One worker per GPU: GPUs with >= TRAIN_FREE_MIB free train and evaluate, the others only evaluate
-#    (training peaks at ~34 GB, NPO's with its frozen reference at ~41 GB; CALIBRATION.md says 44 GB) ---
+#    (round 2's peaks: 33.4 GiB for learning, GA and GradDiff alike, so a second graph (GradDiff's retain
+#    batch) does not raise it; 39.5 GiB for NPO with its frozen reference, which NPO-RT (GradDiff's
+#    graphs + NPO's reference) should match; CALIBRATION.md says 44 GB) ---
 TRAIN_FREE_MIB=44000
 mapfile -t GPUS < <(nvidia-smi --query-gpu=index,memory.free,memory.used --format=csv,noheader,nounits)
 export VLU_EVAL_WORKERS=$(( VLU_CPUS / ${#GPUS[@]} - 1 > 1 ? VLU_CPUS / ${#GPUS[@]} - 1 : 1 ))
@@ -111,8 +115,13 @@ for pid in "${PIDS[@]}"; do
     wait "$pid" || WORKERS_OK=0
 done
 
-# 6. Report ----------------------------------------------------------------------------------------
+# 6. Drift metrics from the checkpoints and features that exist (on the GPU with the most free memory;
+#    CPU threads for the parts on the CPU), then the report. A drift failure is reported, not fatal ------
 "$MAIN_PY" scripts/submit.py --run "$RUN" --workers none
+DRIFT_GPU=$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits | sort -t, -k2 -nr | head -1 | cut -d, -f1)
+if ! CUDA_VISIBLE_DEVICES="$DRIFT_GPU" OMP_NUM_THREADS="$VLU_CPUS" "$MAIN_PY" scripts/calibration_drift.py --run "$RUN"; then
+    echo "WARNING: some drift metrics are missing (see summary.md; logs in $VLU_RUNS_DIR/$RUN/drift_report/, packed as drift/)"
+fi
 if ! "$MAIN_PY" -m vlu.worker --run "$RUN" --check-complete; then
     echo "ERROR: the experiment did not complete every planned item"; package; exit 1
 fi

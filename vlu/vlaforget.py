@@ -198,7 +198,8 @@ def selection_scores(ctx: OpContext, ref, taps, ref_taps, names: list[str], scor
                 if id(p) in low and p.grad is not None:
                     low[id(p)] += p.grad.float()
                     p.grad = None
-        sums = [low.get(id(p), p.grad if p.grad is not None else torch.zeros_like(p, dtype=torch.float32)) for p in flat_params]
+        sums = [low[id(p)] if id(p) in low else p.grad if p.grad is not None else torch.zeros_like(p, dtype=torch.float32)
+                for p in flat_params]
         for p in flat_params:
             p.grad = None
         return sums

@@ -6,6 +6,8 @@ The plan is RUNS_DIR/<run>/plan.json, written by scripts/submit.py: a list of it
     {"kind": "train", "node": "LA/LB", "save_at": [2000, 5000]}
     {"kind": "eval", "node": "LA/LB", "weights": "final", "seed": 0, "tasks": ["A", "B"], "videos": 0}
     {"kind": "features", "node": "LA/LB", "weights": "final", "fisher": ["B"]}     (vlu/drift/extract.py)
+An item marked "optional": true (the calibration's drift features) is run like any other, but the run
+counts as complete without it: if it fails, that is reported, not an error.
 The worker repeatedly takes the first item, in plan order, that is not done, not failed, ready (a
 train item needs its parent trained, the other kinds their node) and not taken by another worker,
 and runs it in a subprocess: vlu.run_op, slurm/eval.sbatch or vlu.drift.extract. It exits when
@@ -100,10 +102,16 @@ def is_ready(run: str, item: dict) -> bool:
 
 
 def require_complete(run: str, kinds: set[str] | None = None) -> None:
-    """A successful exit must mean all required items, including failed ones, are done."""
+    """A successful exit must mean all required items, including failed ones, are done. Optional items
+    that are not done are only reported."""
     plan = load_plan(run)
     items = [i for i in plan if kinds is None or i["kind"] in kinds]
-    incomplete = [item_key(i) for i in items if not is_done(run, i)]
+    missing = [i for i in items if not is_done(run, i)]
+    optional = [item_key(i) for i in missing if i.get("optional")]
+    if optional:
+        print(f"WARNING: {len(optional)} optional item(s) not done: {', '.join(optional[:5])}"
+              f"{', ...' if len(optional) > 5 else ''}", flush=True)
+    incomplete = [item_key(i) for i in missing if not i.get("optional")]
     if not plan or incomplete:
         detail = ", ".join(incomplete[:5]) if incomplete else "the plan is empty"
         raise SystemExit(f"run {run} is incomplete: {detail}")
@@ -128,11 +136,13 @@ ENDED_STATES = ("COMPLETING", "COMPLETED", "CANCELLED", "FAILED", "TIMEOUT", "NO
                 "BOOT_FAIL", "DEADLINE", "OUT_OF_MEMORY")
 
 
-def _job_alive(job: str) -> bool:
+def _job_alive(job: str) -> bool | None:
+    """Whether the job holding a claim still runs; None if that cannot be checked (a process on
+    another machine, no squeue here, or squeue failing)."""
     if job.startswith("local"):  # a worker without Slurm: a process on some host
         pid, _, host = job[len("local"):].partition("@")
         if host != socket.gethostname():
-            return True  # cannot check another machine's processes: assume alive, to be safe
+            return None
         try:
             os.kill(int(pid), 0)
             return True
@@ -143,10 +153,10 @@ def _job_alive(job: str) -> bool:
     try:
         out = subprocess.run(["squeue", "-h", "-j", job, "-o", "%T"], capture_output=True, text=True)
     except FileNotFoundError:
-        return True  # no Slurm here: assume alive, to be safe
+        return None
     if out.returncode == 0:  # listed while pending, running, ... and briefly after it ended
         return out.stdout.strip() not in ("", *ENDED_STATES)
-    return "Invalid job id" not in out.stderr  # squeue itself failed: assume alive, to be safe
+    return False if "Invalid job id" in out.stderr else None
 
 
 def _owner_job(claim: Path) -> str | None:
@@ -157,7 +167,8 @@ def _owner_job(claim: Path) -> str | None:
         return None
 
 
-def _claim_is_live(claim: Path) -> bool:
+def _claim_is_live(claim: Path) -> bool | None:
+    """As _job_alive: None if the owner cannot be checked."""
     job = _owner_job(claim)
     if job is None:  # being created by another worker right now, unless it has been like this for long
         try:
@@ -167,10 +178,12 @@ def _claim_is_live(claim: Path) -> bool:
     return _job_alive(job)
 
 
-def someone_working(run: str) -> bool:
-    """Whether any claim of the run belongs to a live worker (or is being created right now)."""
+def someone_working(run: str, verified: bool = False) -> bool:
+    """Whether any claim of the run belongs to a live worker (or is being created right now). A claim
+    whose owner cannot be checked counts as live, unless verified is set."""
     claims = RUNS_DIR / run / "_claims"
-    return any(_claim_is_live(c) for c in claims.iterdir() if c.is_dir()) if claims.exists() else False
+    states = [_claim_is_live(c) for c in claims.iterdir() if c.is_dir()] if claims.exists() else []
+    return any(state or (state is None and not verified) for state in states)
 
 
 @contextmanager
@@ -188,7 +201,7 @@ def _claims_lock(claims: Path):
 def try_claim(claim: Path) -> bool:
     with _claims_lock(claim.parent):
         if claim.exists():
-            if _claim_is_live(claim):
+            if _claim_is_live(claim) is not False:  # live, or cannot be checked: assume live, to be safe
                 return False
             print(f"taking over the stale claim {claim.name}", flush=True)
             shutil.rmtree(claim, ignore_errors=True)
@@ -278,11 +291,16 @@ def main():
             if not args.wait or idle_checks >= 3:
                 print(f"{len(pending)} item(s) left, but none is ready and free (they wait for other workers, "
                       f"or for a failed item); exiting", flush=True)
-                if someone_working(args.run):
+                if someone_working(args.run, verified=True):
                     # Other workers are still on the plan (e.g. an eval-only Slurm worker while the trainer
-                    # trains): leaving the rest to them is not a failure. (With --wait this branch is only
+                    # trains): leaving the rest to them is not a failure. Only if their jobs are known to
+                    # run: a claim that cannot be checked (squeue failing, another machine's process) may
+                    # be stale, and then nobody would finish the plan. (With --wait this branch is only
                     # reached when nobody is working.)
                     return
+                if someone_working(args.run):
+                    print("a claim's worker could not be checked (squeue failing, or another machine's process): "
+                          "not leaving the rest to it", flush=True)
                 require_complete(args.run, kinds)
                 return
             time.sleep(60)

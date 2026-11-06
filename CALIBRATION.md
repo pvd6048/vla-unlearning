@@ -12,15 +12,15 @@ us how to set our hyperparameters. You don't need to interpret anything: run it 
   same time. The run checks the free memory at the start, warns about GPUs already in use, and stops
   if no GPU has 44 GB free.
 - NVIDIA driver 570 or newer (CUDA 12.8); 525 or newer usually works too.
-- About 330 GB of free disk (it fills to about 290 GB: 25 GB of software, model and data, 265 GB of
-  trained model weights), 64 GB of RAM or more, internet access during setup (about 15 GB is downloaded).
+- About 350 GB of free disk (it fills to about 305 GB: 25 GB of software, model and data, 265 GB of
+  trained model weights, 15 GB of drift data), 64 GB of RAM or more, internet access during setup (about 15 GB is downloaded).
 - `git`, `curl`, `cmake` and a C compiler (`build-essential` on Ubuntu). No root access or Slurm is needed.
 
 ## Steps
 
 Everything is installed and written inside the folder you clone into: Python environments, dataset,
 model, results. Nothing goes elsewhere (except `uv`, installed to `~/.local/bin` if missing). So first
-`cd` to any disk with about 330 GB free (`df -h .` shows the free space), then:
+`cd` to any disk with about 350 GB free (`df -h .` shows the free space), then:
 
 ```bash
 git clone https://github.com/pvd6048/vla-unlearning.git
@@ -64,5 +64,9 @@ always enough for us to see what happened.
    test render works on every GPU, else software rendering.
 2. Runs the code's self-tests (a few minutes). If one fails it stops here and packs the logs.
 3. Trains task A (with checkpoints at 2k, 5k, 10k steps), then task B, then 38 unlearning variants of
-   task B, and evaluates each in the simulator. One worker runs per GPU.
-4. Writes `summary.md` and packs everything into the `.tar.gz`.
+   task B, and evaluates each in the simulator. One worker runs per GPU. After each training it also
+   records how the model's internals respond to a fixed set of test frames (a few minutes per model).
+4. Compares the trained models with each other (drift metrics, `scripts/calibration_drift.py`). These
+   are extra data: if a recording or the comparison fails, the run says so (WARNING) but still counts
+   as complete.
+5. Writes `summary.md` and packs everything into the `.tar.gz`.

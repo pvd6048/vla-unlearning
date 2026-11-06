@@ -1,6 +1,6 @@
 """Collect a calibration run (scripts/calibrate.py) into one directory to send back: summary.md with
-the tables needed to set the hyperparameters, plus every node's configuration, training log, eval
-results and the few rollout videos. Model weights are not included. Plain Python (no GPU, no torch).
+the tables needed to set the hyperparameters and the drift summary (scripts/calibration_drift.py), plus
+every node's configuration, training log, eval results, drift CSVs and the few rollout videos. Model weights are not included. Plain Python (no GPU, no torch).
 
     python scripts/calibration_report.py --run cal --out DIR
 """
@@ -18,6 +18,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from calibrate import VARIANTS  # noqa: E402
+from calibration_drift import fmt, input_changes, report_dir, table  # noqa: E402
 from submit import warn_recipe_changes  # noqa: E402
 from vlu.config import PROJECT_DIR, RUNS_DIR  # noqa: E402
 from vlu.nodes import Node  # noqa: E402
@@ -66,15 +67,6 @@ def perf(log: list[dict]) -> tuple[str, str, str]:
             f"{(times[-1] - times[0]) / 60:.0f}" if len(times) > 1 else "-")
 
 
-def fmt(x) -> str:
-    return "-" if x is None else f"{x:.4f}"
-
-
-def table(header: list[str], rows: list[list]) -> str:
-    lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
-    return "\n".join(lines + ["| " + " | ".join(str(c) for c in row) + " |" for row in rows])
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", default="cal")
@@ -85,19 +77,20 @@ def main():
     base, la, lalb = (Node.from_path(run, p) for p in ("", "LA", "LA/LB"))
     md = [f"# Calibration run `{run}`", "", "See CALIBRATION.md for what was run. Files: `environment.txt`, "
           "`tests.txt`, `run_local.log`, `nodes/` (per node: op.json, train_log.jsonl, eval results, videos), "
-          "`failed/` (logs of failed items).", ""]
+          "`drift/` (drift CSVs and logs), `failed/` (logs of failed items).", ""]
 
     # --- Status of every planned item ---------------------------------------------------------
     plan = load_plan(run)
-    states = [(item_key(i), status(run, i)) for i in plan]
-    md += ["## Plan status", "", table(["item", "status"], states), ""]
+    states = [(item_key(i) + (" (optional)" if i.get("optional") else ""), status(run, i)) for i in plan]
+    md += ["## Plan status", "", *table(["item", "status"], states), ""]
     with contextlib.redirect_stdout(io.StringIO()):
         changed = warn_recipe_changes(run, plan)
     if changed:
         md += ["## Nodes trained with another recipe than the current code's", "",
                "Their results (and those of nodes trained on top of them) are not what the code now describes.", "",
                *[f"- {w.removeprefix('WARNING: ')}" for w in changed], ""]
-    (out / "failed").mkdir(exist_ok=True)
+    shutil.rmtree(out / "failed", ignore_errors=True)  # no log of an earlier pack's failures that have been rerun since
+    (out / "failed").mkdir()
     for item in plan:
         if failed_file(run, item).exists():
             info = json.loads(failed_file(run, item).read_text())
@@ -113,13 +106,13 @@ def main():
     rows.append(["LA/LB", "final", sr(lalb, "A", "final", 0), sr(lalb, "A", "final", 1), sr(lalb, "B", "final", 0)])
     md += ["## Learning", "", "Success rate [95% Wilson interval] over 50 rollouts. Pass bar (PLAN.md): A >= 0.80 "
            "after 10k steps. Seed 0 vs seed 1 = eval noise.", "",
-           table(["node", "weights", "A (eval seed 0)", "A (eval seed 1)", "B (eval seed 0)"], rows), "",
-           table(["node", "LA/LB: B eval seed 1"], [["LA/LB", sr(lalb, "B", "final", 1)]]), ""]
+           *table(["node", "weights", "A (eval seed 0)", "A (eval seed 1)", "B (eval seed 0)"], rows), "",
+           *table(["node", "LA/LB: B eval seed 1"], [["LA/LB", sr(lalb, "B", "final", 1)]]), ""]
 
     # --- Speed and memory ------------------------------------------------------------------------
     nodes = [la, lalb] + [Node.from_path(run, f"LA/LB/UB-{v}") for v in VARIANTS]
-    md += ["## Speed and memory per op", "", table(["node", "steps/s (median)", "peak GPU mem (GB)", "wall (min)"],
-                                                      [[n.path, *perf(train_log(n))] for n in nodes]), ""]
+    md += ["## Speed and memory per op", "", *table(["node", "steps/s (median)", "peak GPU mem (GB)", "wall (min)"],
+                                                       [[n.path, *perf(train_log(n))] for n in nodes]), ""]
 
     # --- Unlearning variants -------------------------------------------------------------------
     theta0 = probes(train_log(lalb))
@@ -131,7 +124,7 @@ def main():
         node = Node.from_path(run, f"LA/LB/UB-{v}")
         p = probes(train_log(node))
         final = p[max(p)] if p and node.done else {}  # a failed or unfinished op has no final probe (its log may hold only step 0, the parent's)
-        at = lambda step, task: fmt(p.get(step, {}).get(task))  # noqa: E731
+        at = lambda step, task: fmt(p.get(step, {}).get(task), ".4f")  # noqa: E731
         results_node = lalb if v == "purge" else node
         notes = json.loads((node.dir / "op.json").read_text()).get("notes", {}) if (node.dir / "op.json").exists() else {}
         extra = {k: notes[k] for k in ("dampened_fraction", "kept_fraction", "batch_forget_retain", "ssd_reference",
@@ -140,20 +133,37 @@ def main():
             vf = json.loads((node.dir / "vlaforget.json").read_text())
             extra["selected"] = {s: d["selected"] for s, d in vf["stages"].items()}
             extra["min_retained_delta"] = round(min(vf["merge"]["retained_delta_fraction"].values()), 3)
-        rows.append([v, sr(results_node, "A"), sr(results_node, "B"), at(250, "B"), at(500, "B"), fmt(final.get("B")),
-                     fmt(final.get("A")), *perf(train_log(node))[1:], json.dumps(extra) if extra else ""])
+        rows.append([v, sr(results_node, "A"), sr(results_node, "B"), at(250, "B"), at(500, "B"), fmt(final.get("B"), ".4f"),
+                     fmt(final.get("A"), ".4f"), *perf(train_log(node))[1:], json.dumps(extra) if extra else ""])
     md += ["## Unlearning variants (forget B, retain A; parent LA/LB, retrain oracle LA)", "",
            "Probe loss = flow-matching loss on fixed probe frames (32 per task). Targets: B's probe loss should rise "
-           f"to about the oracle's (LA never saw B): oracle B = {fmt(oracle_final.get('B'))}, A = "
-           f"{fmt(oracle_final.get('A'))}; before unlearning (LA/LB): B = {fmt(theta0_final.get('B'))}, "
-           f"A = {fmt(theta0_final.get('A'))}. SR B should fall to LA's SR on B; SR A should stay at LA/LB's.", "",
-           table(["variant", "SR A (retain)", "SR B (forget)", "probe B @250", "probe B @500", "probe B final",
-                  "probe A final", "peak mem (GB)", "wall (min)", "method info"], rows), ""]
+           f"to about the oracle's (LA never saw B): oracle B = {fmt(oracle_final.get('B'), '.4f')}, A = "
+           f"{fmt(oracle_final.get('A'), '.4f')}; before unlearning (LA/LB): B = {fmt(theta0_final.get('B'), '.4f')}, "
+           f"A = {fmt(theta0_final.get('A'), '.4f')}. SR B should fall to LA's SR on B; SR A should stay at LA/LB's.", "",
+           *table(["variant", "SR A (retain)", "SR B (forget)", "probe B @250", "probe B @500", "probe B final",
+                   "probe A final", "peak mem (GB)", "wall (min)", "method info"], rows), ""]
 
     # --- Stream metrics (PLAN.md) --------------------------------------------------------------
     metrics = subprocess.run([sys.executable, str(PROJECT_DIR / "scripts" / "metrics.py"), "--stream", "CAL",
                               "--methods", ",".join(VARIANTS), "--runs", run], capture_output=True, text=True)
     md += ["## Stream metrics (scripts/metrics.py --stream CAL)", "", "```", metrics.stdout + metrics.stderr, "```", ""]
+
+    # --- Drift metrics (scripts/calibration_drift.py, run by run_local.sh after the workers) ---------
+    drift = report_dir(run)
+    shutil.rmtree(out / "drift", ignore_errors=True)  # only the current drift report's files
+    if drift.exists():  # its logs too when it stopped before the summary
+        shutil.copytree(drift, out / "drift")
+    if (drift / "summary.md").exists():
+        heading, _, body = (drift / "summary.md").read_text().partition("\n")
+        changed, new = input_changes(run)
+        if changed or new:  # e.g. packed while a rerun retrains nodes, before its drift step
+            heading += ("\n\n**Stale**: computed from other files than the run has now"
+                        + (f"; changed or removed since: {', '.join(changed)}" if changed else "")
+                        + (f"; new since: {', '.join(new)}" if new else "") + ". The numbers of the other nodes are still valid.")
+        md += [heading + "\n" + body, ""]
+    else:
+        md += ["## Drift metrics", "", "Not computed (scripts/calibration_drift.py has not run, or stopped early: see "
+               "run_local.log and `drift/`).", ""]
     (out / "summary.md").write_text("\n".join(md))
 
     # --- Raw files of every node (no weights) --------------------------------------------------

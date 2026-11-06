@@ -17,7 +17,7 @@ Per drift X..Y:
                      timestep (normalized action units; a Monte-Carlo estimate over GR00T's training
                      distribution of timesteps)
     fm_loss_change   L_FM(Y) - L_FM(X) on the probe samples
-Per pair of drifts i < j:
+Per pair of drifts i < j (with --pairs-with NAME, repeatable: only the pairs including a named drift):
     shift_cka        linear CKA between the representation shifts h_Y - h_X of the two drifts
   feature "policy":
     velocity_shift_cos  cosine between the two drifts' changes of predicted velocity
@@ -71,6 +71,8 @@ def main():
     parser.add_argument("--run", required=True, help="default run of checkpoint references")
     parser.add_argument("--drift", action="append", required=True, help="NAME=X..Y (repeatable)")
     parser.add_argument("--pca-k", type=int, default=10)
+    parser.add_argument("--pairs-with", action="append", default=[],
+                        help="pairwise metrics only for pairs including this drift (repeatable; default: all pairs)")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
 
@@ -81,6 +83,10 @@ def main():
         if a["tasks"] != tasks or b["tasks"] != tasks or a["probe"] != b["probe"]:
             raise ValueError("probe sets differ between checkpoints (or were extracted by different versions "
                              "of vlu.drift.extract); re-extract them")
+    names = [name for name, _, _ in drifts]
+    if set(args.pairs_with) - set(names):
+        raise SystemExit(f"--pairs-with {sorted(set(args.pairs_with) - set(names))}: not among the drifts {names}")
+    pairs = [(i, j) for i, j in itertools.combinations(names, 2) if not args.pairs_with or {i, j} & set(args.pairs_with)]
     subsets = {t: torch.tensor([i for i, s in enumerate(tasks) if s == t]) for t in dict.fromkeys(tasks)}
     subsets["all"] = torch.arange(len(tasks))
 
@@ -94,7 +100,7 @@ def main():
                 rows.append([feature, task, "cka_distance", name, "", 1 - linear_cka(ha, hb)])
                 for metric, value in pca_shift(ha, hb, args.pca_k).items():
                     rows.append([feature, task, metric, name, "", value])
-            for i, j in itertools.combinations(shifts, 2):
+            for i, j in pairs:
                 rows.append([feature, task, "shift_cka", i, j, linear_cka(shifts[i], shifts[j])])
 
     for task, idx in subsets.items():
@@ -106,7 +112,7 @@ def main():
             loss_a = (a["sse"][idx] / a["n_valid"][idx]).mean()
             loss_b = (b["sse"][idx] / b["n_valid"][idx]).mean()
             rows.append(["policy", task, "fm_loss_change", name, "", float(loss_b - loss_a)])
-        for i, j in itertools.combinations(vshift, 2):
+        for i, j in pairs:
             rows.append(["policy", task, "velocity_shift_cos", i, j, cosine(vshift[i], vshift[j])])
 
     def endpoints(feature, task, metric, name, start, end):

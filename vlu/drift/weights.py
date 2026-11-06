@@ -116,8 +116,12 @@ class WeightReader:
 
     def reduce(self, key: str, t: torch.Tensor) -> torch.Tensor:
         """To float32 on the device; per-embodiment projector weights reduced to LIBERO's row. Also
-        for other per-parameter files with the same layout (e.g. a Fisher file)."""
-        return live_part(key, t.to(self.device, torch.float32), self._embodiment)
+        for other per-parameter files with the same layout (e.g. a Fisher file). The row is cut out
+        before moving and copied: a view of it would keep the whole 32-robot stack allocated."""
+        live = live_part(key, t, self._embodiment)
+        if live.numel() < t.numel():
+            live = live.clone()
+        return live.to(self.device, torch.float32)
 
 
 # --- Grouping ------------------------------------------------------------------------------------

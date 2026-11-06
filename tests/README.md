@@ -12,7 +12,8 @@ python tests/test_ops.py             # NPO/NPO-RT/SSD/SalUn plans (vlu/ops.py), 
 python tests/test_vlaforget.py       # vlu/{vlaforget,lora}.py, frozen overrides in vlu/model.py
 python tests/test_stream_metrics.py  # vlu/stream_metrics.py (plain Python, no torch needed)
 python tests/test_calibration.py     # local workers (no Slurm), calibration plan and report (plain Python)
-python tests/test_completion.py      # workers and run_local.sh fail on failed / unfinished items (vlu/worker.py)
+python tests/test_calibration_drift.py # scripts/calibration_drift.py: distances to the oracle, restricted pairs, failed tools
+python tests/test_completion.py      # workers and run_local.sh fail on failed / unfinished required items (vlu/worker.py)
 python tests/test_resume.py          # per-step preprocessing randomness, interrupted training continues identically
 python tests/test_training_safety.py # non-finite losses, gradients, weights and checkpoints are rejected
 python tests/test_rank_subspace.py   # drift subspaces of rank-deficient matrices (vlu/drift/metrics.py)

@@ -207,6 +207,16 @@ assert {i["node"] for i in cal if i["kind"] == "eval"} == {"", "LA", "LA/LB"} | 
 la = next(i for i in cal if i["node"] == "LA" and i["kind"] == "train")
 assert la["save_at"] == [2000, 5000] and next(i for i in cal if i["node"].endswith("UB-ssd@ssd_reference=retain"))["save_at"] == []
 print(f"calibration plan: LA, LA/LB and {len(VARIANTS)} variants of UB sharing LA/LB; snapshots only of LA (the evaluated ones)")
+# Drift features of every node whose weights differ (purge's are LA/LB's), right after its training;
+# the Fisher of A and B only at LA/LB, the parent of every variant.
+feats = [i for i in cal if i["kind"] == "features"]
+assert [i["node"] for i in feats] == ["", "LA", "LA/LB"] + [n for n in trains[2:] if "purge" not in n], feats
+assert all(i["weights"] == "final" and i["fisher"] == (["A", "B"] if i["node"] == "LA/LB" else []) for i in feats), feats
+assert all(i.get("optional") for i in feats) and not any(i.get("optional") for i in cal if i["kind"] != "features")
+assert "optional" not in merge([dict(feats[0])], [{**feats[0], "optional": False}])[0], "required wins when merging"
+position = {(i["kind"], i["node"]): k for k, i in enumerate(cal)}
+assert all(position[("features", n)] > position[("train", n)] for n in trains if ("features", n) in position)
+print(f"calibration plan: drift features of {len(feats)} nodes after their training, optional; Fisher of A and B at LA/LB")
 
 # calibrate.py writes exactly the current calibration: items of an earlier round that are no longer
 # planned are dropped (their node directories stay), so they cannot run again under new code.
@@ -240,7 +250,7 @@ for i in cal:
     node = Node.from_path("cal", i["node"])
     if i["kind"] == "train":
         fake_train(node, 10000 if node.depth < 3 else 1000, 500 if node.depth < 3 else 50)
-    else:
+    elif i["kind"] == "eval":
         fake_eval(node, i["weights"], i["seed"], i["tasks"])
 (RUNS_DIR / "cal" / "_failed").mkdir(parents=True)  # one failed item, with its log
 (RUNS_DIR / "cal" / "_logs").mkdir(parents=True)
@@ -258,7 +268,47 @@ for needed in ["## Learning", "## Speed and memory per op", "## Unlearning varia
 assert "CUDA out of memory" in next((out / "failed").iterdir()).read_text()
 assert (out / "nodes" / "LA" / "train_log.jsonl").exists() and (out / "nodes" / "base" / "eval").exists()
 assert not list(out.rglob("*.safetensors")), "the report must not contain weights"
+assert "## Drift metrics\n\nNot computed" in summary and not (out / "drift").exists()
 print("report: summary.md with every section, failed-item logs, per-node files, no weights")
+
+# With a drift report (scripts/calibration_drift.py, tested in tests/test_calibration_drift.py) its
+# summary is part of summary.md and its files are packed; only its own: drift/ and failed/ of an
+# earlier pack are emptied. A report computed from other files than the run now has is marked stale.
+import calibration_drift  # noqa: E402
+(out / "drift").mkdir()
+(out / "drift" / "representation.csv").write_text("from an earlier pack\n")
+(out / "failed" / "train_LA.log").write_text("a failure of an earlier pack, rerun since\n")
+drift = RUNS_DIR / "cal" / "drift_report"
+drift.mkdir()
+(drift / "params.log").write_text("Traceback ...\n")
+report = lambda: subprocess.run([sys.executable, str(ROOT / "scripts" / "calibration_report.py"), "--run", "cal", "--out", str(out)],  # noqa: E731
+                                env=ENV, check=True)
+report()
+summary = (out / "summary.md").read_text()
+assert "Not computed" in summary and (out / "drift" / "params.log").exists(), "logs of a drift step that stopped early"
+assert not (out / "drift" / "representation.csv").exists() and not (out / "failed" / "train_LA.log").exists()
+(drift / "summary.md").write_text("## Drift metrics (scripts/calibration_drift.py)\n\n| drift | x |\n")
+(drift / "params.csv").write_text("level,group,metric,drift_i,drift_j,value\n")
+(drift / "inputs.json").write_text(json.dumps(calibration_drift.inputs("cal")))
+report()
+summary = (out / "summary.md").read_text()
+assert "## Drift metrics (scripts/calibration_drift.py)\n\n| drift | x |" in summary and "Not computed" not in summary
+assert "Stale" not in summary and (out / "drift" / "params.csv").exists()
+used = json.loads((drift / "inputs.json").read_text())
+# LA, LA/LB and the variants' weights, but purge's (its weights are LA/LB's) and the failed one's
+assert "LA/LB/weights.safetensors" in used and len(used) == 2 + len(VARIANTS) - 2, sorted(used)
+retrained = Node.from_path("cal", "LA/LB/UB-ga@unlearn_lr=1e-7").weights_path
+os.utime(retrained, ns=(0, 0))  # rewritten since the report
+Node.from_path("cal", "LA/LB/UB-ga@unlearn_lr=3e-7").weights_path.unlink()
+features = Node.from_path("cal", "LA").dir / "drift" / "features.pt"
+features.parent.mkdir()
+features.write_text("x")  # extracted since
+report()
+stale = next(line for line in (out / "summary.md").read_text().splitlines() if "Stale" in line)
+assert ("changed or removed since: LA/LB/UB-ga@unlearn_lr=1e-7/weights.safetensors, LA/LB/UB-ga@unlearn_lr=3e-7/weights.safetensors; "
+        "new since: LA/drift/features.pt.") in stale, stale
+print("report: the drift summary goes into summary.md, its files into drift/ (logs also without a summary), "
+      "nothing of an earlier pack; a stale drift report is marked")
 
 # results.py --ci --csv: every row has one field per column although cells contain commas.
 import csv

@@ -77,4 +77,22 @@ assert abs(rows[("module", "vision", "norm", "V", "")] - d_frozen.norm().item())
 assert rows[("module", "vision", "norm", "tau", "")] == 0.0
 print("params: task-vector negation, Fisher, subspaces, embodiment slicing, frozen overrides OK;",
       "cos(tau, random) =", round(rows[("global", "all", "cos", "tau", "random")], 4))
+
+# --pairs-with U: the pairs with U, with the same values; no other pair.
+subprocess.run([sys.executable, "-m", "vlu.drift.params", "--run", "toy", "--drift", "tau=base..LA", "--drift", "U=LA..LA/LB",
+                "--drift", "V=LA/LB..LA/LB/UB-x", "--random", "--fisher", "F=LA:B", "--subspace-k", "4", "--pairs-with", "U",
+                "--out", str(out)], check=True, env={**os.environ, "PYTHONPATH": root})
+some = {(r["level"], r["group"], r["metric"], r["drift_i"], r["drift_j"]): float(r["value"]) for r in csv.DictReader(open(out))}
+pairs = {k[3:] for k in some if k[4]}
+assert pairs == {(a, b) for a in ("tau", "U", "V", "random") for b in ("tau", "U", "V", "random") if a != b and "U" in (a, b)}, pairs
+assert set(some) < set(rows) and all(abs(v - rows[k]) <= 1e-6 * max(1.0, abs(v)) or (v != v and rows[k] != rows[k])
+                                     for k, v in some.items()), "same values as with all pairs (up to fp32 summation order)"
+assert ("layer", "vlm.layer12", "subspace", "tau", "U") in some and ("global", "all", "F_cos", "tau", "U") in some
+print("params: --pairs-with keeps the pairs with the named drift (same values, Fisher and subspaces too), drops the others")
+
+# The LIBERO row of a per-embodiment stack is a tensor of its own (a view would keep all 32 rows allocated).
+from vlu.drift.weights import WeightReader  # noqa: E402
+row = WeightReader("cpu").get(Ref.parse("LA", "toy"), "action_head.state_encoder.layer1.W")
+assert row.shape == (10, 20) and row.untyped_storage().nbytes() == row.numel() * 4
+print("reader: the LIBERO row is read without keeping the 32-robot stack")
 print("ALL DRIFT PARAMS CHECKS PASSED")

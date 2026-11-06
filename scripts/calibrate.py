@@ -12,9 +12,13 @@ Run `cal` (seed 0), tasks A and B of LIBERO-Goal:
     LA/LB/UB-v  every unlearning variant v below (1000 steps; probe losses every 50 steps, which show
                 how many steps a method needs); A and B evaluated (seed 0). LA is their retrain oracle
                 (it never saw B).
+    drift       probe features (vlu.drift.extract) of base, LA, LA/LB and every variant, and the diagonal
+                Fisher of A and B at LA/LB; scripts/calibration_drift.py turns them and the weights into
+                drift metrics after the runs (PLAN.md section 4).
 
 Disk: a node's weights are ~6.5 GB (1.62B trainable parameters in fp32), so only weights that are
-evaluated are saved: LA's 2k/5k snapshots and every node's final weights (about 265 GB in all).
+evaluated are saved: LA's 2k/5k snapshots and every node's final weights (about 265 GB in all), plus
+the two Fisher files (6.5 GB each) and the probe features (~50 MB per node).
 """
 
 import argparse
@@ -57,20 +61,29 @@ def eval_item(node: str, weights: str, seed: int, videos: int = 0) -> dict:
     return {"kind": "eval", "node": node, "weights": weights, "seed": seed, "tasks": ["A", "B"], "videos": videos}
 
 
+def features_item(node: str, fisher: tuple[str, ...] = ()) -> dict:
+    """Optional (vlu/worker.py): drift metrics are extra data, so a failure is reported, not fatal."""
+    return {"kind": "features", "node": node, "weights": "final", "fisher": list(fisher), "optional": True}
+
+
 def items() -> list[dict]:
-    out = [eval_item("", "final", 0, videos=3)]
+    """In run order: a node's evals and drift features come right after its training."""
+    out = [eval_item("", "final", 0, videos=3), features_item("")]
     out.append({"kind": "train", "node": "LA", "save_at": [2000, 5000]})
     for weights in ("step_002000", "step_005000", "final"):
         for seed in (0, 1):
             out.append(eval_item("LA", weights, seed, videos=5 if (weights, seed) == ("final", 0) else 0))
+    out.append(features_item("LA"))
     out.append({"kind": "train", "node": "LA/LB", "save_at": []})
     out += [eval_item("LA/LB", "final", seed, videos=3 if seed == 0 else 0) for seed in (0, 1)]
+    out.append(features_item("LA/LB", fisher=("A", "B")))  # theta0 of every variant: its curvature on A and B
     for variant in VARIANTS:
         path = f"LA/LB/UB-{variant}"
         check_op(Node.from_path("cal", path))  # validates the token (method, override keys) and the op
         out.append({"kind": "train", "node": path, "save_at": []})
         if variant != "purge":  # purge does not change the weights: its results are LA/LB's
             out.append(eval_item(path, "final", 0, videos=2))
+            out.append(features_item(path))
     return out
 
 

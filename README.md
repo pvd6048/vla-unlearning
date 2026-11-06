@@ -106,8 +106,10 @@ Slurm resources for training and eval jobs are in `RESOURCES` at the top of `scr
 `CALIBRATION.md` is the one-page instruction for someone running our hyperparameter calibration on
 their own GPU machine: `scripts/setup_cluster.sh`, then `scripts/run_local.sh`, which runs the base
 tests, the calibration plan (`scripts/calibrate.py`: LA with 2k/5k/10k snapshots, LA/LB, 38 unlearning
-variants of B) with one local worker per GPU, and packs `summary.md` plus all logs into one `.tar.gz`
-(`scripts/calibration_report.py`). Hyperparameter variants are ordinary nodes with recipe overrides in
+variants of B, and drift features of every model) with one local worker per GPU, computes drift
+metrics between the models (`scripts/calibration_drift.py`: weights, Fisher-weighted, representations,
+policy, distance to the retrain oracle LA), and packs `summary.md` plus all logs and drift CSVs into one
+`.tar.gz` (`scripts/calibration_report.py`). Hyperparameter variants are ordinary nodes with recipe overrides in
 their op token, e.g. `LA/LB/UB-ga@unlearn_lr=3e-5` (`vlu/nodes.py`, `vlu.ops.recipe_for`).
 
 ## Day 1: smoke test
@@ -198,6 +200,8 @@ PLAN §5's branches are nodes of the tree (target task B, θ₀ = `LA/LB/LC`):
        --out $VLU_RUNS_DIR/goal_s0/_analysis/rep_B.csv
    ```
    Outputs are tidy CSVs (one value per row: level/group or feature/task, metric, drift pair).
+   Pairwise metrics cover every pair of drifts; `--pairs-with NAME` (repeatable) keeps only the pairs
+   with the named drifts, for many drifts.
    A cosine only means something next to its controls: `random` (unrelated direction) and the
    seed twin (`U` vs `U_s1`: the best agreement two runs of the same op reach).
 
