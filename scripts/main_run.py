@@ -11,8 +11,8 @@ Run `goal_s0` (seed 0), LIBERO-Goal tasks A-E (vlu/tasks.py), every op with the 
                           F, B dropped from replay), B's success rate and the incidental-forgetting drift of B
     evals                 every node on every task it has seen (an oracle: on the tasks of the nodes it
                           stands in for), eval seed 0, VIDEOS videos per task
-    drift features        of every node, and the Fisher of A and of B at LA/LB/LC (vlu.drift.extract);
-                          optional, as in the calibration; scripts/main_drift.py turns them into metrics
+    drift features        of the nodes scripts/main_drift.py measures drifts between, and the Fisher of A
+                          and of B at LA/LB/LC (vlu.drift.extract); optional, as in the calibration
 This is the README's "Week 1" command plus branch C; scripts/metrics.py turns the evals into PLAN.md's metrics.
 
 METHODS holds only the methods whose hyperparameters are set (the planner refuses an unlearning op whose
@@ -41,10 +41,14 @@ VIDEOS = 2  # per task per eval, to see how the models fail (PLAN.md section 5.3
 
 
 def items(run: str) -> list[dict]:
-    """The plan items, in run order (scripts/submit.py's, from its own options)."""
+    """The plan items, in run order (scripts/submit.py's, from its own options), with probe features only of
+    the nodes the drift metrics use (each extraction loads the model on a training GPU)."""
+    from main_drift import endpoints  # here: main_drift imports this module
+
     args = make_parser().parse_args(["--run", run, "--stream", "S1", "--methods", ",".join(METHODS), "--nodes", ",".join(CONTROL),
                                      "--videos", str(VIDEOS), "--features", "--fisher", FISHER])
-    out = build_items(args)
+    used = set(endpoints(METHODS))
+    out = [i for i in build_items(args) if i["kind"] != "features" or i["node"] in used]
     for item in out:
         if item["kind"] == "features":  # drift metrics are extra data: a failure is reported, not fatal
             item["optional"] = True

@@ -20,7 +20,7 @@ from vlu.config import PROJECT_DIR, RECIPE
 from vlu.data import OpBatches, fixed_batch, load_demos
 from vlu.model import build_processor, describe, gr00t_config, load_model, modality_configs, save_weights
 from vlu.nodes import Node, run_seed
-from vlu.ops import ZERO_STEP_METHODS, OpContext, plan_op, recipe_for
+from vlu.ops import OpContext, plan_op, recipe_for
 from vlu.train import train
 
 
@@ -55,7 +55,7 @@ def main():
     op = node.last_op
     if op.kind == "U" and op.task not in node.parent.retained_tasks():  # as every method's plan checks
         raise ValueError(f"{node}: cannot unlearn {op.task}, it is not retained by the parent")
-    if op.kind == "U" and op.method in ZERO_STEP_METHODS:
+    if op.shares_parent_weights:
         node.write_json("op.json", {"op": str(op), "parent": node.parent.path, "steps": 0, "git": git_commit()})
         try:  # hard link: same bytes, no extra disk
             os.link(node.parent.weights_path, node.weights_path)
@@ -88,8 +88,32 @@ def main():
     demos = load_demos(mcfg)
     probes = {t: fixed_batch(d, recipe.probe_size, processor, mcfg) for t, d in demos.items()}
     # The op's cost (PLAN.md: GPU-minutes per op) counts its own work: the method's preparation (all of SSD,
-    # SalUn's mask, NPO's reference), training and probe losses; not loading the model and the demos.
-    start, resumed = time.time(), (node.dir / "resume.pt").exists()
+    # SalUn's mask, NPO's reference), training and probe losses; not loading the model and the demos. Every
+    # session (a rerun after a crash reuses what an earlier one made: a saved mask, resume.pt) adds its time.
+    sessions = node.dir / "cost_sessions.jsonl"
+    log_session({"start": time.time()}, sessions)
+    start = time.time()
+    try:
+        _run(node, op, plan, recipe, model, demos, processor, mcfg, probes, seed, save_at)
+    finally:  # also when the session fails; only a killed process (SIGKILL, power loss) leaves no time
+        log_session({"seconds": time.time() - start}, sessions)
+    records = [json.loads(line) for line in sessions.read_text().splitlines()]
+    starts = sum("start" in r for r in records)
+    seconds = [r["seconds"] for r in records if "seconds" in r]
+    # complete: every session recorded its time (else the sum is a lower bound)
+    node.write_json("cost.json", {"seconds": sum(seconds), "sessions": starts, "complete": len(seconds) == starts,
+                                  "gpu": torch.cuda.get_device_name()})
+    print(f"{node} done: {node.weights_path}")
+
+
+def log_session(record: dict, path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        f.write(json.dumps(record) + "\n")
+
+
+def _run(node, op, plan, recipe, model, demos, processor, mcfg, probes, seed, save_at) -> None:
+    """The op's own work, after loading: the method's preparation, op.json, training, the weights."""
     if plan.prepare is not None:  # method-specific setup on the parent model (see vlu/ops.py)
         plan.prepare(OpContext(node, model, demos, processor, mcfg, seed))
 
@@ -119,9 +143,6 @@ def main():
         batches = OpBatches(demos, plan.parts, processor, mcfg, seed=seed * 1000 + node.depth, num_steps=plan.steps,
                             run_seed=seed)
         train(node, model, plan, batches, probes, recipe, save_at)
-    # resumed: the seconds are only those of the session that finished the op
-    node.write_json("cost.json", {"seconds": time.time() - start, "gpu": torch.cuda.get_device_name(), "resumed": resumed})
-    print(f"{node} done: {node.weights_path}")
 
 
 if __name__ == "__main__":

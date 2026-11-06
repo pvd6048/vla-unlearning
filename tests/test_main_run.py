@@ -48,14 +48,16 @@ for n, i in evals.items():
     assert position[("eval", n)] > position[("train", n)]
 print("plan: evals of every node but purge's, on its seen tasks (oracles: A-C and A-E), after its training")
 
-# Drift features of the base model and every trained node but purge's (its weights are its parent's), optional;
-# the Fisher of A and B only at LA/LB/LC.
+# Drift features, optional, only of the nodes scripts/main_drift.py measures drifts between (each extraction
+# loads the model on a training GPU); the Fisher of A and B only at LA/LB/LC.
+import main_drift  # noqa: E402
 feats = {i["node"]: i for i in plan if i["kind"] == "features"}
-assert set(feats) == {""} | set(evals) and all(i.get("optional") for i in feats.values()), sorted(feats)
+assert set(feats) == set(main_drift.endpoints()) and all(i.get("optional") for i in feats.values()), sorted(feats)
+assert "" not in feats and "LA/LC/LD" not in feats and not any("purge" in n.split("/")[-1] for n in feats)
 assert all(i["fisher"] == (["A", "B"] if n == "LA/LB/LC" else []) for n, i in feats.items()), feats
 assert not any(i.get("optional") for i in plan if i["kind"] != "features")
-assert all(position[("features", n)] > position[("train", n)] for n in evals)
-print("plan: drift features of every node but purge's (optional), Fisher of A and B at LA/LB/LC")
+assert all(position[("features", n)] > position[("train", n)] for n in feats)
+print(f"plan: drift features of the {len(feats)} nodes the drift metrics use (optional), Fisher of A and B at LA/LB/LC")
 
 # Adding methods later (after calibration round 3) keeps the plan's items and their order.
 real = main_run.METHODS
@@ -67,7 +69,7 @@ assert [item_key(i) for i in later[:len(first)]] == [item_key(i) for i in first]
 print(f"plan: adding methods to {METHODS[:1]} appends their items, the earlier ones keep their place")
 
 # A method without a learning rate yet is refused when planning (vlu/config.py unlearn_lrs).
-uncalibrated = sorted({"ga", "graddiff", "npo", "npo_rt", "salun"} - set(RECIPE.unlearn_lrs))
+uncalibrated = sorted({"ga", "graddiff", "npo", "npo_rt", "salun"} - set(dict(RECIPE.unlearn_lrs)))
 assert not set(METHODS) & set(uncalibrated), "main_run.METHODS must only hold calibrated methods"
 if uncalibrated:
     script = f"import sys; sys.path.insert(0, 'scripts'); import main_run; main_run.METHODS.append({uncalibrated[0]!r}); main_run.main()"
@@ -105,7 +107,7 @@ for i in plan:
                 "steps_per_s": 1.0, "peak_mem_gb": 35.0 if u else 33.4, "time": 1000.0 + 6 * s} for s in range(0, steps + 1, every)]
         (node.dir / "train_log.jsonl").write_text("\n".join(json.dumps(r) for r in log) + "\n")
         (node.dir / "weights.safetensors").write_text("x")
-        (node.dir / "cost.json").write_text(json.dumps({"seconds": 90.0 if u else 6000.0, "resumed": node.path == "LA/LB"}))
+        (node.dir / "cost.json").write_text(json.dumps({"seconds": 90.0 if u else 6000.0, "complete": node.path != "LA/LB"}))
     elif i["kind"] == "eval":
         d = node.eval_dir("final", 0)
         d.mkdir(parents=True, exist_ok=True)
@@ -131,7 +133,7 @@ expect = (f"| {ub} | B | {probe_value(parent, 'B'):.4f} | {probe_value(ub, 'B'):
 assert expect in summary, (expect, [r for r in summary.splitlines() if ub + " |" in r])
 ue = "LA/LB/LC/UB-salun/LD/LE/UE-salun"
 assert f"| {ue} | E | {probe_value(ue.rsplit('/', 1)[0], 'E'):.4f} | {probe_value(ue, 'E'):.4f} | {probe_value('LA/LC/LD', 'E'):.4f} | A,C,D |" in summary
-assert "| LA/LB | 1.00 | 33.4 | 1000 | 100.0* |" in summary  # speed table: cost, * = resumed
+assert "| LA/LB | 1.00 | 33.4 | 1000 | 100.0* |" in summary  # speed table: cost, * = a lower bound
 assert "## Drift metrics\n\nNot computed (scripts/main_drift.py has not run" in summary
 assert '{"kept_fraction": 0.5}' in summary and "UB-purge |" not in summary.split("## Unlearning ops")[1].split("## Speed")[0]
 print("report: success rates per node, stream metrics, unlearning ops' probe losses vs. parent and oracle and cost, "
@@ -142,6 +144,19 @@ for method in METHODS:
 assert (out / "nodes" / "LA" / "LB" / "LC" / "train_log.jsonl").exists() and (out / "plan.json").exists()
 assert (out / "failed").is_dir() and not list(out.rglob("*.safetensors")), "no weights in the report"
 print("report: stream metrics of every method computed; per-node files packed, no weights")
+
+# Method info, shared by both reports: the method's own numbers, including those of the methods added later
+# (ASSD's alpha, the layers VLA-Forget selected).
+from calibration_report import method_info  # noqa: E402
+vf = Node.from_path("info", "LA/LB/UB-vlaforget")
+vf.dir.mkdir(parents=True)
+(vf.dir / "op.json").write_text(json.dumps({"notes": {"assd_alpha": 15.0, "assd_percentile": 96.2, "kept_fraction": 0.5, "lr": 1}}))
+(vf.dir / "vlaforget.json").write_text(json.dumps({"stages": {"vision": {"selected": ["v3"]}},
+                                                   "merge": {"retained_delta_fraction": {"A": 0.0123, "C": 0.002}}}))
+assert json.loads(method_info(vf)) == {"kept_fraction": 0.5, "assd_alpha": 15.0, "assd_percentile": 96.2,
+                                       "selected": {"vision": ["v3"]}, "min_retained_delta": 0.002}, method_info(vf)
+assert method_info(Node.from_path("info", "LA")) == ""
+print("report: method info with ASSD's alpha and VLA-Forget's selected layers, as in the calibration report")
 
 # --- run_local.sh runs every test file ---------------------------------------------------------------
 listed = (ROOT / "scripts" / "run_local.sh").read_text()

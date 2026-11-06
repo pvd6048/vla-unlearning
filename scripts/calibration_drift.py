@@ -14,7 +14,8 @@ Drifts (theta_Y - theta_X; checkpoint references as in vlu/drift/weights.py):
 direction and the Fisher of A and of B at LA/LB) writes params.csv, vlu.drift.compare on the probe
 features writes representation.csv; pairwise numbers only for the pairs with tauA or tauB. Both go to
 <run>/drift_report/, emptied first, with the tools' logs, summary.md and inputs.json (the files the
-numbers come from: scripts/calibration_report.py flags the report as stale when they change).
+numbers come from: scripts/calibration_report.py flags the report as stale when they change). Exit code 1
+if a tool failed or a variant was left out (run_local.sh then warns that drift metrics are missing).
 
 The distance to the oracle is measured on O:<v>, not derived from U and tauB: theta_U - theta_LA =
 U + tauB, but ||U||^2 + 2 <U, tauB> + ||tauB||^2 cancels to rounding noise near the oracle.
@@ -40,10 +41,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from calibrate import VARIANTS  # noqa: E402
 from vlu.config import PROJECT_DIR, RUNS_DIR  # noqa: E402
 from vlu.drift.paths import features_path, fisher_path  # noqa: E402
-from vlu.nodes import Node  # noqa: E402
+from vlu.nodes import Node, Op  # noqa: E402
 
 PARENT, ORACLE = "LA/LB", "LA"
-UNLEARNED = [v for v in VARIANTS if v != "purge"]  # purge does not change the weights
+UNLEARNED = [v for v in VARIANTS if not Op.parse(f"UB-{v}").shares_parent_weights]  # purge does not change the weights
 
 
 def report_dir(run: str) -> Path:
@@ -260,42 +261,54 @@ def summary(out: Path, weight_drifts, feature_drifts, missing_w, missing_f, stat
     return "\n".join(md)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--run", default="cal")
-    args = parser.parse_args()
-    run = args.run
+def compute(run: str, drifts_of, inputs_now: dict, fisher: list[tuple[str, str]], anchors: tuple[str, ...],
+            required: str, summarize) -> int:
+    """Compute and summarize a run's drift metrics (this script's and scripts/main_drift.py's):
+        drifts_of(has) -> ([(name, X, Y)] with both ends has(node), names left out)
+        inputs_now     the files used (inputs.json, for the stale check)
+        fisher         (node path, task): the Fisher metrics, those that exist
+        anchors        the pairwise numbers are for the pairs with these drifts
+        required       a drift without which a tool is not run (e.g. tauB, the unit of the tables)
+        summarize(out, weight_drifts, feature_drifts, missing_w, missing_f, states) -> markdown
+    Returns the exit code: 1 if a tool failed or was not run, or a drift was left out."""
     out = report_dir(run)
     shutil.rmtree(out, ignore_errors=True)  # no file of an earlier computation may be read or packed as current
     out.mkdir(parents=True)
-    (out / "inputs.json").write_text(json.dumps(inputs(run), indent=1) + "\n")
+    (out / "inputs.json").write_text(json.dumps(inputs_now, indent=1) + "\n")
 
-    weight_drifts, missing_w = drifts(run, lambda node: node.done)
-    feature_drifts, missing_f = drifts(run, lambda node: features_path(node).exists())
-    fisher = []
-    for t in ("A", "B"):
-        if fisher_path(Node.from_path(run, PARENT), t).exists():
-            fisher += ["--fisher", f"F{t}={PARENT}:{t}"]
-    tools = {"weights": ("vlu.drift.params", weight_drifts, ["--random", *fisher], "params"),
+    weight_drifts, missing_w = drifts_of(lambda node: node.done)
+    feature_drifts, missing_f = drifts_of(lambda node: features_path(node).exists())
+    fisher_args = []
+    for path, t in fisher:
+        if fisher_path(Node.from_path(run, path), t).exists():
+            fisher_args += ["--fisher", f"F{t}={path}:{t}"]
+    tools = {"weights": ("vlu.drift.params", weight_drifts, ["--random", *fisher_args], "params"),
              "features": ("vlu.drift.compare", feature_drifts, [], "representation")}
     states = {}
     for part, (module, found, extra, stem) in tools.items():
         names = [n for n, _, _ in found]
-        if "tauB" not in names:
-            states[part] = f"not computed (LA or LA/LB has no {part})"
-            print(f"WARNING: LA or LA/LB has no {part}: no {part} drift", flush=True)
+        if required not in names:
+            states[part] = f"not computed ({required} has no {part} at both ends)"
+            print(f"WARNING: {required} has no {part} at both ends: no {part} drift", flush=True)
             continue
         tool_args = ["--run", run, *extra]
         for d in found:
             tool_args += ["--drift", spec(*d)]
-        for t in ("tauA", "tauB"):
-            if t in names:
-                tool_args += ["--pairs-with", t]
+        for a in anchors:
+            if a in names:
+                tool_args += ["--pairs-with", a]
         states[part] = run_tool(module, tool_args, out / f"{stem}.log", out / f"{stem}.csv")
-    (out / "summary.md").write_text(summary(out, weight_drifts, feature_drifts, missing_w, missing_f, states) + "\n")
+    (out / "summary.md").write_text(summarize(out, weight_drifts, feature_drifts, missing_w, missing_f, states) + "\n")
     print(f"drift report written to {out}")
-    if any(s != "ok" for s in states.values()):
-        sys.exit(1)
+    return int(any(s != "ok" for s in states.values()) or bool(missing_w or missing_f))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--run", default="cal")
+    args = parser.parse_args()
+    sys.exit(compute(args.run, lambda has: drifts(args.run, has), inputs(args.run), [(PARENT, t) for t in ("A", "B")],
+                     ("tauA", "tauB"), "tauB", summary))
 
 
 if __name__ == "__main__":

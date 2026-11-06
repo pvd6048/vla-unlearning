@@ -81,7 +81,7 @@ def items() -> list[dict]:
         path = f"LA/LB/UB-{variant}"
         check_op(Node.from_path("cal", path))  # validates the token (method, override keys) and the op
         out.append({"kind": "train", "node": path, "save_at": []})
-        if variant != "purge":  # purge does not change the weights: its results are LA/LB's
+        if not Node.from_path("cal", path).last_op.shares_parent_weights:  # purge: its results are LA/LB's
             out.append(eval_item(path, "final", 0, videos=2))
             out.append(features_item(path))
     return out

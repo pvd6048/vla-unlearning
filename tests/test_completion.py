@@ -162,10 +162,15 @@ PIDS=()
 exec {sys.executable} -c '
 import os, sys, types
 module = types.ModuleType("vlu.eval.libero_client")
+class Env:
+    def __init__(self):
+        self._env = self
+    def close(self):
+        print("closed", flush=True)
 def make_env(letter):
     if letter in os.environ["BAD_TASKS"]:
         raise ValueError("LIBERO instruction differs for " + letter)
-    return None, list(range(50))
+    return Env(), list(range(50))
 module.make_env = make_env
 sys.modules["vlu.eval.libero_client"] = module
 exec(sys.stdin.read())
@@ -191,6 +196,7 @@ exec(sys.stdin.read())
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr + log)
                     for letter in "ABCDE":
                         self.assertIn(f"task {letter} OK:", log)
+                    self.assertEqual(log.count("closed"), 5)  # every env's render context is closed
 
     def test_launcher_options_select_the_run(self):
         bash = os.environ.get("VLU_TEST_BASH") or shutil.which("bash")

@@ -25,7 +25,7 @@ from vlu.nodes import Node  # noqa: E402
 from vlu.stream_metrics import wilson_interval  # noqa: E402
 from vlu.worker import failed_file, file_name, item_key, load_plan, status  # noqa: E402
 
-COPY = ["op.json", "train_log.jsonl", "cost.json", "vlaforget.json", "vlaforget_boundary.json"]
+COPY = ["op.json", "train_log.jsonl", "cost.json", "cost_sessions.jsonl", "vlaforget.json", "vlaforget_boundary.json"]
 
 
 def eval_result(node: Node, task: str, weights: str = "final", seed: int = 0) -> dict | None:
@@ -67,13 +67,31 @@ def perf(log: list[dict]) -> tuple[str, str, str]:
             f"{(times[-1] - times[0]) / 60:.0f}" if len(times) > 1 else "-")
 
 
+# What an op's method reports about itself (op.json notes), shown in the reports' tables.
+NOTES = ("dampened_fraction", "kept_fraction", "batch_forget_retain", "ssd_reference", "forget_share", "assd_alpha",
+         "assd_percentile", "retain_coeff")
+
+
+def method_info(node: Node) -> str:
+    """JSON of the method's own numbers: SSD's dampened fraction, SalUn's kept fraction, ASSD's alpha, the
+    layers VLA-Forget selected, ...; '' if none."""
+    notes = json.loads((node.dir / "op.json").read_text()).get("notes", {}) if (node.dir / "op.json").exists() else {}
+    extra = {k: notes[k] for k in NOTES if k in notes}
+    if (node.dir / "vlaforget.json").exists():
+        vf = json.loads((node.dir / "vlaforget.json").read_text())
+        extra["selected"] = {s: d["selected"] for s, d in vf["stages"].items()}
+        extra["min_retained_delta"] = round(min(vf["merge"]["retained_delta_fraction"].values()), 3)
+    return json.dumps(extra) if extra else ""
+
+
 def cost(node: Node) -> str:
-    """GPU-minutes of the op (vlu/run_op.py's cost.json), '-' if not recorded; '*' = resumed (that session's only)."""
+    """GPU-minutes of the op over all its sessions (vlu/run_op.py's cost.json), '-' if not recorded; '*' = a
+    lower bound (a session was killed before it could record its time)."""
     path = node.dir / "cost.json"
     if not path.exists():
         return "-"
     c = json.loads(path.read_text())
-    return f"{c['seconds'] / 60:.1f}" + ("*" if c.get("resumed") else "")
+    return f"{c['seconds'] / 60:.1f}" + ("" if c["complete"] else "*")
 
 
 def plan_section(run: str, out: Path) -> list[str]:
@@ -184,16 +202,9 @@ def main():
         p = probes(train_log(node))
         final = p[max(p)] if p and node.done else {}  # a failed or unfinished op has no final probe (its log may hold only step 0, the parent's)
         at = lambda step, task: fmt(p.get(step, {}).get(task), ".4f")  # noqa: E731
-        results_node = lalb if v == "purge" else node
-        notes = json.loads((node.dir / "op.json").read_text()).get("notes", {}) if (node.dir / "op.json").exists() else {}
-        extra = {k: notes[k] for k in ("dampened_fraction", "kept_fraction", "batch_forget_retain", "ssd_reference",
-                                       "forget_share", "assd_alpha", "assd_percentile") if k in notes}
-        if (node.dir / "vlaforget.json").exists():
-            vf = json.loads((node.dir / "vlaforget.json").read_text())
-            extra["selected"] = {s: d["selected"] for s, d in vf["stages"].items()}
-            extra["min_retained_delta"] = round(min(vf["merge"]["retained_delta_fraction"].values()), 3)
+        results_node = lalb if node.last_op.shares_parent_weights else node
         rows.append([v, sr(results_node, "A"), sr(results_node, "B"), at(250, "B"), at(500, "B"), fmt(final.get("B"), ".4f"),
-                     fmt(final.get("A"), ".4f"), *perf(train_log(node))[1:], json.dumps(extra) if extra else ""])
+                     fmt(final.get("A"), ".4f"), *perf(train_log(node))[1:], method_info(node)])
     md += ["## Unlearning variants (forget B, retain A; parent LA/LB, retrain oracle LA)", "",
            "Probe loss = flow-matching loss on fixed probe frames (32 per task). Targets: B's probe loss should rise "
            f"to about the oracle's (LA never saw B): oracle B = {fmt(oracle_final.get('B'), '.4f')}, A = "

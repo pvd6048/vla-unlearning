@@ -26,7 +26,8 @@ torch.manual_seed(0)
 RUN = "goal_s0"
 T0, C, F, ORACLE = "LA/LB/LC", "LA/LB/LC/LD/LE", "LA/LB/LC/UB-purge/LD/LE", "LA/LC"
 SSD, SALUN = "LA/LB/LC/UB-ssd", "LA/LB/LC/UB-salun"
-assert (md.THETA0, md.C, md.F, md.ORACLE) == (T0, C, F, ORACLE) and md.UNLEARNED == ["ssd", "salun"]
+assert (md.THETA0, md.C, md.F, md.ORACLE) == (T0, C, F, ORACLE) and md.unlearned(md.main_run.METHODS) == ["ssd", "salun"]
+assert md.unlearned(["purge", "ga", "vlaforget"]) == ["ga", "vlaforget"]
 assert {n: (x, y) for n, x, y in md.wanted()} == {
     "tauB": ("LA", "LA/LB"), "tauD": (T0, "LA/LB/LC/LD"), "F_B": (C, F), "O:theta0": (ORACLE, T0),
     "U:ssd": (T0, SSD), "UF:ssd": (C, SSD + "/LD/LE"), "O:ssd": (ORACLE, SSD),

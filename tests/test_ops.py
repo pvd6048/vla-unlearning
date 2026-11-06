@@ -6,6 +6,7 @@ import copy
 import dataclasses
 import json
 import sys
+import time
 from types import SimpleNamespace
 
 import stubs  # noqa: F401  (first: temp dirs + GR00T stand-ins)
@@ -74,25 +75,27 @@ from vlu.nodes import _KEYS_USED, check_op  # noqa: E402
 
 lr_methods = [m for m in vlu.ops.UNLEARN_METHODS if "unlearn_lr" in _KEYS_USED[m]]
 assert set(lr_methods) == {"ga", "graddiff", "npo", "npo_rt", "salun"}, lr_methods
-assert set(RECIPE.unlearn_lrs) <= set(lr_methods) and RECIPE.unlearn_lr is None
+lrs = dict(RECIPE.unlearn_lrs)
+assert set(lrs) <= set(lr_methods) and RECIPE.unlearn_lr is None
+assert hash(RECIPE) == hash(dataclasses.replace(RECIPE)), "the recipe is immutable and hashable"
 for method in vlu.ops.UNLEARN_METHODS:
     node = Node.from_path("ops", f"LA/LB/UB-{method}")
     lr = recipe_for(node.last_op, RECIPE).unlearn_lr
-    assert lr == RECIPE.unlearn_lrs.get(method), (method, lr)
+    assert lr == lrs.get(method), (method, lr)
     try:
         check_op(node)
         refused = False
     except ValueError as error:
         refused = True
         assert "has no learning rate yet" in str(error) and "unlearn_lrs in vlu/config.py" in str(error), error
-    assert refused == (method in lr_methods and method not in RECIPE.unlearn_lrs), method
+    assert refused == (method in lr_methods and method not in lrs), method
     check_op(Node.from_path("ops", f"LA/LB/UB-{method}@unlearn_lr=3e-7"))  # the calibration's variants
     check_op(node, dataclasses.replace(RECIPE, unlearn_lr=1e-5))  # a recipe-wide rate (the tests')
     if method in lr_methods:
         assert recipe_for(Op.parse(f"UB-{method}@unlearn_lr=3e-7"), RECIPE).unlearn_lr == 3e-7
         assert plan_op(Node.from_path("ops", f"LA/LB/UB-{method}@unlearn_lr=3e-7"), RECIPE).lr == 3e-7
 assert recipe_for(Op.parse("LB"), RECIPE).unlearn_lr is None
-salun = dataclasses.replace(RECIPE, unlearn_lrs={"salun": 2e-5})
+salun = dataclasses.replace(RECIPE, unlearn_lrs=(("salun", 2e-5),))
 assert plan_op(Node.from_path("ops", "LA/LB/UB-salun"), salun).lr == 2e-5
 assert recipe_for(Op.parse("UB-salun@unlearn_lr=1e-4"), salun).unlearn_lr == 1e-4
 try:
@@ -100,8 +103,14 @@ try:
     raise AssertionError("the table of rates is not a per-op override")
 except ValueError:
     pass
-print(f"learning rates: per method ({RECIPE.unlearn_lrs}), op overrides win, methods without one "
-      f"({sorted(set(lr_methods) - set(RECIPE.unlearn_lrs))}) refused when planning")
+assert recipe_for(Op.parse("UB-salun@unlearn_lr=None"), RECIPE).unlearn_lr is None  # "None" as for every field
+try:
+    check_op(Node.from_path("ops", "LA/LB/UB-salun@unlearn_lr=None"))
+    raise AssertionError("an op that removes its method's rate has none: refused")
+except ValueError as error:
+    assert "has no learning rate yet" in str(error), error
+print(f"learning rates: per method ({lrs}), op overrides win (also None), methods without one "
+      f"({sorted(set(lr_methods) - set(lrs))}) refused when planning; the recipe stays hashable")
 
 # --- ER (Liu et al.'s continual-GR00T): full batch of the new task + equally many replay-buffer frames --
 import vlu.data
@@ -397,7 +406,8 @@ assert not purged.weights_path.is_symlink() and not list(purged.dir.glob("*.tmp"
 print("run_op: purge without hard links copies the parent's weights via a temporary file")
 
 # run_op end to end on the fake model (loading stubbed): SSD and SalUn as the main run trains them, with the
-# recipe's own learning rates (no recipe-wide one); op.json records the method's rate, cost.json the op's cost.
+# recipe's own learning rates (no recipe-wide one); op.json records the method's rate, cost.json the op's cost
+# over all its sessions: a failed one, a killed one (no time: the cost is then a lower bound) and the last.
 probe_of = {id(demos[t]): probes[t] for t in demos}
 real = {name: getattr(vlu.run_op, name) for name in ("RECIPE", "gr00t_config", "build_processor", "load_model",
                                                       "modality_configs", "load_demos", "fixed_batch")}
@@ -408,18 +418,41 @@ patched = {"RECIPE": dataclasses.replace(recipe, unlearn_lr=None), "gr00t_config
 try:
     for name, value in patched.items():
         setattr(vlu.run_op, name, value)
+    salun_node = Node.from_path("args", "LA/LB/UB-salun")
+
+    def crash(*args, **kwargs):
+        time.sleep(0.2)
+        raise RuntimeError("CUDA out of memory (simulated)")
+    vlu.run_op.train = crash
+    sys.argv = ["run_op", "--run", "args", "--node", "LA/LB/UB-salun"]
+    try:
+        vlu.run_op.main()
+        raise AssertionError("the simulated crash must propagate")
+    except RuntimeError:
+        pass
+    vlu.run_op.train = train
+    assert (salun_node.dir / "salun_mask.pt").exists() and not salun_node.done and not (salun_node.dir / "cost.json").exists()
+    failed_session = json.loads((salun_node.dir / "cost_sessions.jsonl").read_text().splitlines()[-1])["seconds"]
+    with open(salun_node.dir / "cost_sessions.jsonl", "a") as f:  # a session killed before it could record its time
+        f.write(json.dumps({"start": 0.0}) + "\n")
     for method in ("ssd", "salun"):
         sys.argv = ["run_op", "--run", "args", "--node", f"LA/LB/UB-{method}"]
         vlu.run_op.main()
         node = Node.from_path("args", f"LA/LB/UB-{method}")
         op_json, cost = json.loads((node.dir / "op.json").read_text()), json.loads((node.dir / "cost.json").read_text())
-        assert node.done and cost["seconds"] > 0 and cost["resumed"] is False and cost["gpu"], cost
-        assert op_json["lr"] == (0.0 if method == "ssd" else RECIPE.unlearn_lrs["salun"]), op_json["lr"]
-        assert op_json["recipe"]["unlearn_lr"] == (None if method == "ssd" else RECIPE.unlearn_lrs["salun"])
+        assert node.done and cost["seconds"] > 0 and cost["gpu"], cost
+        assert op_json["lr"] == (0.0 if method == "ssd" else lrs["salun"]), op_json["lr"]
+        assert op_json["recipe"]["unlearn_lr"] == (None if method == "ssd" else lrs["salun"])
+        if method == "ssd":
+            assert (cost["sessions"], cost["complete"]) == (1, True), cost
+        else:
+            assert (cost["sessions"], cost["complete"]) == (3, False) and cost["seconds"] > failed_session >= 0.2, cost
 finally:
+    vlu.run_op.train = train
     for name, value in real.items():
         setattr(vlu.run_op, name, value)
-print("run_op: SSD and SalUn end to end with the configured rates; op.json and cost.json written")
+print("run_op: SSD and SalUn end to end with the configured rates; op.json written; the cost adds every session's "
+      "time (a failed one too) and is marked a lower bound after a killed one")
 
 # --- The training log after an interrupted attempt -----------------------------------------------------
 from vlu.train import jsonl_logger  # noqa: E402

@@ -124,7 +124,7 @@ print("submit: SSD / SalUn on a parent's only task rejected when planning; GA ac
 
 # A method without a learning rate yet (vlu/config.py unlearn_lrs) is rejected when planning.
 from vlu.config import RECIPE  # noqa: E402
-uncalibrated = sorted({"ga", "graddiff", "npo", "npo_rt", "salun"} - set(RECIPE.unlearn_lrs))
+uncalibrated = sorted({"ga", "graddiff", "npo", "npo_rt", "salun"} - set(dict(RECIPE.unlearn_lrs)))
 for method in uncalibrated:
     try:
         submit.build_items(argparse.Namespace(**{**vars(ns), "stream": "SNAP", "methods": f"ssd,{method}"}))
@@ -155,7 +155,7 @@ items_ = [trained("LA", {**current, "save_every": 1000, "ssd_alpha": 99.0}),  # 
           trained("LA/LB/UB-vlaforget", {**current, "vlaforget": {**current["vlaforget"], "lr": 5e-5}})]
 warnings = submit.warn_recipe_changes("two", items_)
 assert len(warnings) == 3 and "UB-ssd@ssd_alpha=10" in warnings[0] and "ssd_reference: '<not recorded>' -> now 'retain'" in warnings[0], warnings
-assert f"UB-salun was trained with another recipe (unlearn_lr: 1e-05 -> now {RECIPE.unlearn_lrs['salun']!r})" in warnings[1], warnings
+assert f"UB-salun was trained with another recipe (unlearn_lr: 1e-05 -> now {dict(RECIPE.unlearn_lrs)['salun']!r})" in warnings[1], warnings
 assert "vlaforget.lr: 5e-05 -> now 0.0002" in warnings[2], warnings
 print("submit: trained nodes with another recipe in the fields their op uses are reported (bookkeeping and other ops' fields ignored)")
 

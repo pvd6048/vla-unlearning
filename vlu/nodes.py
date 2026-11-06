@@ -29,6 +29,10 @@ from pathlib import Path
 from vlu.config import RECIPE, RUNS_DIR, Recipe, VLAForgetConfig
 from vlu.tasks import TASKS
 
+# Unlearning methods that train nothing and keep the parent's weights (vlu/run_op.py hard-links them):
+# their nodes are not evaluated, get no drift features, and take their parent's results.
+ZERO_STEP_METHODS = frozenset({"purge"})
+
 # Keys an op may override ("unlearn_lrs" is the table an op's unlearn_lr comes from, not a value of one op).
 _RECIPE_KEYS = ({f.name for f in fields(Recipe)} - {"vlaforget", "unlearn_lrs"}) | {f"vlaforget.{f.name}" for f in fields(VLAForgetConfig)}
 
@@ -62,6 +66,10 @@ class Op:
                 raise ValueError(f"Bad override {item!r} in {token!r}: expected <recipe field>=<value>")
             overrides.append((key, value))
         return cls(kind, task, method or None, tuple(overrides))
+
+    @property
+    def shares_parent_weights(self) -> bool:
+        return self.kind == "U" and self.method in ZERO_STEP_METHODS
 
     def __str__(self) -> str:
         base = f"{self.kind}{self.task}" + (f"-{self.method}" if self.method else "")
@@ -210,14 +218,14 @@ def recipe_for(op: Op, recipe: Recipe) -> Recipe:
     None for a method without one there (not calibrated yet, or SSD / VLA-Forget / purge, which do not
     use it)."""
     changes, vlaforget = {}, {}
-    if op.kind == "U" and recipe.unlearn_lr is None and op.method in recipe.unlearn_lrs:
-        changes["unlearn_lr"] = recipe.unlearn_lrs[op.method]
+    if op.kind == "U" and recipe.unlearn_lr is None and op.method in dict(recipe.unlearn_lrs):
+        changes["unlearn_lr"] = dict(recipe.unlearn_lrs)[op.method]
     for key, text in op.overrides:
         if key.startswith("vlaforget."):
             name = key.split(".", 1)[1]
             vlaforget[name] = _convert(getattr(recipe.vlaforget, name), text)
         elif key == "unlearn_lr":  # a float even where the recipe has None (which _convert reads as an int field)
-            changes[key] = float(text)
+            changes[key] = None if text == "None" else float(text)
         else:
             changes[key] = _convert(getattr(recipe, key), text)
     if vlaforget:

@@ -8,7 +8,6 @@ drift CSVs. Model weights are not included. Plain Python (no GPU, no torch).
 """
 
 import argparse
-import json
 from pathlib import Path
 import statistics
 import sys
@@ -16,15 +15,12 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from calibration_drift import fmt, table  # noqa: E402
-from calibration_report import (copy_run_files, cost, drift_section, perf, plan_section, probes, sr,  # noqa: E402
+from calibration_report import (copy_run_files, cost, drift_section, method_info, perf, plan_section, probes, sr,  # noqa: E402
                                 stream_metrics_section, train_log)
 from main_drift import input_changes  # noqa: E402
 from vlu.nodes import Node, oracle_path  # noqa: E402
 from vlu.tasks import TASKS  # noqa: E402
 from vlu.worker import load_plan  # noqa: E402
-
-NOTES = ("dampened_fraction", "kept_fraction", "batch_forget_retain", "ssd_reference", "forget_share", "retain_coeff")
-
 
 def final_probe(node: Node) -> dict:
     """Probe losses at the node's last logged step; {} while it is not done (its log may hold only step 0,
@@ -68,22 +64,20 @@ def main():
     # --- Unlearning ops ------------------------------------------------------------------------
     rows = []
     for node in unlearn:
-        if node.last_op.method == "purge":
+        if node.last_op.shares_parent_weights:
             continue
         forget, kept = node.last_op.task, node.retained_tasks()
         before, after = final_probe(node.parent), final_probe(node)
         oracle = final_probe(Node.from_path(run, oracle_path(run, node.path)))
         retained = lambda p: mean([p.get(t) for t in kept]) if p else None  # noqa: E731
-        notes = json.loads((node.dir / "op.json").read_text()).get("notes", {}) if (node.dir / "op.json").exists() else {}
-        extra = {k: notes[k] for k in NOTES if k in notes}
         rows.append([node.path, forget, fmt(before.get(forget), ".4f"), fmt(after.get(forget), ".4f"), fmt(oracle.get(forget), ".4f"),
                      ",".join(kept), fmt(retained(before), ".4f"), fmt(retained(after), ".4f"), fmt(retained(oracle), ".4f"),
-                     perf(train_log(node))[1], cost(node), json.dumps(extra) if extra else ""])
+                     perf(train_log(node))[1], cost(node), method_info(node)])
     md += ["## Unlearning ops", "", "Probe loss = flow-matching loss on fixed probe frames (32 per task) at the op's "
            "end. Targets: the forget task's probe loss rises from the parent's to about the retrain oracle's (which "
            "never saw it); the retained tasks' stays at the parent's. Cost = GPU-minutes of the op (PLAN.md): the "
-           "method's preparation (all of SSD, SalUn's mask) and training, without loading the model; * = resumed, "
-           "the last session only.", "",
+           "method's preparation (all of SSD, SalUn's mask) and training over every session, without loading the "
+           "model; * = a lower bound (a session was killed before it recorded its time).", "",
            *table(["node", "forget", "probe forget: parent", "probe forget: after", "probe forget: oracle", "retained",
                    "probe retained: parent", "probe retained: after", "probe retained: oracle", "peak mem (GB)",
                    "cost (GPU-min)", "method info"], rows), ""]
@@ -91,7 +85,7 @@ def main():
     # --- Speed and memory ----------------------------------------------------------------------
     md += ["## Speed and memory per op", "",
            *table(["node", "steps/s (median)", "peak GPU mem (GB)", "wall (min)", "cost (GPU-min)"],
-                  [[n.path, *perf(train_log(n)), cost(n)] for n in trained if n.last_op.method != "purge"]), ""]
+                  [[n.path, *perf(train_log(n)), cost(n)] for n in trained if not n.last_op.shares_parent_weights]), ""]
 
     # --- Drift metrics (scripts/main_drift.py, run by run_local.sh --main after the workers) -----------
     md += drift_section(run, out, input_changes(run), "scripts/main_drift.py")

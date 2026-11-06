@@ -72,7 +72,8 @@ class Recipe:
     # the retained task at 3e-7, SalUn kept it at 1e-4). A method missing here is not calibrated yet:
     # its ops are refused (vlu.nodes.check_op) unless the op sets its own, e.g. "UB-ga@unlearn_lr=3e-7"
     # (the calibration's variants). SalUn: round 2, retained A at 1.00 and forgot B (0.00).
-    unlearn_lrs: dict = field(default_factory=lambda: {"salun": 3e-5})
+    # (method, lr) pairs, not a dict: the recipe stays immutable and hashable.
+    unlearn_lrs: tuple[tuple[str, float], ...] = (("salun", 3e-5),)
     # The learning rate of one op: filled in by vlu.nodes.recipe_for from unlearn_lrs or the op's
     # override. Leave it None here (a value here would apply to every method; tests use that).
     unlearn_lr: float | None = None
@@ -108,3 +109,4 @@ class Recipe:
 
 
 RECIPE = Recipe()
+assert len(dict(RECIPE.unlearn_lrs)) == len(RECIPE.unlearn_lrs), "unlearn_lrs names a method twice"

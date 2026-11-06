@@ -26,30 +26,33 @@ noise floor; the controls are the random direction and tauD.
 """
 
 import argparse
-import json
 from pathlib import Path
-import shutil
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import calibration_drift as cd  # noqa: E402
-from main_run import CONTROL, METHODS  # noqa: E402
-from vlu.drift.paths import features_path, fisher_path  # noqa: E402
-from vlu.nodes import Node, oracle_path  # noqa: E402
+import main_run  # noqa: E402
+from vlu.drift.paths import fisher_path  # noqa: E402
+from vlu.nodes import Node, Op, oracle_path  # noqa: E402
 
 THETA0 = "LA/LB/LC"
-C = CONTROL[-1]  # LA/LB/LC/LD/LE
+C = main_run.CONTROL[-1]  # LA/LB/LC/LD/LE
 F = f"{THETA0}/UB-purge/LD/LE"
 ORACLE = oracle_path("", f"{THETA0}/UB-purge")  # LA/LC
-UNLEARNED = [m for m in METHODS if m != "purge"]  # purge does not change the weights
-FISHER_TASKS = ("A", "B")
+FISHER = [(THETA0, t) for t in ("A", "B")]  # scripts/main_run.py extracts these
 ANCHORS = ("tauB", "F_B")  # the pairwise numbers are for the pairs with these
 
 
-def wanted() -> list[tuple[str, str, str]]:
+def unlearned(methods: list[str]) -> list[str]:
+    """The methods that change the weights (not purge)."""
+    return [m for m in methods if not Op.parse(f"UB-{m}").shares_parent_weights]
+
+
+def wanted(methods: list[str] | None = None) -> list[tuple[str, str, str]]:
+    """[(name, X, Y)] for the methods (default: scripts/main_run.py's METHODS)."""
     out = [("tauB", "LA", "LA/LB"), ("tauD", THETA0, f"{THETA0}/LD"), ("F_B", C, F), ("O:theta0", ORACLE, THETA0)]
-    for m in UNLEARNED:
+    for m in unlearned(main_run.METHODS if methods is None else methods):
         out += [(f"U:{m}", THETA0, f"{THETA0}/UB-{m}"), (f"UF:{m}", C, f"{THETA0}/UB-{m}/LD/LE"),
                 (f"O:{m}", ORACLE, f"{THETA0}/UB-{m}")]
     return out
@@ -63,11 +66,15 @@ def drifts(run: str, has) -> tuple[list[tuple[str, str, str]], list[str]]:
     return kept, [name for name, _, _ in missing]
 
 
+def endpoints(methods: list[str] | None = None) -> list[str]:
+    """The nodes the drifts are measured between: those whose weights and probe features are used."""
+    return list(dict.fromkeys(p for _, x, y in wanted(methods) for p in (x, y)))
+
+
 def inputs(run: str) -> dict[str, list[int]]:
     """{path in the run: [size, mtime_ns]} of the weights, features and Fisher files the metrics use."""
-    paths = dict.fromkeys(p for _, x, y in wanted() for p in (x, y))
-    return cd.existing(run, [Node.from_path(run, p) for p in paths],
-                       [fisher_path(Node.from_path(run, THETA0), t) for t in FISHER_TASKS])
+    return cd.existing(run, [Node.from_path(run, p) for p in endpoints()],
+                       [fisher_path(Node.from_path(run, path), t) for path, t in FISHER])
 
 
 def input_changes(run: str) -> tuple[list[str], list[str]]:
@@ -164,38 +171,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", default="goal_s0")
     args = parser.parse_args()
-    run = args.run
-    out = cd.report_dir(run)
-    shutil.rmtree(out, ignore_errors=True)  # no file of an earlier computation may be read or packed as current
-    out.mkdir(parents=True)
-    (out / "inputs.json").write_text(json.dumps(inputs(run), indent=1) + "\n")
-
-    weight_drifts, missing_w = drifts(run, lambda node: node.done)
-    feature_drifts, missing_f = drifts(run, lambda node: features_path(node).exists())
-    fisher = []
-    for t in FISHER_TASKS:
-        if fisher_path(Node.from_path(run, THETA0), t).exists():
-            fisher += ["--fisher", f"F{t}={THETA0}:{t}"]
-    tools = {"weights": ("vlu.drift.params", weight_drifts, ["--random", *fisher], "params"),
-             "features": ("vlu.drift.compare", feature_drifts, [], "representation")}
-    states = {}
-    for part, (module, found, extra, stem) in tools.items():
-        names = [n for n, _, _ in found]
-        if not found:
-            states[part] = f"not computed (no drift has {part} at both ends)"
-            print(f"WARNING: no {part} drift", flush=True)
-            continue
-        tool_args = ["--run", run, *extra]
-        for d in found:
-            tool_args += ["--drift", cd.spec(*d)]
-        for a in ANCHORS:
-            if a in names:
-                tool_args += ["--pairs-with", a]
-        states[part] = cd.run_tool(module, tool_args, out / f"{stem}.log", out / f"{stem}.csv")
-    (out / "summary.md").write_text(summary(out, weight_drifts, feature_drifts, missing_w, missing_f, states) + "\n")
-    print(f"drift report written to {out}")
-    if any(s != "ok" for s in states.values()) or missing_w or missing_f:
-        sys.exit(1)
+    # Without B's task vector (LA, LA/LB) the drifts have nothing to be compared against.
+    sys.exit(cd.compute(args.run, lambda has: drifts(args.run, has), inputs(args.run), FISHER, ANCHORS, "tauB", summary))
 
 
 if __name__ == "__main__":

@@ -79,9 +79,9 @@ def build_items(args) -> list[dict]:
         for depth in range(1, node.depth + 1):  # missing ancestors first (done ones are skipped later)
             ancestor = "/".join(str(op) for op in node.ops[:depth])
             items.append({"kind": "train", "node": ancestor, "save_at": save_at if depth == node.depth and snapshots else []})
-            if args.features and node.ops[depth - 1].method != "purge":  # a purge node's weights are its parent's
+            if args.features and not node.ops[depth - 1].shares_parent_weights:  # e.g. purge: the parent's weights
                 items.append({"kind": "features", "node": ancestor, "weights": "final", "fisher": []})
-        if args.no_eval or (not node.is_base and node.last_op.method == "purge"):
+        if args.no_eval or (not node.is_base and node.last_op.shares_parent_weights):
             continue
         # The base model (the retrain oracle when nothing is retained) and U ops have no snapshots.
         for weights in args.eval_weights.split(",") if snapshots else ["final"]:

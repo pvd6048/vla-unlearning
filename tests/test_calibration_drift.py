@@ -78,7 +78,8 @@ for path, v in velocities.items():
 # --- the script, as run_local.sh runs it -------------------------------------------------------------
 env = {**os.environ, "PYTHONPATH": str(ROOT)}
 script = [sys.executable, str(ROOT / "scripts" / "calibration_drift.py"), "--run", RUN]
-subprocess.run(script, check=True, env=env)
+# Exit code 1: some variants have no weights or features (listed below), so drift metrics are missing.
+assert subprocess.run(script, env=env).returncode == 1
 out = cd.report_dir(RUN)
 p, r = cd.read(out / "params.csv"), cd.read(out / "representation.csv")
 u, u2, o = cd.drift_name(GA), cd.drift_name(NPO_RT), cd.drift_name(GA, "O")

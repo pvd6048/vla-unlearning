@@ -92,6 +92,7 @@ from vlu.eval.libero_client import make_env
 from vlu.tasks import TASKS
 for letter in TASKS:
     env, init_states = make_env(letter)
+    env._env.close()  # its MuJoCo / EGL render context: one open at a time
     assert len(init_states) >= RECIPE.eval_episodes, f"task {letter}: {len(init_states)} initial states"
     print(f"task {letter} OK: {TASKS[letter]}, {len(init_states)} initial states")
 PY' >> "$OUT/environment.txt" 2>&1; then

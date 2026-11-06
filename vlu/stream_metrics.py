@@ -23,7 +23,7 @@ def success_rates(node: Node, weights: str = "final", seeds: tuple[int, ...] = (
     """A node's evaluated success rates, averaged over the eval seeds (each seed is another set of
     rollouts of the same model). A task counts only if it was evaluated with every seed. Purge nodes
     are not evaluated (their weights are their parent's), so they take their parent's results."""
-    while not node.is_base and node.last_op.method == "purge":
+    while not node.is_base and node.last_op.shares_parent_weights:
         node = node.parent
     per_seed = []
     for seed in seeds:

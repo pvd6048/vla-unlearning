@@ -20,7 +20,7 @@ from vlu.config import Recipe
 from vlu.data import OpBatches, ReplayBuffer, Slots
 from vlu.drift.weights import embodiment_index, live_part
 from vlu.model import trainable_named_parameters
-from vlu.nodes import Node, check_op, recipe_for  # noqa: F401  (recipe_for: used by vlu.run_op and the tests)
+from vlu.nodes import ZERO_STEP_METHODS, Node, check_op, recipe_for  # noqa: F401  (used by vlu.run_op and the tests)
 
 # loss_fn(model, batch) -> (loss to minimize, {metric name: float}); batch = {part name: inputs}
 LossFn = Callable[[torch.nn.Module, dict], tuple[torch.Tensor, dict[str, float]]]
@@ -388,6 +388,7 @@ def _plan_vlaforget(node: Node, recipe: Recipe) -> OpPlan:
 
 # "purge" is handled in run_op.py: it trains nothing and only drops the task from the replay
 # buffer, which happens automatically because the task is no longer retained after the U op.
+# (ZERO_STEP_METHODS, in vlu/nodes.py: purge.)
 UNLEARN_METHODS: dict[str, Callable[[Node, Recipe], OpPlan]] = {
     "ga": _plan_ga,
     "graddiff": _plan_graddiff,
@@ -397,7 +398,6 @@ UNLEARN_METHODS: dict[str, Callable[[Node, Recipe], OpPlan]] = {
     "salun": _plan_salun,
     "vlaforget": _plan_vlaforget,
 }
-ZERO_STEP_METHODS = {"purge"}
 
 
 def plan_op(node: Node, recipe: Recipe) -> OpPlan:
