@@ -45,6 +45,10 @@ assert got["score"] != got["score"], got  # NaN, not a misleading number
 got = summarize(ops, sr, oracle)
 assert abs(got["nbt_from_l_ops"] + got["nbt_from_u_ops"] - got["nbt"]) < 1e-12, got  # the split adds up to NBT
 assert summarize(ops, sr, {3: oracle[3]})["oracle_gap"] != summarize(ops, sr, {3: oracle[3]})["oracle_gap"]  # NaN, no KeyError
+# Forward failure: the gap on the task each U op removes (UB: B .1 vs .1; UE: E 0 vs .2), in U-op order.
+got = summarize(ops, sr, {3: oracle[3], 6: {**oracle[6], "E": .2}})
+assert (got["oracle_gap_u1"], round(got["oracle_gap_u2"], 12)) == (0.0, .2), got
+assert "oracle_gap_u3" not in got
 
 # NBT split by cause, by hand: A drops .1 at LB, .2 at UB-ga, .1 at LC; measured after ops 1, 2, 3.
 got = summarize(["LA", "LB", "UB-ga", "LC"], [{"A": 1.}, {"A": .9, "B": 1.}, {"A": .7, "B": 0.}, {"A": .6, "B": 0., "C": 1.}])

@@ -25,7 +25,7 @@ from vlu.nodes import Node  # noqa: E402
 from vlu.stream_metrics import wilson_interval  # noqa: E402
 from vlu.worker import failed_file, file_name, item_key, load_plan, status  # noqa: E402
 
-COPY = ["op.json", "train_log.jsonl", "vlaforget.json", "vlaforget_boundary.json"]
+COPY = ["op.json", "train_log.jsonl", "cost.json", "vlaforget.json", "vlaforget_boundary.json"]
 
 
 def eval_result(node: Node, task: str, weights: str = "final", seed: int = 0) -> dict | None:
@@ -67,22 +67,21 @@ def perf(log: list[dict]) -> tuple[str, str, str]:
             f"{(times[-1] - times[0]) / 60:.0f}" if len(times) > 1 else "-")
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--run", default="cal")
-    parser.add_argument("--out", required=True)
-    args = parser.parse_args()
-    run, out = args.run, Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
-    base, la, lalb = (Node.from_path(run, p) for p in ("", "LA", "LA/LB"))
-    md = [f"# Calibration run `{run}`", "", "See CALIBRATION.md for what was run. Files: `environment.txt`, "
-          "`tests.txt`, `run_local.log`, `nodes/` (per node: op.json, train_log.jsonl, eval results, videos), "
-          "`drift/` (drift CSVs and logs), `failed/` (logs of failed items).", ""]
+def cost(node: Node) -> str:
+    """GPU-minutes of the op (vlu/run_op.py's cost.json), '-' if not recorded; '*' = resumed (that session's only)."""
+    path = node.dir / "cost.json"
+    if not path.exists():
+        return "-"
+    c = json.loads(path.read_text())
+    return f"{c['seconds'] / 60:.1f}" + ("*" if c.get("resumed") else "")
 
-    # --- Status of every planned item ---------------------------------------------------------
+
+def plan_section(run: str, out: Path) -> list[str]:
+    """Markdown: the status of every planned item, and the nodes trained with another recipe than the
+    current code's. Writes out/failed/ (the log tail of every failed item)."""
     plan = load_plan(run)
     states = [(item_key(i) + (" (optional)" if i.get("optional") else ""), status(run, i)) for i in plan]
-    md += ["## Plan status", "", *table(["item", "status"], states), ""]
+    md = ["## Plan status", "", *table(["item", "status"], states), ""]
     with contextlib.redirect_stdout(io.StringIO()):
         changed = warn_recipe_changes(run, plan)
     if changed:
@@ -98,6 +97,66 @@ def main():
             tail = "\n".join(log.read_text().splitlines()[-300:]) if log.exists() else "(log missing)"
             name = file_name(item)
             (out / "failed" / f"{name}.log").write_text(json.dumps(info, indent=1) + "\n\n" + tail + "\n")
+    return md
+
+
+def stream_metrics_section(run: str, stream: str, methods: list[str]) -> list[str]:
+    """Markdown: scripts/metrics.py's table of the methods (PLAN.md's metrics)."""
+    metrics = subprocess.run([sys.executable, str(PROJECT_DIR / "scripts" / "metrics.py"), "--stream", stream,
+                              "--methods", ",".join(methods), "--runs", run], capture_output=True, text=True)
+    return [f"## Stream metrics (scripts/metrics.py --stream {stream})", "", "```", metrics.stdout + metrics.stderr, "```", ""]
+
+
+def drift_section(run: str, out: Path, changes: tuple[list[str], list[str]], script: str) -> list[str]:
+    """Markdown: the drift script's summary, marked stale if its inputs changed since (changes: its
+    input_changes); copies the script's report directory (CSVs, logs) to out/drift/."""
+    drift = report_dir(run)
+    shutil.rmtree(out / "drift", ignore_errors=True)  # only the current drift report's files
+    if drift.exists():  # its logs too when it stopped before the summary
+        shutil.copytree(drift, out / "drift")
+    if not (drift / "summary.md").exists():
+        return ["## Drift metrics", "", f"Not computed ({script} has not run, or stopped early: see "
+                "run_local.log and `drift/`).", ""]
+    heading, _, body = (drift / "summary.md").read_text().partition("\n")
+    changed, new = changes
+    if changed or new:  # e.g. packed while a rerun retrains nodes, before its drift step
+        heading += ("\n\n**Stale**: computed from other files than the run has now"
+                    + (f"; changed or removed since: {', '.join(changed)}" if changed else "")
+                    + (f"; new since: {', '.join(new)}" if new else "") + ". The numbers of the other nodes are still valid.")
+    return [heading + "\n" + body, ""]
+
+
+def copy_run_files(run: str, out: Path) -> None:
+    """Every node's configuration, training log and eval results (with videos), the output of every item,
+    and the run's plan: everything but the weights."""
+    for node_dir in [RUNS_DIR / run] + [d for d in (RUNS_DIR / run).rglob("*") if d.is_dir() and (d / "op.json").exists()]:
+        rel = node_dir.relative_to(RUNS_DIR / run)
+        dest = out / "nodes" / (str(rel) if str(rel) != "." else "base")
+        for name in COPY:
+            if (node_dir / name).exists():
+                dest.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(node_dir / name, dest / name)
+        if (node_dir / "eval").exists():
+            shutil.copytree(node_dir / "eval", dest / "eval", dirs_exist_ok=True)
+    if (RUNS_DIR / run / "_logs").exists():  # output of every training / eval item
+        shutil.copytree(RUNS_DIR / run / "_logs", out / "item_logs", dirs_exist_ok=True)
+    for name in ("plan.json", "run.json"):
+        if (RUNS_DIR / run / name).exists():
+            shutil.copy2(RUNS_DIR / run / name, out / name)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--run", default="cal")
+    parser.add_argument("--out", required=True)
+    args = parser.parse_args()
+    run, out = args.run, Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    base, la, lalb = (Node.from_path(run, p) for p in ("", "LA", "LA/LB"))
+    md = [f"# Calibration run `{run}`", "", "See CALIBRATION.md for what was run. Files: `environment.txt`, "
+          "`tests.txt`, `run_local.log`, `nodes/` (per node: op.json, train_log.jsonl, eval results, videos), "
+          "`drift/` (drift CSVs and logs), `failed/` (logs of failed items).", ""]
+    md += plan_section(run, out)
 
     # --- Learning ------------------------------------------------------------------------------
     rows = [["base (zero-shot)", "final", sr(base, "A"), "-", sr(base, "B")]]
@@ -144,43 +203,13 @@ def main():
                    "probe A final", "peak mem (GB)", "wall (min)", "method info"], rows), ""]
 
     # --- Stream metrics (PLAN.md) --------------------------------------------------------------
-    metrics = subprocess.run([sys.executable, str(PROJECT_DIR / "scripts" / "metrics.py"), "--stream", "CAL",
-                              "--methods", ",".join(VARIANTS), "--runs", run], capture_output=True, text=True)
-    md += ["## Stream metrics (scripts/metrics.py --stream CAL)", "", "```", metrics.stdout + metrics.stderr, "```", ""]
+    md += stream_metrics_section(run, "CAL", VARIANTS)
 
     # --- Drift metrics (scripts/calibration_drift.py, run by run_local.sh after the workers) ---------
-    drift = report_dir(run)
-    shutil.rmtree(out / "drift", ignore_errors=True)  # only the current drift report's files
-    if drift.exists():  # its logs too when it stopped before the summary
-        shutil.copytree(drift, out / "drift")
-    if (drift / "summary.md").exists():
-        heading, _, body = (drift / "summary.md").read_text().partition("\n")
-        changed, new = input_changes(run)
-        if changed or new:  # e.g. packed while a rerun retrains nodes, before its drift step
-            heading += ("\n\n**Stale**: computed from other files than the run has now"
-                        + (f"; changed or removed since: {', '.join(changed)}" if changed else "")
-                        + (f"; new since: {', '.join(new)}" if new else "") + ". The numbers of the other nodes are still valid.")
-        md += [heading + "\n" + body, ""]
-    else:
-        md += ["## Drift metrics", "", "Not computed (scripts/calibration_drift.py has not run, or stopped early: see "
-               "run_local.log and `drift/`).", ""]
+    md += drift_section(run, out, input_changes(run), "scripts/calibration_drift.py")
     (out / "summary.md").write_text("\n".join(md))
 
-    # --- Raw files of every node (no weights) --------------------------------------------------
-    for node_dir in [RUNS_DIR / run] + [d for d in (RUNS_DIR / run).rglob("*") if d.is_dir() and (d / "op.json").exists()]:
-        rel = node_dir.relative_to(RUNS_DIR / run)
-        dest = out / "nodes" / (str(rel) if str(rel) != "." else "base")
-        for name in COPY:
-            if (node_dir / name).exists():
-                dest.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(node_dir / name, dest / name)
-        if (node_dir / "eval").exists():
-            shutil.copytree(node_dir / "eval", dest / "eval", dirs_exist_ok=True)
-    if (RUNS_DIR / run / "_logs").exists():  # output of every training / eval item
-        shutil.copytree(RUNS_DIR / run / "_logs", out / "item_logs", dirs_exist_ok=True)
-    for name in ("plan.json", "run.json"):
-        if (RUNS_DIR / run / name).exists():
-            shutil.copy2(RUNS_DIR / run / name, out / name)
+    copy_run_files(run, out)
     print(f"report written to {out}/summary.md")
 
 

@@ -122,6 +122,10 @@ def summarize(ops: list[str], sr: list[dict], oracle: dict[int, dict] | None = N
                                for t, j in unlearns if next_touch(t, j) > j + 1)
         if oracle:
             out["oracle_gap"] = _mean(abs(c(t, j) - oracle.get(j, {}).get(t, NAN)) for _, j in unlearns for t in gone[j])
+            # Forward failure (PLAN.md): the gap on the task each U op removes, by how many U ops came before
+            # (oracle_gap_u1, _u2, ...; flat = later requests are unlearned as well as the first).
+            for n, (t, j) in enumerate(unlearns, 1):
+                out[f"oracle_gap_u{n}"] = abs(c(t, j) - oracle.get(j, {}).get(t, NAN))
             a, b = 1 - out["oracle_gap"], out["retain_sr"]  # harmonic mean: punishes one-sided methods
             out["score"] = NAN if math.isnan(a + b) else (2 * a * b / (a + b) if a + b > 0 else 0.0)
     return out

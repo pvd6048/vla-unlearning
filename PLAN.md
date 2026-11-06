@@ -147,6 +147,7 @@ Everything is computed from one **success matrix** `c[i,k]`: the success rate (S
 - Purge nodes are not evaluated, so they take their parent's success rates.
 - The oracle gap is measured at every U op, against that op's retrain oracle (the node `scripts/submit.py` already trains and evaluates), over all tasks unlearned so far.
 - A task that is relearned later (S5) counts as kept again: relapse stops at the relearning op.
+- Forward failure is reported as `oracle_gap_u1`, `oracle_gap_u2`, ...: the gap on the task each U op removes, in U-op order.
 - Plasticity, recovery ratio and robustness are not computed yet; they need extra runs.
 
 **Notation:**

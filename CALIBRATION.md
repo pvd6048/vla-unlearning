@@ -70,3 +70,27 @@ always enough for us to see what happened.
    are extra data: if a recording or the comparison fails, the run says so (WARNING) but still counts
    as complete.
 5. Writes `summary.md` and packs everything into the `.tar.gz`.
+
+## Main run (only when we ask for it, after the calibration)
+
+The main run trains the policy on five LIBERO tasks one after another, unlearns two of them with
+three methods, evaluates every model in the simulator, and at the end compares the trained models
+(drift metrics; as in the calibration, if that comparison fails it says so with a WARNING but the run
+still counts as complete). It uses the GPUs like the calibration
+does, so start it only after the calibration has finished. In the same `vla-unlearning` folder:
+
+```bash
+git pull
+tmux new -s main
+bash scripts/run_local.sh --main                 # expect about a day and a half
+```
+
+- **Disk:** about 160 GB free on top of what the calibration uses (`df -h .`). When we later add the
+  remaining methods, it grows to about 300 GB.
+- **What to send back:** when it finishes, it prints `main_<hostname>.tar.gz` (logs, tables and short
+  videos, a few tens of MB, no model weights).
+- **If something goes wrong:** everything in "If something goes wrong" above applies with `--main`
+  added, e.g. `bash scripts/run_local.sh --main --pack`. Progress:
+  `source slurm/env.sh && $MAIN_PY scripts/submit.py --run goal_s0 --workers none`.
+- **Adding methods later:** we will ask you to `git pull` and run `bash scripts/run_local.sh --main`
+  again. It adds the new methods and keeps everything already done.

@@ -93,7 +93,8 @@ print("claims: 8 workers racing for one stale claim -> exactly 1 wins; a half-wr
 import argparse
 import submit
 submit.STREAMS["ALL_GONE"] = ["LA", "UA"]
-ns = argparse.Namespace(run="two", nodes="", stream="ALL_GONE", methods="ga", no_oracle=False, zero_shot="", save_at="",
+GA = "ga@unlearn_lr=1e-6"  # a method and its rate (vlu/config.py has none for GA until it is calibrated)
+ns = argparse.Namespace(run="two", nodes="", stream="ALL_GONE", methods=GA, no_oracle=False, zero_shot="", save_at="",
                         eval_weights="final,step_002000", eval_seeds="0", videos=0, no_eval=False, features=False, fisher=[])
 built = submit.build_items(ns)
 base_evals = [i for i in built if i["kind"] == "eval" and i["node"] == ""]
@@ -103,7 +104,7 @@ print("submit: a base-model oracle is evaluated (final weights only), not traine
 
 # --save-at and snapshot evals apply to L ops only (U ops have their own short budget; SSD/VLA-Forget save none).
 submit.STREAMS["SNAP"] = ["LA", "LB", "UB"]
-built = submit.build_items(argparse.Namespace(**{**vars(ns), "stream": "SNAP", "methods": "ssd,ga", "save_at": "2000"}))
+built = submit.build_items(argparse.Namespace(**{**vars(ns), "stream": "SNAP", "methods": f"ssd,{GA}", "save_at": "2000"}))
 assert all(i["save_at"] == [] for i in built if i["kind"] == "train" and "/U" in i["node"]), built
 assert {i["weights"] for i in built if i["kind"] == "eval" and "/U" in i["node"]} == {"final"}
 assert any(i["save_at"] == [2000] for i in built if i["kind"] == "train" and i["node"] == "LA/LB")
@@ -113,13 +114,24 @@ print("submit: --save-at and snapshot evals only for L ops")
 # An op that cannot be applied is rejected when planning (here: SSD on the parent's only task, S3-like),
 # not later in a worker job.
 submit.STREAMS["ONLY"] = ["LA", "UA"]
-for method, ok in (("ssd", False), ("salun", False), ("ga", True)):
+for method, ok in (("ssd", False), ("salun", False), (GA, True)):
     try:
         submit.build_items(argparse.Namespace(**{**vars(ns), "stream": "ONLY", "methods": method}))
         assert ok, f"{method} on a parent's only task must be rejected at plan time"
     except ValueError as error:
         assert not ok and "needs a retained task" in str(error), (method, error)
 print("submit: SSD / SalUn on a parent's only task rejected when planning; GA accepted")
+
+# A method without a learning rate yet (vlu/config.py unlearn_lrs) is rejected when planning.
+from vlu.config import RECIPE  # noqa: E402
+uncalibrated = sorted({"ga", "graddiff", "npo", "npo_rt", "salun"} - set(RECIPE.unlearn_lrs))
+for method in uncalibrated:
+    try:
+        submit.build_items(argparse.Namespace(**{**vars(ns), "stream": "SNAP", "methods": f"ssd,{method}"}))
+        raise AssertionError(f"{method} has no learning rate: it must be rejected at plan time")
+    except ValueError as error:
+        assert f"{method} has no learning rate yet" in str(error), error
+print(f"submit: methods without a learning rate yet ({', '.join(uncalibrated) or 'none'}) rejected when planning")
 
 # A trained node whose op.json records other values for the fields its op depends on is reported.
 from dataclasses import asdict  # noqa: E402
@@ -138,11 +150,13 @@ current = json.loads(json.dumps(asdict(RECIPE)))
 old_ssd = {k: v for k, v in current.items() if k != "ssd_reference"}  # trained before the field existed
 items_ = [trained("LA", {**current, "save_every": 1000, "ssd_alpha": 99.0}),  # L op: neither field matters
           trained("LA/LB/UB-ssd@ssd_alpha=10", {**old_ssd, "ssd_alpha": 10.0}),
-          trained("LA/LB/UB-ga", {**current, "unlearn_lr": 3e-5}),
+          trained("LA/LB/UB-salun", {**current, "unlearn_lr": 1e-5}),  # its rate is the method's (unlearn_lrs)
+          trained("LA/LB/UB-ga@unlearn_lr=3e-7", {**current, "unlearn_lr": 3e-7}),  # the op's own rate: unchanged
           trained("LA/LB/UB-vlaforget", {**current, "vlaforget": {**current["vlaforget"], "lr": 5e-5}})]
 warnings = submit.warn_recipe_changes("two", items_)
 assert len(warnings) == 3 and "UB-ssd@ssd_alpha=10" in warnings[0] and "ssd_reference: '<not recorded>' -> now 'retain'" in warnings[0], warnings
-assert "unlearn_lr: 3e-05 -> now 1e-05" in warnings[1] and "vlaforget.lr: 5e-05 -> now 0.0002" in warnings[2], warnings
+assert f"UB-salun was trained with another recipe (unlearn_lr: 1e-05 -> now {RECIPE.unlearn_lrs['salun']!r})" in warnings[1], warnings
+assert "vlaforget.lr: 5e-05 -> now 0.0002" in warnings[2], warnings
 print("submit: trained nodes with another recipe in the fields their op uses are reported (bookkeeping and other ops' fields ignored)")
 
 # A worker re-checks an item after claiming it: another worker may have just finished or failed it.

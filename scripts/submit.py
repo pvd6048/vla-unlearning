@@ -79,7 +79,7 @@ def build_items(args) -> list[dict]:
         for depth in range(1, node.depth + 1):  # missing ancestors first (done ones are skipped later)
             ancestor = "/".join(str(op) for op in node.ops[:depth])
             items.append({"kind": "train", "node": ancestor, "save_at": save_at if depth == node.depth and snapshots else []})
-            if args.features:
+            if args.features and node.ops[depth - 1].method != "purge":  # a purge node's weights are its parent's
                 items.append({"kind": "features", "node": ancestor, "weights": "final", "fisher": []})
         if args.no_eval or (not node.is_base and node.last_op.method == "purge"):
             continue
@@ -161,7 +161,8 @@ def start_worker(run: str, pool: str, dry_run: bool) -> None:
     print(f"started worker job {job} ({pool}); log: {log_dir}/worker-{pool}-{job}.out")
 
 
-def main():
+def make_parser() -> argparse.ArgumentParser:
+    """This script's options (also used by scripts/main_run.py to plan the main run)."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", required=True)
     parser.add_argument("--seed", type=int, help="run seed; needed when the run does not exist yet")
@@ -183,7 +184,11 @@ def main():
                         help="pools to keep a worker in, e.g. large, or large,small:2; 'none' = only update the plan")
     parser.add_argument("--retry-failed", action="store_true", help="forget earlier failures, so they are run again")
     parser.add_argument("--dry-run", action="store_true", help="print the new plan items and sbatch commands only")
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    args = make_parser().parse_args()
 
     if args.dry_run:
         run_json = RUNS_DIR / args.run / "run.json"

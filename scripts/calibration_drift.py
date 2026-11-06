@@ -81,8 +81,13 @@ def inputs(run: str) -> dict[str, list[int]]:
     now: the weights of LA, LA/LB and the variants (the base model's do not change), the probe features,
     the Fisher of A and B."""
     nodes = [Node.from_path(run, p) for p in ("", ORACLE, PARENT, *[f"{PARENT}/UB-{v}" for v in UNLEARNED])]
-    files = [n.weights_path for n in nodes if not n.is_base] + [features_path(n) for n in nodes]
-    files += [fisher_path(Node.from_path(run, PARENT), t) for t in ("A", "B")]
+    return existing(run, nodes, [fisher_path(Node.from_path(run, PARENT), t) for t in ("A", "B")])
+
+
+def existing(run: str, nodes: list[Node], extra: list[Path]) -> dict[str, list[int]]:
+    """{path in the run: [size, mtime_ns]} of the nodes' weights (not the base model's) and features and
+    the extra files, those that exist."""
+    files = [n.weights_path for n in nodes if not n.is_base] + [features_path(n) for n in nodes] + extra
     found = {}
     for f in files:
         try:
@@ -93,12 +98,13 @@ def inputs(run: str) -> dict[str, list[int]]:
     return found
 
 
-def input_changes(run: str) -> tuple[list[str], list[str]]:
+def input_changes(run: str, now: dict[str, list[int]] | None = None) -> tuple[list[str], list[str]]:
     """Inputs changed or removed since the drift report was computed, and inputs that exist now but were
-    not used (e.g. a variant trained since). Both empty: the report is up to date."""
+    not used (e.g. a variant trained since). Both empty: the report is up to date. now: the inputs of
+    another drift script (scripts/main_drift.py); default this script's."""
     path = report_dir(run) / "inputs.json"
     used = json.loads(path.read_text()) if path.exists() else {}
-    now = inputs(run)
+    now = inputs(run) if now is None else now
     return sorted(f for f in used if now.get(f) != used[f]), sorted(set(now) - set(used))
 
 

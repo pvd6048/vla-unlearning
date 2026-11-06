@@ -64,10 +64,20 @@ class Recipe:
     replay_per_task: int | None = 1_000
 
     # --- Unlearning (U ops) -----------------------------------------------------------------------
-    # PROVISIONAL: same step budget for every method; values still to be agreed (see README).
+    # Same step budget for every method (calibration round 2: the probe losses move most in the first
+    # 250-500 steps).
     unlearn_steps: int = 1_000
-    unlearn_lr: float = 1e-5
-    # Method hyperparameters, PROVISIONAL (each paper's default, mapped to the flow-matching loss):
+    # Learning rate of each method that trains with one (VLA-Forget's is vlaforget.lr), set from the
+    # calibration (CALIBRATION.md): the useful ranges are orders of magnitude apart (round 2: GA lost
+    # the retained task at 3e-7, SalUn kept it at 1e-4). A method missing here is not calibrated yet:
+    # its ops are refused (vlu.nodes.check_op) unless the op sets its own, e.g. "UB-ga@unlearn_lr=3e-7"
+    # (the calibration's variants). SalUn: round 2, retained A at 1.00 and forgot B (0.00).
+    unlearn_lrs: dict = field(default_factory=lambda: {"salun": 3e-5})
+    # The learning rate of one op: filled in by vlu.nodes.recipe_for from unlearn_lrs or the op's
+    # override. Leave it None here (a value here would apply to every method; tests use that).
+    unlearn_lr: float | None = None
+    # Method hyperparameters (each paper's default, mapped to the flow-matching loss). SSD's are kept by
+    # calibration round 2 (alpha 5, lambda 1, retain reference: A 1.00, B 0.00); NPO's beta is PROVISIONAL.
     npo_beta: float = 0.1  # NPO paper default; log-likelihood stand-in = -sum of squared FM errors of a chunk
     ssd_alpha: float = 5.0  # SSD official code: 10 for ResNet, 5 for ViT (transformers); dampen weights with I_forget > alpha * I_ref ...
     ssd_lambda: float = 1.0  # ... by the factor min(lambda * I_ref / I_forget, 1)

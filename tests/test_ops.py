@@ -28,8 +28,9 @@ demos = {t: Demos(t) for t in "ABC"}
 proc = Proc()
 mcfg = {"action": SimpleNamespace(delta_indices=list(range(16)))}
 probes = {t: collate([make_sample(None, None, demos[t], 0, s) for s in range(4)])["inputs"] for t in "ABC"}
+# unlearn_lr set for the whole recipe: every method plans, including those not calibrated yet (vlu/config.py)
 recipe = dataclasses.replace(RECIPE, unlearn_steps=6, batch_size=4, num_workers=2, log_every=2, importance_batches=4,
-                             probe_every=1000, save_every=1000)
+                             probe_every=1000, save_every=1000, unlearn_lr=1e-5)
 STATE = "action_head.state_encoder.W"  # per-embodiment stack: only row LIBERO can change
 
 
@@ -64,6 +65,43 @@ except ValueError:
 plan = plan_op(Node.from_path("ops", "LA/LB/UB-ga@unlearn_lr=3e-5+unlearn_steps=200"), recipe)
 assert (plan.lr, plan.steps, plan.probe_every) == (3e-5, 200, recipe.unlearn_probe_every)
 print("overrides: parsed, printed back, typed, validated, applied to the op only")
+
+# --- Learning rate per method (RECIPE.unlearn_lrs) ------------------------------------------------------
+# A U op gets its method's calibrated rate; an op's override wins (a float even where the method has none);
+# a method that trains with unlearn_lr but has no rate yet is refused when planning (check_op), unless the
+# op or the recipe sets one; the others (SSD, VLA-Forget, purge) do not need one.
+from vlu.nodes import _KEYS_USED, check_op  # noqa: E402
+
+lr_methods = [m for m in vlu.ops.UNLEARN_METHODS if "unlearn_lr" in _KEYS_USED[m]]
+assert set(lr_methods) == {"ga", "graddiff", "npo", "npo_rt", "salun"}, lr_methods
+assert set(RECIPE.unlearn_lrs) <= set(lr_methods) and RECIPE.unlearn_lr is None
+for method in vlu.ops.UNLEARN_METHODS:
+    node = Node.from_path("ops", f"LA/LB/UB-{method}")
+    lr = recipe_for(node.last_op, RECIPE).unlearn_lr
+    assert lr == RECIPE.unlearn_lrs.get(method), (method, lr)
+    try:
+        check_op(node)
+        refused = False
+    except ValueError as error:
+        refused = True
+        assert "has no learning rate yet" in str(error) and "unlearn_lrs in vlu/config.py" in str(error), error
+    assert refused == (method in lr_methods and method not in RECIPE.unlearn_lrs), method
+    check_op(Node.from_path("ops", f"LA/LB/UB-{method}@unlearn_lr=3e-7"))  # the calibration's variants
+    check_op(node, dataclasses.replace(RECIPE, unlearn_lr=1e-5))  # a recipe-wide rate (the tests')
+    if method in lr_methods:
+        assert recipe_for(Op.parse(f"UB-{method}@unlearn_lr=3e-7"), RECIPE).unlearn_lr == 3e-7
+        assert plan_op(Node.from_path("ops", f"LA/LB/UB-{method}@unlearn_lr=3e-7"), RECIPE).lr == 3e-7
+assert recipe_for(Op.parse("LB"), RECIPE).unlearn_lr is None
+salun = dataclasses.replace(RECIPE, unlearn_lrs={"salun": 2e-5})
+assert plan_op(Node.from_path("ops", "LA/LB/UB-salun"), salun).lr == 2e-5
+assert recipe_for(Op.parse("UB-salun@unlearn_lr=1e-4"), salun).unlearn_lr == 1e-4
+try:
+    Op.parse("UB-salun@unlearn_lrs=1")
+    raise AssertionError("the table of rates is not a per-op override")
+except ValueError:
+    pass
+print(f"learning rates: per method ({RECIPE.unlearn_lrs}), op overrides win, methods without one "
+      f"({sorted(set(lr_methods) - set(RECIPE.unlearn_lrs))}) refused when planning")
 
 # --- ER (Liu et al.'s continual-GR00T): full batch of the new task + equally many replay-buffer frames --
 import vlu.data
@@ -334,7 +372,7 @@ for path in ["LA", "LA/LB"]:
     save_weights(Fake(), node.weights_path)
 cases = [(["--node", "LA/LB/UB-vlaforget", "--save-at", "5"], "own training loop"),
          (["--node", "LA/LB/UB-ssd", "--steps", "10", "--save-at", "5"], "(0 steps"),
-         (["--node", "LA/LB/UB-ga", "--save-at", "5000"], "(1000 steps"),
+         (["--node", "LA/LB/UB-ga@unlearn_lr=1e-6", "--save-at", "5000"], "(1000 steps"),
          (["--node", "LA/LB/UC-purge"], "cannot unlearn C")]
 for argv, expected in cases:
     sys.argv = ["run_op", "--run", "args", *argv]
@@ -357,6 +395,31 @@ purged = Node.from_path("args", "LA/LB/UB-purge")
 assert purged.weights_path.read_bytes() == purged.parent.weights_path.read_bytes()
 assert not purged.weights_path.is_symlink() and not list(purged.dir.glob("*.tmp"))
 print("run_op: purge without hard links copies the parent's weights via a temporary file")
+
+# run_op end to end on the fake model (loading stubbed): SSD and SalUn as the main run trains them, with the
+# recipe's own learning rates (no recipe-wide one); op.json records the method's rate, cost.json the op's cost.
+probe_of = {id(demos[t]): probes[t] for t in demos}
+real = {name: getattr(vlu.run_op, name) for name in ("RECIPE", "gr00t_config", "build_processor", "load_model",
+                                                      "modality_configs", "load_demos", "fixed_batch")}
+patched = {"RECIPE": dataclasses.replace(recipe, unlearn_lr=None), "gr00t_config": lambda: None,
+           "build_processor": lambda config: proc, "load_model": lambda config, weights: Fake().cuda(),
+           "modality_configs": lambda config: mcfg, "load_demos": lambda m: demos,
+           "fixed_batch": lambda d, n, processor, m: probe_of[id(d)]}
+try:
+    for name, value in patched.items():
+        setattr(vlu.run_op, name, value)
+    for method in ("ssd", "salun"):
+        sys.argv = ["run_op", "--run", "args", "--node", f"LA/LB/UB-{method}"]
+        vlu.run_op.main()
+        node = Node.from_path("args", f"LA/LB/UB-{method}")
+        op_json, cost = json.loads((node.dir / "op.json").read_text()), json.loads((node.dir / "cost.json").read_text())
+        assert node.done and cost["seconds"] > 0 and cost["resumed"] is False and cost["gpu"], cost
+        assert op_json["lr"] == (0.0 if method == "ssd" else RECIPE.unlearn_lrs["salun"]), op_json["lr"]
+        assert op_json["recipe"]["unlearn_lr"] == (None if method == "ssd" else RECIPE.unlearn_lrs["salun"])
+finally:
+    for name, value in real.items():
+        setattr(vlu.run_op, name, value)
+print("run_op: SSD and SalUn end to end with the configured rates; op.json and cost.json written")
 
 # --- The training log after an interrupted attempt -----------------------------------------------------
 from vlu.train import jsonl_logger  # noqa: E402

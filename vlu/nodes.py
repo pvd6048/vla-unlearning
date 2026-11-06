@@ -26,10 +26,11 @@ from dataclasses import asdict, dataclass, fields, replace
 import json
 from pathlib import Path
 
-from vlu.config import RUNS_DIR, Recipe, VLAForgetConfig
+from vlu.config import RECIPE, RUNS_DIR, Recipe, VLAForgetConfig
 from vlu.tasks import TASKS
 
-_RECIPE_KEYS = ({f.name for f in fields(Recipe)} - {"vlaforget"}) | {f"vlaforget.{f.name}" for f in fields(VLAForgetConfig)}
+# Keys an op may override ("unlearn_lrs" is the table an op's unlearn_lr comes from, not a value of one op).
+_RECIPE_KEYS = ({f.name for f in fields(Recipe)} - {"vlaforget", "unlearn_lrs"}) | {f"vlaforget.{f.name}" for f in fields(VLAForgetConfig)}
 
 
 @dataclass(frozen=True)
@@ -204,12 +205,19 @@ def _convert(current, text: str):
 
 
 def recipe_for(op: Op, recipe: Recipe) -> Recipe:
-    """The recipe of one op: the frozen recipe with the op's overrides applied."""
+    """The recipe of one op: the frozen recipe with the op's overrides applied. A U op's unlearn_lr is
+    its method's value in recipe.unlearn_lrs unless the op (or the recipe itself) sets one; it stays
+    None for a method without one there (not calibrated yet, or SSD / VLA-Forget / purge, which do not
+    use it)."""
     changes, vlaforget = {}, {}
+    if op.kind == "U" and recipe.unlearn_lr is None and op.method in recipe.unlearn_lrs:
+        changes["unlearn_lr"] = recipe.unlearn_lrs[op.method]
     for key, text in op.overrides:
         if key.startswith("vlaforget."):
             name = key.split(".", 1)[1]
             vlaforget[name] = _convert(getattr(recipe.vlaforget, name), text)
+        elif key == "unlearn_lr":  # a float even where the recipe has None (which _convert reads as an int field)
+            changes[key] = float(text)
         else:
             changes[key] = _convert(getattr(recipe, key), text)
     if vlaforget:
@@ -222,9 +230,10 @@ def recipe_for(op: Op, recipe: Recipe) -> Recipe:
 NEEDS_RETAINED_TASK = frozenset({"graddiff", "npo_rt", "ssd", "salun", "vlaforget"})
 
 
-def check_op(node: Node) -> None:
-    """Raise ValueError if the node's last op cannot be applied to its parent. scripts/submit.py calls
-    this when planning, so an impossible op fails at once rather than in a worker job."""
+def check_op(node: Node, recipe: Recipe = RECIPE) -> None:
+    """Raise ValueError if the node's last op cannot be applied to its parent, or if its method has no
+    learning rate yet. scripts/submit.py calls this when planning, so an impossible op fails at once
+    rather than in a worker job."""
     op = node.last_op
     if op.kind != "U":
         return
@@ -233,6 +242,9 @@ def check_op(node: Node) -> None:
         raise ValueError(f"{node}: cannot unlearn {op.task}, it is not retained by the parent")
     if op.method in NEEDS_RETAINED_TASK and kept == [op.task]:
         raise ValueError(f"{node}: {op.method} needs a retained task besides {op.task}")
+    if "unlearn_lr" in _KEYS_USED.get(op.method, ()) and recipe_for(op, recipe).unlearn_lr is None:
+        raise ValueError(f"{node}: {op.method} has no learning rate yet: set it from the calibration "
+                         "(unlearn_lrs in vlu/config.py), or give the op one (@unlearn_lr=...)")
 
 
 # The recipe fields each kind of op depends on (bookkeeping such as logging, checkpoints and probes

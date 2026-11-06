@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 
 import torch
 
@@ -86,6 +87,9 @@ def main():
     mcfg = modality_configs(config)
     demos = load_demos(mcfg)
     probes = {t: fixed_batch(d, recipe.probe_size, processor, mcfg) for t, d in demos.items()}
+    # The op's cost (PLAN.md: GPU-minutes per op) counts its own work: the method's preparation (all of SSD,
+    # SalUn's mask, NPO's reference), training and probe losses; not loading the model and the demos.
+    start, resumed = time.time(), (node.dir / "resume.pt").exists()
     if plan.prepare is not None:  # method-specific setup on the parent model (see vlu/ops.py)
         plan.prepare(OpContext(node, model, demos, processor, mcfg, seed))
 
@@ -115,6 +119,8 @@ def main():
         batches = OpBatches(demos, plan.parts, processor, mcfg, seed=seed * 1000 + node.depth, num_steps=plan.steps,
                             run_seed=seed)
         train(node, model, plan, batches, probes, recipe, save_at)
+    # resumed: the seconds are only those of the session that finished the op
+    node.write_json("cost.json", {"seconds": time.time() - start, "gpu": torch.cuda.get_device_name(), "resumed": resumed})
     print(f"{node} done: {node.weights_path}")
 
 

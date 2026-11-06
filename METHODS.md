@@ -57,7 +57,8 @@ Each difference is labelled:
 - **Why we differ:** one optimizer and one step budget keep the comparison about the methods, not the
   training setup.
 - **Learning rates:** these are not shared. Each method's learning rate (or strength, for SSD) is
-  calibrated separately by `scripts/calibrate.py`.
+  calibrated separately by `scripts/calibrate.py` and set per method in `vlu/config.py`
+  (`unlearn_lrs`; VLA-Forget's `vlaforget.lr`).
 - **VLA-Forget keeps its own setup:** it uses the authors' Adam without a schedule (Same), inside the
   shared step budget.
 

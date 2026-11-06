@@ -1,26 +1,39 @@
 #!/bin/bash
-# Calibration on a machine without Slurm (see CALIBRATION.md). After scripts/setup_cluster.sh:
-#   bash scripts/run_local.sh
-#   bash scripts/run_local.sh --pack    only pack what exists now (e.g. while a stuck run is still going;
-#                                       drift metrics are included only if they were computed before)
+# Runs on a machine without Slurm (see CALIBRATION.md). After scripts/setup_cluster.sh:
+#   bash scripts/run_local.sh           the calibration (run cal, scripts/calibrate.py)
+#   bash scripts/run_local.sh --main    the main run (run goal_s0, scripts/main_run.py: stream S1)
+#   ... --pack                          only pack what exists now (e.g. while a stuck run is still going;
+#                                       calibration drift metrics are included only if computed before)
 # Safe to rerun: finished work is skipped and interrupted work resumes. Everything to send back ends up
-# in $VLU_STORE/calibration_<host>/ and $VLU_STORE/calibration_<host>.tar.gz (no model weights).
+# in $VLU_STORE/<calibration|main>_<host>/ and its .tar.gz (no model weights).
 set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../slurm/env.sh"
 cd "$VLU_PROJECT_DIR"
-RUN="${RUN:-cal}"
-OUT="$VLU_STORE/calibration_$(hostname)"
+MODE=calibration PACK=0
+for arg in "$@"; do
+    case "$arg" in
+        --main) MODE=main ;;
+        --pack) PACK=1 ;;
+        *) echo "unknown option $arg (expected --main and/or --pack)"; exit 2 ;;
+    esac
+done
+if [ "$MODE" = main ]; then
+    RUN="${RUN:-goal_s0}" PLAN=scripts/main_run.py REPORT=scripts/main_report.py DRIFT=scripts/main_drift.py
+else
+    RUN="${RUN:-cal}" PLAN=scripts/calibrate.py REPORT=scripts/calibration_report.py DRIFT=scripts/calibration_drift.py
+fi
+OUT="$VLU_STORE/${MODE}_$(hostname)"
 mkdir -p "$OUT"
 exec > >(tee -a "$OUT/run_local.log") 2>&1
-echo "=== $(date)  run $RUN  output $OUT"
+echo "=== $(date)  $MODE: run $RUN  output $OUT"
 
 package() {
     cp -f "$VLU_PROJECT_DIR/setup.log" "$OUT/" 2>/dev/null || true
-    "$MAIN_PY" scripts/calibration_report.py --run "$RUN" --out "$OUT" || echo "WARNING: report failed"
+    "$MAIN_PY" "$REPORT" --run "$RUN" --out "$OUT" || echo "WARNING: report failed"
     tar czf "$OUT.tar.gz" -C "$(dirname "$OUT")" "$(basename "$OUT")"
     echo "=== $(date)  done. Please send back: $OUT.tar.gz ($(du -h "$OUT.tar.gz" | cut -f1))"
 }
-if [ "${1:-}" = "--pack" ]; then
+if [ "$PACK" = 1 ]; then
     [ -f "$OUT/environment.txt" ] || nvidia-smi > "$OUT/environment.txt" 2>&1
     package
     exit 0
@@ -67,21 +80,39 @@ if gpu_render_ok; then export VLU_RENDER=gpu
 elif render_test mesa 0 >> "$OUT/environment.txt" 2>&1; then export VLU_RENDER=mesa
 else echo "ERROR: LIBERO cannot render with the GPU or with Mesa (see environment.txt)"; package; exit 1; fi
 echo "rendering: $VLU_RENDER" | tee -a "$OUT/environment.txt"
+# Every task A-E exists in LIBERO-Goal with its training instruction and enough initial states (make_env
+# checks the instruction): found now, not at the first eval of a task, hours into the run. The calibration
+# uses only A and B: there it is a warning, an early one for the main run.
+if ! VLU_RENDER_DEVICE=$([ "$VLU_RENDER" = gpu ] && nvidia-smi --query-gpu=index --format=csv,noheader | head -1 || echo 0) \
+     bash -c 'source slurm/env.sh; CUDA_VISIBLE_DEVICES="" MUJOCO_EGL_DEVICE_ID=$VLU_RENDER_DEVICE "$SIM_PY" - <<"PY"
+import sys
+sys.path.insert(0, ".")
+from vlu.config import RECIPE
+from vlu.eval.libero_client import make_env
+from vlu.tasks import TASKS
+for letter in TASKS:
+    env, init_states = make_env(letter)
+    assert len(init_states) >= RECIPE.eval_episodes, f"task {letter}: {len(init_states)} initial states"
+    print(f"task {letter} OK: {TASKS[letter]}, {len(init_states)} initial states")
+PY' >> "$OUT/environment.txt" 2>&1; then
+    if [ "$MODE" = main ]; then echo "ERROR: a task of vlu/tasks.py is not usable in LIBERO (see environment.txt)"; package; exit 1; fi
+    echo "WARNING: a task of vlu/tasks.py is not usable in LIBERO (see environment.txt); the main run would stop here"
+fi
 
 # 3. Base tests (tests/README.md) ------------------------------------------------------------------
 : > "$OUT/tests.txt"
 TESTS_OK=1
 for t in tests/test_stream_metrics.py tests/test_calibration.py tests/test_drift_params.py tests/test_drift_extract.py tests/test_ops.py \
          tests/test_vlaforget.py tests/test_completion.py tests/test_resume.py tests/test_training_safety.py tests/test_rank_subspace.py \
-         tests/test_calibration_drift.py; do
+         tests/test_calibration_drift.py tests/test_main_run.py tests/test_main_drift.py; do
     if "$MAIN_PY" "$t" >> "$OUT/tests.txt" 2>&1; then echo "PASS $t" | tee -a "$OUT/tests.txt"
     else echo "FAIL $t" | tee -a "$OUT/tests.txt"; TESTS_OK=0; fi
 done
 if [ "$TESTS_OK" = 0 ]; then echo "ERROR: a base test failed; not starting the runs"; package; exit 1; fi
 
 # 4. Plan ------------------------------------------------------------------------------------------
-if ! "$MAIN_PY" scripts/calibrate.py --run "$RUN"; then
-    echo "ERROR: calibration planning failed"; package; exit 1
+if ! "$MAIN_PY" "$PLAN" --run "$RUN"; then
+    echo "ERROR: $MODE planning failed"; package; exit 1
 fi
 # A rerun (e.g. after a code fix) tries earlier failures again.
 if ! "$MAIN_PY" scripts/submit.py --run "$RUN" --retry-failed --workers none; then
@@ -116,10 +147,10 @@ for pid in "${PIDS[@]}"; do
 done
 
 # 6. Drift metrics from the checkpoints and features that exist (on the GPU with the most free memory;
-#    CPU threads for the parts on the CPU), then the report. A drift failure is reported, not fatal ------
+#    CPU threads for the parts on the CPU). A drift failure is reported, not fatal. Then the report ------
 "$MAIN_PY" scripts/submit.py --run "$RUN" --workers none
 DRIFT_GPU=$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits | sort -t, -k2 -nr | head -1 | cut -d, -f1)
-if ! CUDA_VISIBLE_DEVICES="$DRIFT_GPU" OMP_NUM_THREADS="$VLU_CPUS" "$MAIN_PY" scripts/calibration_drift.py --run "$RUN"; then
+if ! CUDA_VISIBLE_DEVICES="$DRIFT_GPU" OMP_NUM_THREADS="$VLU_CPUS" "$MAIN_PY" "$DRIFT" --run "$RUN"; then
     echo "WARNING: some drift metrics are missing (see summary.md; logs in $VLU_RUNS_DIR/$RUN/drift_report/, packed as drift/)"
 fi
 if ! "$MAIN_PY" -m vlu.worker --run "$RUN" --check-complete; then

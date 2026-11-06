@@ -132,7 +132,7 @@ def _plan_learn(node: Node, recipe: Recipe) -> OpPlan:
 
 
 # --- Unlearning ------------------------------------------------------------------------------------
-# Every method gets the same step budget (recipe.unlearn_steps) and learning rate.
+# Every method gets the same step budget (recipe.unlearn_steps); learning rates are per method (recipe_for).
 
 
 def _forget_retain(node: Node, recipe: Recipe) -> tuple[Slots, Slots]:
@@ -402,7 +402,7 @@ ZERO_STEP_METHODS = {"purge"}
 
 def plan_op(node: Node, recipe: Recipe) -> OpPlan:
     op = node.last_op
-    check_op(node)  # e.g. the methods in NEEDS_RETAINED_TASK need a retained task besides the forget task
+    check_op(node, recipe)  # e.g. the methods in NEEDS_RETAINED_TASK need a retained task besides the forget task
     recipe = recipe_for(op, recipe)
     if op.kind == "L":
         return _plan_learn(node, recipe)

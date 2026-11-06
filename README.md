@@ -112,6 +112,14 @@ policy, distance to the retrain oracle LA), and packs `summary.md` plus all logs
 `.tar.gz` (`scripts/calibration_report.py`). Hyperparameter variants are ordinary nodes with recipe overrides in
 their op token, e.g. `LA/LB/UB-ga@unlearn_lr=3e-5` (`vlu/nodes.py`, `vlu.ops.recipe_for`).
 
+`scripts/run_local.sh --main` runs the main run on the same machine: run `goal_s0`, planned by
+`scripts/main_run.py` (the Week 1 command below for the methods whose hyperparameters are set, plus
+PLAN §5.1's control branch `LA/LB/LC/LD(/LE)` and drift features), with PLAN §5's drifts computed by
+`scripts/main_drift.py` (unlearning U vs. incidental forgetting F_B vs. tauB, distances to the retrain
+oracle) and everything reported by `scripts/main_report.py` into `main_<host>.tar.gz` (success rates,
+stream metrics, each op's cost in GPU-minutes from its `cost.json`). Adding a method to
+`main_run.METHODS` and rerunning adds its tail.
+
 ## Day 1: smoke test
 
 ```bash
@@ -167,7 +175,8 @@ python scripts/metrics.py --stream S1 --methods purge,ga,graddiff,npo,npo_rt,ssd
 ```
 
 This plans the shared prefix once, every method's tail, the oracles (`LA/LC`, `LA/LC/LD`), and an
-eval after every op on every task seen so far. `results.py` prints the raw success rates.
+eval after every op on every task seen so far. A method without a calibrated learning rate (see "Open
+decisions") is refused when planning. `results.py` prints the raw success rates.
 `metrics.py` turns them into the PLAN's metrics per method, averaged over runs (`--runs goal_s0,goal_s1`).
 NaN means an eval it needs is missing, or the metric is undefined for the stream (e.g. relapse when
 no op follows an unlearning). `results.py --ci` adds 95% Wilson intervals to the raw success rates.
@@ -208,7 +217,8 @@ PLAN §5's branches are nodes of the tree (target task B, θ₀ = `LA/LB/LC`):
 ## Adding an unlearning method
 
 Write `_plan_<name>(node, recipe) -> OpPlan` in `vlu/ops.py` (batch parts + loss) and add it to
-`UNLEARN_METHODS`. The op token is then `U<task>-<name>`. A method that needs a one-off computation on
+`UNLEARN_METHODS`, and its recipe fields to `_KEYS_USED` in `vlu/nodes.py`; a method trained with
+`unlearn_lr` gets its rate in `unlearn_lrs` (`vlu/config.py`) once calibrated. The op token is then `U<task>-<name>`. A method that needs a one-off computation on
 the parent model (a reference copy, importances, a weight mask) gives its plan a `prepare(ctx)`;
 `OpPlan.grad_mask` restricts which weights may change. See NPO, SSD and SalUn there.
 
@@ -227,6 +237,9 @@ How the methods map onto GR00T's flow-matching loss (PROVISIONAL values in `vlu/
 ## Open decisions (provisional values in the code)
 
 - A–E task mapping (`vlu/tasks.py`): currently LIBERO-Goal tasks 0–4.
-- Unlearning budget and lr (`vlu/config.py`): 1000 steps for every method; lr 1e-5 (VLA-Forget: 2e-4, its paper's value); set by the calibration run.
+- Unlearning budget and lr (`vlu/config.py`): 1000 steps for every method. Learning rate per method
+  (`unlearn_lrs`): SalUn 3e-5 (calibration round 2); GA, GradDiff, NPO and NPO-RT after round 3, and
+  until then an op of theirs is refused unless it sets one (`@unlearn_lr=...`); VLA-Forget's
+  `vlaforget.lr` (2e-4, its paper's value) is PROVISIONAL too. SSD keeps its defaults (round 2).
 - GA stopping rule / loss ceiling; NPO's β (depends on the scale of L_FM, see the probe losses); SSD's α, λ.
 - U ops draw retain data from all demos of the retained tasks, not from the 1000-frame replay buffer.
