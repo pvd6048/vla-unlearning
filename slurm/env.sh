@@ -48,10 +48,13 @@ else  # e.g. inherited from a shell that sourced this file in mesa mode: it woul
     unset __EGL_VENDOR_LIBRARY_FILENAMES
 fi
 
+# Less fragmentation of GPU memory (VLA-Forget's calibration run died with 2 GB reserved but unusable).
+# Only how PyTorch reserves memory changes, not any result.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"   # simulator workers: one thread each
 # The tokenizer runs in the DataLoader workers: without this, every fork prints a warning and turns
 # the tokenizer's threads off anyway.
 export TOKENIZERS_PARALLELISM=false
 # CPUs this job may use (its cgroup / CPU affinity). Not plain `nproc`: GNU nproc also honours
-# OMP_NUM_THREADS, so after the line above it would always say 1.
+# OMP_NUM_THREADS, so after the export above it would always say 1.
 VLU_CPUS=$(env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT nproc)

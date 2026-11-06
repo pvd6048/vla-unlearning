@@ -14,7 +14,7 @@ Run `cal` (seed 0), tasks A and B of LIBERO-Goal:
                 (it never saw B).
 
 Disk: a node's weights are ~6.5 GB (1.62B trainable parameters in fp32), so only weights that are
-evaluated are saved: LA's 2k/5k snapshots and every node's final weights (about 200 GB in all).
+evaluated are saved: LA's 2k/5k snapshots and every node's final weights (about 265 GB in all).
 """
 
 import argparse
@@ -28,16 +28,21 @@ from vlu.nodes import Node, check_op, run_seed  # noqa: E402
 from vlu.worker import item_key, load_plan, plan_path, write_plan  # noqa: E402
 
 # Each variant is <method>[@<recipe overrides>] (vlu/nodes.py). Grids around each paper's default.
+# Round 3: GA, GradDiff and NPO between the round-2 values where the retained task broke (GA 1e-7 kept
+# A but barely forgot B, 3e-7 forgot B and lost A; GradDiff 3e-7 was halfway; NPO 1e-6 lost A),
+# VLA-Forget again (it ran out of memory selecting its third stage's layers), and NPO-RT (new: NPO plus
+# GradDiff's retain term, the NPO authors' default) from 3e-7 up to the authors' lr 1e-5.
 # Round 2 (after the first calibration, see METHODS.md): GA and GradDiff collapsed the model at every lr of
 # round 1, so lower ones are added; NPO 1e-6 likewise. SSD's round-1 variants (ssd@ssd_alpha=5/10/20) used
 # the old reference (all tasks) and are dropped; the new ones name ssd_reference explicitly, so they never
 # reuse a round-1 node directory.
 VARIANTS = [
     "purge",
-    *[f"ga@unlearn_lr={lr}" for lr in ("1e-7", "3e-7", "1e-6", "1e-5", "3e-5", "1e-4")],
-    *[f"graddiff@unlearn_lr={lr}" for lr in ("1e-7", "3e-7", "1e-6", "1e-5", "3e-5", "1e-4")],
-    *[f"npo@unlearn_lr={lr}" for lr in ("1e-6", "1e-5", "3e-5", "1e-4")],
+    *[f"ga@unlearn_lr={lr}" for lr in ("1e-7", "1.5e-7", "2e-7", "3e-7", "1e-6", "1e-5", "3e-5", "1e-4")],
+    *[f"graddiff@unlearn_lr={lr}" for lr in ("1e-7", "3e-7", "4e-7", "6e-7", "1e-6", "1e-5", "3e-5", "1e-4")],
+    *[f"npo@unlearn_lr={lr}" for lr in ("1e-7", "3e-7", "1e-6", "1e-5", "3e-5", "1e-4")],
     "npo@unlearn_lr=3e-5+npo_beta=1",
+    *[f"npo_rt@unlearn_lr={lr}" for lr in ("3e-7", "1e-6", "3e-6", "1e-5")],
     "ssd@ssd_reference=retain",  # the paper's ViT alpha = 5, lambda = 1
     "ssd@ssd_alpha=10+ssd_reference=retain",  # the paper's ResNet alpha
     "ssd@ssd_alpha=50+ssd_lambda=0.1+ssd_reference=retain",  # the paper's setting for very similar classes

@@ -1,7 +1,7 @@
 # Calibration run (on a machine without Slurm)
 
-Thank you for running this. It fine-tunes the GR00T N1.6 robot policy on two LIBERO tasks, tries 28
-settings of 7 unlearning methods, and evaluates everything in the LIBERO simulator. The results tell
+Thank you for running this. It fine-tunes the GR00T N1.6 robot policy on two LIBERO tasks, tries 38
+settings of 8 unlearning methods, and evaluates everything in the LIBERO simulator. The results tell
 us how to set our hyperparameters. You don't need to interpret anything: run it and send back one file.
 
 ## What the machine needs
@@ -12,7 +12,7 @@ us how to set our hyperparameters. You don't need to interpret anything: run it 
   same time. The run checks the free memory at the start, warns about GPUs already in use, and stops
   if no GPU has 44 GB free.
 - NVIDIA driver 570 or newer (CUDA 12.8); 525 or newer usually works too.
-- About 250 GB of free disk (it fills to about 225 GB: 25 GB of software, model and data, 200 GB of
+- About 330 GB of free disk (it fills to about 290 GB: 25 GB of software, model and data, 265 GB of
   trained model weights), 64 GB of RAM or more, internet access during setup (about 15 GB is downloaded).
 - `git`, `curl`, `cmake` and a C compiler (`build-essential` on Ubuntu). No root access or Slurm is needed.
 
@@ -20,7 +20,7 @@ us how to set our hyperparameters. You don't need to interpret anything: run it 
 
 Everything is installed and written inside the folder you clone into: Python environments, dataset,
 model, results. Nothing goes elsewhere (except `uv`, installed to `~/.local/bin` if missing). So first
-`cd` to any disk with about 250 GB free (`df -h .` shows the free space), then:
+`cd` to any disk with about 330 GB free (`df -h .` shows the free space), then:
 
 ```bash
 git clone https://github.com/pvd6048/vla-unlearning.git
@@ -63,6 +63,6 @@ always enough for us to see what happened.
 1. Records the machine (GPUs, driver, library versions) and picks GPU rendering for the simulator if a
    test render works on every GPU, else software rendering.
 2. Runs the code's self-tests (a few minutes). If one fails it stops here and packs the logs.
-3. Trains task A (with checkpoints at 2k, 5k, 10k steps), then task B, then 28 unlearning variants of
+3. Trains task A (with checkpoints at 2k, 5k, 10k steps), then task B, then 38 unlearning variants of
    task B, and evaluates each in the simulator. One worker runs per GPU.
 4. Writes `summary.md` and packs everything into the `.tar.gz`.

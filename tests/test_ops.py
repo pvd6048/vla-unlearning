@@ -1,4 +1,4 @@
-"""Base-level checks of the unlearning plans in vlu/ops.py (NPO, SSD, SalUn), of vlu/train.py with a
+"""Base-level checks of the unlearning plans in vlu/ops.py (NPO, NPO-RT, SSD, SalUn), of vlu/train.py with a
 gradient mask, and of vlu/run_op.py's argument checks, on the fake GR00T-shaped model.
     python tests/test_ops.py
 """
@@ -140,6 +140,44 @@ ours, _ = plan.loss_fn(model, {"forget": probes["B"]})
 assert 1 < (recipe.npo_beta * (nll_cur - nll_ref)).abs().max() < 20, (nll_cur - nll_ref)  # the regime where the weighting matters
 assert torch.allclose(ours, official, rtol=1e-5, atol=1e-6), (ours.item(), official.item())
 print(f"NPO: loss equals the official formula on a perturbed model ({ours.item():.6f} vs {official.item():.6f})")
+
+# --- NPO-RT: the authors' default npo_grad_diff (TOFU/dataloader.py:272-291, config/forget.yaml) -------
+#   loss = npo_coeff * forget_loss + grad_diff_coeff * retain_loss,   npo_coeff = grad_diff_coeff = 1
+# with forget_loss the NPO loss above and retain_loss the ordinary training loss (L_FM) on retained data.
+rt_ctx = context("LA/LB/UB-npo_rt", model)
+rt_plan = plan_op(rt_ctx.node, recipe)
+assert rt_plan.parts["forget"] == [("B",)] * 4 and rt_plan.parts["retain"] == [("A",)] * 4, rt_plan.parts
+assert plan.parts.keys() == {"forget"} and rt_plan.notes["retain_coeff"] == 1.0
+assert rt_plan.notes["npo_beta"] == recipe.npo_beta
+rt_state = next(c.cell_contents for c in rt_plan.loss_fn.__closure__ if isinstance(c.cell_contents, dict))
+rt_state["ref"] = ref  # = what its prepare() copies: the model before the perturbation
+torch.manual_seed(7)
+rt, rt_metrics = rt_plan.loss_fn(model, {"forget": probes["B"], "retain": probes["A"]})
+torch.manual_seed(7)
+model(probes["B"])  # the forget pass draws its noise first, as in the loss
+retain_fm = model(probes["A"])["loss"]
+official_rt = 1.0 * official + 1.0 * retain_fm
+assert torch.allclose(rt, official_rt, rtol=1e-5, atol=1e-6), (rt.item(), official_rt.item())
+assert rt_metrics["retain_fm"] == retain_fm.item() and rt_metrics["log_ratio"] != 0, rt_metrics
+# Its gradient is NPO's plus the retain gradient: the retain term never fades with NPO's weight.
+model.zero_grad(set_to_none=True)
+torch.manual_seed(7)
+rt_plan.loss_fn(model, {"forget": probes["B"], "retain": probes["A"]})[0].backward()
+g_rt = {n: p.grad.clone() for n, p in trainable_named_parameters(model).items() if p.grad is not None}
+model.zero_grad(set_to_none=True)
+torch.manual_seed(7)
+plan.loss_fn(model, {"forget": probes["B"]})[0].backward()
+g_npo = {n: p.grad.clone() if p.grad is not None else torch.zeros_like(p) for n, p in trainable_named_parameters(model).items()}
+model.zero_grad(set_to_none=True)
+torch.manual_seed(7)
+model(probes["B"])
+model(probes["A"])["loss"].backward()
+g_ret = {n: p.grad.clone() if p.grad is not None else torch.zeros_like(p) for n, p in trainable_named_parameters(model).items()}
+model.zero_grad(set_to_none=True)
+for n, g in g_rt.items():
+    assert torch.allclose(g, g_npo[n] + g_ret[n], rtol=1e-4, atol=1e-6), n
+print(f"NPO-RT: loss equals the official npo_grad_diff (NPO + 1.0 x retain L_FM: {rt.item():.6f} vs {official_rt.item():.6f}), "
+      "gradient = NPO's + the retain gradient")
 
 # --- SSD: zero steps, only shrinks weights, never touches rows that cannot change --------------------
 model = Fake().cuda()

@@ -169,39 +169,65 @@ def set_grads(params: list, flat: torch.Tensor) -> None:
 def selection_scores(ctx: OpContext, ref, taps, ref_taps, names: list[str], score: str, cfg, forget_slots, retain_slots,
                      stream: int) -> dict[str, float]:
     """Score candidate layers with the gradients of L_forget = L_FM(forget) and
-    L_retain = L_FM(retain) + beta * KL (as the authors' code), averaged over cfg.selection_batches batches."""
+    L_retain = L_FM(retain) + beta * KL (as the authors' code), averaged over cfg.selection_batches batches.
+
+    Memory: the reasoning stage's candidates (top LLM layers + DiT) hold ~1.3B weights, so only one
+    gradient-sized fp32 buffer exists at a time. Gradients are summed in place in p.grad (fp32 weights)
+    or in an fp32 buffer (lower-precision weights), the same arithmetic as summing separate fp32 copies.
+    The forget pass is then reduced to what the score needs (its norm, or for "ratio" the vectors, moved
+    to CPU for the cosine) before the retain pass."""
     model = ctx.model
     params = {n: list(model.get_submodule(n).parameters()) for n in names}
     flat_params = [p for ps in params.values() for p in ps]
+    candidate_ids = {id(p) for p in flat_params}
+    others = [n for n, p in model.named_parameters() if p.requires_grad and id(p) not in candidate_ids]
+    if others:  # backward() below would also fill (and keep the graph for) their gradients
+        raise RuntimeError(f"VLA-Forget selection: {len(others)} non-candidate parameters require gradients, e.g. {others[:3]}")
     for p in flat_params:
         p.requires_grad_(True)
-    sums = {}
+        p.grad = None
     model.eval()  # see the module docstring: no dropout, so theta and theta0 compute alike
-    for kind, slots in (("forget", forget_slots), ("retain", retain_slots)):
-        total = [torch.zeros_like(p, dtype=torch.float32) for p in flat_params]
+
+    def mean_gradients(kind: str, slots) -> list[torch.Tensor]:
+        low = {id(p): torch.zeros_like(p, dtype=torch.float32) for p in flat_params if p.dtype != torch.float32}
         for inputs in ctx.batches(slots, cfg.selection_batches, stream=stream + (kind == "retain")):
             out, mine, theirs = paired_forward(model, ref, taps, ref_taps, inputs)
             loss = out["loss"] if kind == "forget" else out["loss"] + cfg.beta_kl * velocity_kl(out, mine, theirs)
-            grads = torch.autograd.grad(loss, flat_params, allow_unused=True)
-            for t, g in zip(total, grads):
-                if g is not None:
-                    t += g.float()
-        sums[kind] = total
-    for p in flat_params:
-        p.requires_grad_(False)
+            loss.backward()  # only the candidates require gradients (checked above)
+            for p in flat_params:
+                if id(p) in low and p.grad is not None:
+                    low[id(p)] += p.grad.float()
+                    p.grad = None
+        sums = [low.get(id(p), p.grad if p.grad is not None else torch.zeros_like(p, dtype=torch.float32)) for p in flat_params]
+        for p in flat_params:
+            p.grad = None
+        return sums
 
-    scores, i = {}, 0
-    for name, ps in params.items():
-        k = len(ps)
-        g_f = torch.cat([t.flatten() for t in sums["forget"][i : i + k]]) / cfg.selection_batches
-        g_r = torch.cat([t.flatten() for t in sums["retain"][i : i + k]]) / cfg.selection_batches
-        i += k
+    def per_name(sums: list[torch.Tensor]):
+        i = 0
+        for name, ps in params.items():
+            yield name, ps, torch.cat([t.flatten() for t in sums[i : i + len(ps)]]) / cfg.selection_batches
+            i += len(ps)
+
+    forget = mean_gradients("forget", forget_slots)
+    if score == "ratio":  # the cosine needs both mean gradients: keep the forget ones on the CPU meanwhile
+        forget_kept = {name: g.cpu() for name, _, g in per_name(forget)}
+    else:
+        forget_kept = {name: g.norm() for name, _, g in per_name(forget)}
+    del forget
+    retain = mean_gradients("retain", retain_slots)
+    scores = {}
+    for name, ps, g_r in per_name(retain):
         if score == "ratio":
+            g_f = forget_kept[name].to(g_r.device)
             theta = torch.cat([p.detach().float().flatten() for p in ps])
             cos = float(g_f @ g_r / (g_f.norm() * g_r.norm()).clamp_min(1e-12))
             scores[name] = float(g_f.norm() / (theta.norm() + EPS)) * (1.0 - cos) ** cfg.alpha_ratio
         else:
-            scores[name] = float(g_f.norm() / (g_r.norm() + EPS))
+            scores[name] = float(forget_kept[name] / (g_r.norm() + EPS))
+    del retain
+    for p in flat_params:
+        p.requires_grad_(False)
     return scores
 
 
@@ -290,12 +316,14 @@ def run(ctx: OpContext, probes: dict, recipe: Recipe, forget_task: str, retain_t
     adapters, done = {}, 0
     for s_index, (stage, steps) in enumerate(zip(STAGES, stage_steps(total_steps, cfg.stage_ratio))):
         started = time.time()
-        scores = selection_scores(ctx, ref, taps, ref_taps, cands[stage], "significance" if stage == "reasoning" else "ratio",
-                                  cfg, forget_slots, retain_slots, stream=10 * s_index)
-        chosen = sorted(scores, key=scores.get, reverse=True)[: top_k[stage]]
+        # Earlier stages' adapters stay but are frozen, already while scoring: otherwise the scoring
+        # passes would keep the graph down to the vision adapters (memory) and give them stale gradients.
         for a in adapters.values():
             a.lora_A.requires_grad_(False)
             a.lora_B.requires_grad_(False)
+        scores = selection_scores(ctx, ref, taps, ref_taps, cands[stage], "significance" if stage == "reasoning" else "ratio",
+                                  cfg, forget_slots, retain_slots, stream=10 * s_index)
+        chosen = sorted(scores, key=scores.get, reverse=True)[: top_k[stage]]
         new = lora.attach(model, chosen, cfg.lora_r, cfg.lora_alpha, dropout=0.0)
         adapters.update(new)
         params = [p for a in new.values() for p in (a.lora_A, a.lora_B)]

@@ -173,7 +173,19 @@ def _plan_npo(node: Node, recipe: Recipe) -> OpPlan:
     2*sigmoid(beta * (log p_theta - log p_ref)), which starts at 1 and fades as the forget data
     becomes unlikely relative to the reference. theta and the reference see the same flow-matching
     noise and timesteps (the RNG state is replayed), so their SSEs are directly comparable."""
-    forget, _ = _forget_retain(node, recipe)
+    return _npo(node, recipe, with_retain=False)
+
+
+def _plan_npo_rt(node: Node, recipe: Recipe) -> OpPlan:
+    """NPO-RT, the NPO authors' default configuration (`forget_loss: npo_grad_diff`): NPO on the forget
+    task plus ordinary descent on the retained tasks, both with weight 1 (`npo_coeff`, `grad_diff_coeff`):
+        L = NPO(forget) + L_FM(retain)
+    The retain term is GradDiff's. Unlike NPO's weight, it does not fade."""
+    return _npo(node, recipe, with_retain=True)
+
+
+def _npo(node: Node, recipe: Recipe, with_retain: bool) -> OpPlan:
+    forget, retain = _forget_retain(node, recipe)
     beta = recipe.npo_beta
     state = {}
 
@@ -192,11 +204,18 @@ def _plan_npo(node: Node, recipe: Recipe) -> OpPlan:
         log_ratio = fm_sse_per_sample(ref_out) - fm_sse_per_sample(out)  # log p_theta - log p_ref
         loss = (2 / beta) * torch.nn.functional.softplus(beta * log_ratio).mean()
         weight = 2 * torch.sigmoid(beta * log_ratio.detach())
-        return loss, {"forget_fm": out["loss"].item(), "log_ratio": log_ratio.mean().item(), "npo_weight": weight.mean().item()}
+        metrics = {"forget_fm": out["loss"].item(), "log_ratio": log_ratio.mean().item(), "npo_weight": weight.mean().item()}
+        if with_retain:
+            retain_loss = fm_loss(model, batch["retain"])
+            loss = loss + retain_loss
+            metrics["retain_fm"] = retain_loss.item()
+        return loss, metrics
 
-    return OpPlan({"forget": forget}, loss_fn, recipe.unlearn_steps, recipe.unlearn_lr,
-                  {"npo_beta": beta, "log_likelihood_proxy": "-sum of squared flow-matching errors of the chunk"},
-                  prepare=prepare)
+    parts = {"forget": forget, "retain": retain} if with_retain else {"forget": forget}
+    notes = {"npo_beta": beta, "log_likelihood_proxy": "-sum of squared flow-matching errors of the chunk"}
+    if with_retain:
+        notes["retain_coeff"] = 1.0
+    return OpPlan(parts, loss_fn, recipe.unlearn_steps, recipe.unlearn_lr, notes, prepare=prepare)
 
 
 def _plan_ssd(node: Node, recipe: Recipe) -> OpPlan:
@@ -373,6 +392,7 @@ UNLEARN_METHODS: dict[str, Callable[[Node, Recipe], OpPlan]] = {
     "ga": _plan_ga,
     "graddiff": _plan_graddiff,
     "npo": _plan_npo,
+    "npo_rt": _plan_npo_rt,
     "ssd": _plan_ssd,
     "salun": _plan_salun,
     "vlaforget": _plan_vlaforget,

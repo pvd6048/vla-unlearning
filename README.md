@@ -105,7 +105,7 @@ Slurm resources for training and eval jobs are in `RESOURCES` at the top of `scr
 
 `CALIBRATION.md` is the one-page instruction for someone running our hyperparameter calibration on
 their own GPU machine: `scripts/setup_cluster.sh`, then `scripts/run_local.sh`, which runs the base
-tests, the calibration plan (`scripts/calibrate.py`: LA with 2k/5k/10k snapshots, LA/LB, 28 unlearning
+tests, the calibration plan (`scripts/calibrate.py`: LA with 2k/5k/10k snapshots, LA/LB, 38 unlearning
 variants of B) with one local worker per GPU, and packs `summary.md` plus all logs into one `.tar.gz`
 (`scripts/calibration_report.py`). Hyperparameter variants are ordinary nodes with recipe overrides in
 their op token, e.g. `LA/LB/UB-ga@unlearn_lr=3e-5` (`vlu/nodes.py`, `vlu.ops.recipe_for`).
@@ -158,10 +158,10 @@ Pass bar (PLAN.md): ≥ 80% SR on A after 10k steps. The `--eval-seeds 0,1` pair
 ## Week 1: stream S1
 
 ```bash
-python scripts/submit.py --run goal_s0 --stream S1 --methods purge,ga,graddiff,npo,ssd,salun,vlaforget --dry-run   # look first
-python scripts/submit.py --run goal_s0 --stream S1 --methods purge,ga,graddiff,npo,ssd,salun,vlaforget
+python scripts/submit.py --run goal_s0 --stream S1 --methods purge,ga,graddiff,npo,npo_rt,ssd,salun,vlaforget --dry-run   # look first
+python scripts/submit.py --run goal_s0 --stream S1 --methods purge,ga,graddiff,npo,npo_rt,ssd,salun,vlaforget
 python scripts/results.py --run goal_s0
-python scripts/metrics.py --stream S1 --methods purge,ga,graddiff,npo,ssd,salun,vlaforget --runs goal_s0
+python scripts/metrics.py --stream S1 --methods purge,ga,graddiff,npo,npo_rt,ssd,salun,vlaforget --runs goal_s0
 ```
 
 This plans the shared prefix once, every method's tail, the oracles (`LA/LC`, `LA/LC/LD`), and an
@@ -210,7 +210,8 @@ the parent model (a reference copy, importances, a weight mask) gives its plan a
 
 How the methods map onto GR00T's flow-matching loss (PROVISIONAL values in `vlu/config.py`):
 - **NPO**: log-likelihood of a chunk := −(sum of squared flow-matching errors); θ and the frozen
-  reference see the same noise and timesteps; β = 0.1.
+  reference see the same noise and timesteps; β = 0.1. **NPO-RT** (`npo_rt`, the NPO authors' default
+  configuration) adds GradDiff's retain term: NPO(forget) + 1.0 · L_FM(retain).
 - **SSD**: diagonal Fisher of L_FM gradients on the forget task vs. on the retained tasks (the paper uses all data, which at its forget shares of 1–5% is about the same; see METHODS.md §4); α = 5 (the official ViT setting), λ = 1; `ssd_adaptive=1` gives ASSD's tuning-free α; no training steps.
 - **VLA-Forget**: three stages of LoRA unlearning (vision tower → vision-language projector → LLM/DiT
   layers), each on the top-scored layers, with retain, forget, mismatch and feature losses combined by

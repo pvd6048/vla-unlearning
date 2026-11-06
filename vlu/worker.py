@@ -278,6 +278,11 @@ def main():
             if not args.wait or idle_checks >= 3:
                 print(f"{len(pending)} item(s) left, but none is ready and free (they wait for other workers, "
                       f"or for a failed item); exiting", flush=True)
+                if someone_working(args.run):
+                    # Other workers are still on the plan (e.g. an eval-only Slurm worker while the trainer
+                    # trains): leaving the rest to them is not a failure. (With --wait this branch is only
+                    # reached when nobody is working.)
+                    return
                 require_complete(args.run, kinds)
                 return
             time.sleep(60)

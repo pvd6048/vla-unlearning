@@ -70,7 +70,8 @@ echo "rendering: $VLU_RENDER" | tee -a "$OUT/environment.txt"
 # 3. Base tests (tests/README.md) ------------------------------------------------------------------
 : > "$OUT/tests.txt"
 TESTS_OK=1
-for t in tests/test_stream_metrics.py tests/test_calibration.py tests/test_drift_params.py tests/test_drift_extract.py tests/test_ops.py tests/test_vlaforget.py; do
+for t in tests/test_stream_metrics.py tests/test_calibration.py tests/test_drift_params.py tests/test_drift_extract.py tests/test_ops.py \
+         tests/test_vlaforget.py tests/test_completion.py tests/test_resume.py tests/test_training_safety.py tests/test_rank_subspace.py; do
     if "$MAIN_PY" "$t" >> "$OUT/tests.txt" 2>&1; then echo "PASS $t" | tee -a "$OUT/tests.txt"
     else echo "FAIL $t" | tee -a "$OUT/tests.txt"; TESTS_OK=0; fi
 done

@@ -18,7 +18,7 @@ Each difference is labelled:
 |---|---|---|---|
 | Learning with experience replay | Liu et al. 2026, continual GR00T (arXiv 2603.03818) | github.com/Continual-VLAs/continual-GR00T (`4bfd66f`), `scripts/gr00t_sequential_finetune.py` | `vlu/ops.py` `_plan_learn`, `vlu/data.py` `ReplayBuffer`, `vlu/train.py` |
 | Gradient ascent (GA), Gradient difference (GradDiff) | standard baselines, as in TOFU (Maini et al. 2024) | NPO repo below, `TOFU/dataloader.py:141-147, 165-175` | `vlu/ops.py` `_plan_ga`, `_plan_graddiff` |
-| NPO | Zhang et al. 2024 | github.com/licong-lin/negative-preference-optimization (`1207bbe`), `TOFU/dataloader.py:255-270`, `TOFU/data_module.py:242-250` | `vlu/ops.py` `_plan_npo` |
+| NPO, NPO-RT | Zhang et al. 2024 | github.com/licong-lin/negative-preference-optimization (`1207bbe`), `TOFU/dataloader.py:255-291`, `TOFU/data_module.py:242-250`, `config/forget.yaml` | `vlu/ops.py` `_plan_npo`, `_plan_npo_rt` |
 | SSD | Foster et al. 2024 (AAAI) | github.com/if-loops/selective-synaptic-dampening (`cdfdc0e`), `src/ssd.py:151-225`, `src/forget_full_class_main.py:161-177` | `vlu/ops.py` `_plan_ssd` |
 | SalUn | Fan et al. 2024 (ICLR) | github.com/OPTML-Group/Unlearn-Saliency (`a6e89fd`), `Classification/generate_mask.py:14-80`, `Classification/unlearn/RL.py` | `vlu/ops.py` `_plan_salun` |
 | VLA-Forget | Ranjan & Polyzou 2026 (arXiv 2604.03956) | github.com/raviranjan-ai/VLA-Forget (`ccb3c98`), `VLA-Forget-main.py` (the only script with the full staged method), `VLA-Forget-OpenVLA.py` (LoRA settings) | `vlu/vlaforget.py`, `vlu/lora.py` |
@@ -94,7 +94,7 @@ Each difference is labelled:
 | Per-sample log-likelihood | − sum of token cross-entropies of the sequence (`data_module.py:242-250`) | − sum of squared flow-matching errors of the action chunk at one sampled (t, ε) | **Adapted** (see below) |
 | Reference model | the model before unlearning (`ref_policy='fine_tuned'`) | the parent model, frozen | Same |
 | β | 0.1 (`config/forget.yaml:20`) | 0.1; β = 1 also in the calibration | Same, plus a calibration check |
-| Retain term | the repo's default config is NPO + GradDiff retain term (`forget_loss: npo_grad_diff`, `forget.yaml:14`); the paper reports NPO, NPO-RT and NPO-KL | NPO alone (forget term only) | **Choice**, see "Open points" |
+| Retain term | the repo's default config is NPO + GradDiff retain term (`forget_loss: npo_grad_diff`, `forget.yaml:14`), `npo_coeff · NPO(forget) + grad_diff_coeff · NLL(retain)` with both coefficients 1 (`dataloader.py:272-291`); the paper reports NPO, NPO-RT and NPO-KL | both: `npo` (forget term only) and `npo_rt` = NPO(forget) + 1.0 · L_FM(retain), the retain term and batches being GradDiff's | **Same** (`npo_rt`); NPO-KL not run |
 
 **Why −SSE is only a stand-in.** A flow-matching model has no tractable per-sample likelihood. We use
 −SSE because:
@@ -218,7 +218,8 @@ mode. LoRA dropout (0.05 in the authors' OpenVLA script) is off for the same rea
   (the log-ratio is 0 at the start; SSD only shrinks weights). Two tests now compare against the
   official code:
   - **NPO:** our loss equals the official formula (`-logsigmoid(β·(NLL_θ − NLL_ref)).mean()·2/β`) on a
-    perturbed model.
+    perturbed model. NPO-RT's equals the official `npo_grad_diff` (NPO + 1.0 · retain loss), and its
+    gradient is NPO's plus the retain gradient.
   - **SSD:** the official `modify_weight`, copied verbatim, and ours give bit-identical weights from
     the same importances.
 
@@ -240,6 +241,13 @@ Found by the first calibration run on the real model:
   unshuffled `ConcatDataset`), which makes its importance the mixture (1 − s) · I_retain + s · I_forget.
   `ssd_reference=all` now computes exactly that (tested against the official update).
 
+Found by the second calibration run:
+- **VLA-Forget ran out of memory scoring the reasoning stage's layers** (~1.3B candidate weights). The
+  scores now use one gradient-sized buffer (identical scores, tested). Earlier stages' adapters are now
+  frozen before scoring rather than after, so the scoring passes no longer keep the graph down to the
+  vision adapters; the scores and the selected layers are unchanged (tested), and scoring refuses to run
+  if anything but the candidates requires gradients.
+
 Earlier rounds of the same comparison changed:
 - the replay batch to 16 + 16 from fixed 1000-frame buffers;
 - SalUn's data mix to follow the data sizes;
@@ -253,6 +261,8 @@ Earlier rounds of the same comparison changed:
   known answers:
   - **NPO:** equals the official loss formula on a perturbed model. θ and the reference see the same
     noise, so the log-ratio is exactly 0 before the first step.
+  - **NPO-RT:** equals the official `npo_grad_diff` loss (NPO + 1.0 · retain loss); its gradient is
+    NPO's plus the retain gradient.
   - **SSD:** bit-identical to the official `modify_weight` on the same importances. It only shrinks
     weights, and never touches the 31 embodiment rows that cannot change.
   - **SalUn:** the mask keeps 50% of the weights that can change. Masked weights stay bit-identical
@@ -287,9 +297,11 @@ Earlier rounds of the same comparison changed:
 
 ## Open points where we would value your view
 
-1. **NPO with or without a retain term.** Our NPO uses only the forget data, while GradDiff, SalUn and
-   VLA-Forget also train on retained data. The NPO authors' default configuration is NPO + retain
-   loss. Adding NPO-RT is a one-line loss and would make the comparison fairer.
+1. **NPO with or without a retain term.** Plain NPO uses only the forget data, while GradDiff, SalUn and
+   VLA-Forget also train on retained data. We therefore run both NPO and NPO-RT (the NPO authors'
+   default: NPO + retain loss). In the second calibration, plain NPO lost A at every lr: its weight
+   fades to exactly 0 within ~150 steps, leaving the early damage unrepaired. NPO-RT's retain term
+   keeps training A throughout. Which of the two goes into the main runs is open.
 2. **The likelihood stand-ins:**
    - −SSE at one timestep, for NPO;
    - the velocity difference, for VLA-Forget's KL;

@@ -86,6 +86,73 @@ assert "backbone.model.language_model.model.layers.2.self_attn.q_proj" in cands[
 assert not any("layers.0." in n or "layers.1." in n for n in cands["reasoning"] if n.startswith("backbone"))
 print("4. candidates: late vision layers / mlp1 linears / trainable LLM layer + DiT:", {k: len(v) for k, v in cands.items()})
 
+
+# selection_scores keeps one gradient-sized buffer (the reasoning stage ran out of memory on a 48 GB GPU
+# in the calibration); its scores must equal those of the previous version, copied here, which kept
+# separate fp32 sums of both passes. Two vision candidates are bf16 (as GR00T's frozen weights).
+def previous_selection_scores(ctx, ref, taps, ref_taps, names, score, cfg, forget_slots, retain_slots, stream):
+    model = ctx.model
+    params = {n: list(model.get_submodule(n).parameters()) for n in names}
+    flat_params = [p for ps in params.values() for p in ps]
+    for p in flat_params:
+        p.requires_grad_(True)
+    sums = {}
+    model.eval()
+    for kind, slots in (("forget", forget_slots), ("retain", retain_slots)):
+        total = [torch.zeros_like(p, dtype=torch.float32) for p in flat_params]
+        for inputs in ctx.batches(slots, cfg.selection_batches, stream=stream + (kind == "retain")):
+            out, mine, theirs = vf.paired_forward(model, ref, taps, ref_taps, inputs)
+            loss = out["loss"] if kind == "forget" else out["loss"] + cfg.beta_kl * vf.velocity_kl(out, mine, theirs)
+            grads = torch.autograd.grad(loss, flat_params, allow_unused=True)
+            for t, g in zip(total, grads):
+                if g is not None:
+                    t += g.float()
+        sums[kind] = total
+    for p in flat_params:
+        p.requires_grad_(False)
+    scores, i = {}, 0
+    for name, ps in params.items():
+        k = len(ps)
+        g_f = torch.cat([t.flatten() for t in sums["forget"][i : i + k]]) / cfg.selection_batches
+        g_r = torch.cat([t.flatten() for t in sums["retain"][i : i + k]]) / cfg.selection_batches
+        i += k
+        if score == "ratio":
+            theta = torch.cat([p.detach().float().flatten() for p in ps])
+            cos = float(g_f @ g_r / (g_f.norm() * g_r.norm()).clamp_min(1e-12))
+            scores[name] = float(g_f.norm() / (theta.norm() + vf.EPS)) * (1.0 - cos) ** cfg.alpha_ratio
+        else:
+            scores[name] = float(g_f.norm() / (g_r.norm() + vf.EPS))
+    return scores
+
+
+sel_model = Fake().cuda(); sel_model.load_state_dict(base_state)
+for name in cands["vision"][:2]:
+    sel_model.get_submodule(name).to(torch.bfloat16)
+sel_ref = copy.deepcopy(sel_model).eval(); sel_taps, sel_ref_taps = vf.Taps(sel_model), vf.Taps(sel_ref)
+sel_model.requires_grad_(False)  # as run() does before selecting
+sel_ctx = OpContext(node, sel_model, demos, proc, ctx.modality_configs, seed=0)
+forget_slots, retain_slots = [("C",)] * 4, [("A", "B")] * 4
+for stage, kind in (("vision", "ratio"), ("projector", "ratio"), ("reasoning", "significance")):
+    args = (sel_ref, sel_taps, sel_ref_taps, cands[stage], kind, recipe.vlaforget, forget_slots, retain_slots, 3)
+    torch.manual_seed(5)  # the flow-matching noise comes from the global RNG: same draws for both versions
+    new_scores = vf.selection_scores(sel_ctx, *args)
+    torch.manual_seed(5)
+    old_scores = previous_selection_scores(sel_ctx, *args)
+    assert new_scores == old_scores, (stage, new_scores, old_scores)
+    assert all(p.grad is None and not p.requires_grad for p in sel_model.parameters()), "gradients or flags left behind"
+# Anything else that requires gradients (e.g. an earlier stage's adapter left unfrozen) is refused.
+other = next(p for n, p in sel_model.named_parameters() if n.startswith("action_head."))
+other.requires_grad_(True)
+try:
+    vf.selection_scores(sel_ctx, sel_ref, sel_taps, sel_ref_taps, cands["vision"], "ratio", recipe.vlaforget,
+                        forget_slots, retain_slots, 3)
+    raise AssertionError("selection_scores must refuse non-candidate parameters that require gradients")
+except RuntimeError as e:
+    assert "non-candidate" in str(e), e
+other.requires_grad_(False)
+print("4b. selection_scores with one gradient buffer: identical scores to the previous version (ratio and significance, "
+      "fp32 and bf16 candidates); no gradients left on the model")
+
 # --- 4. The whole op ---------------------------------------------------------------------------
 model = Fake().cuda(); model.load_state_dict(base_state)
 ctx.model = model

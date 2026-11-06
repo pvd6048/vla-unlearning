@@ -219,7 +219,7 @@ def recipe_for(op: Op, recipe: Recipe) -> Recipe:
 
 # Unlearning methods that train on, or compare against, the retained tasks: they cannot unlearn a
 # parent's only task (vlu/ops.py's plans rely on this check, see plan_op).
-NEEDS_RETAINED_TASK = frozenset({"graddiff", "ssd", "salun", "vlaforget"})
+NEEDS_RETAINED_TASK = frozenset({"graddiff", "npo_rt", "ssd", "salun", "vlaforget"})
 
 
 def check_op(node: Node) -> None:
@@ -244,6 +244,7 @@ _KEYS_USED = {
     "ga": _UNLEARN_KEYS,
     "graddiff": _UNLEARN_KEYS,
     "npo": _UNLEARN_KEYS + ("npo_beta",),
+    "npo_rt": _UNLEARN_KEYS + ("npo_beta",),
     "ssd": ("batch_size", "importance_batches", "ssd_alpha", "ssd_lambda", "ssd_reference", "ssd_adaptive"),
     "salun": _UNLEARN_KEYS + ("salun_keep", "importance_batches"),
     "vlaforget": ("unlearn_steps", "batch_size") + tuple(f"vlaforget.{f.name}" for f in fields(VLAForgetConfig)),

@@ -48,6 +48,19 @@ class CompletionTests(unittest.TestCase):
         with patch("sys.argv", ["worker", "--run", "test"]), self.assertRaises(SystemExit):
             worker["main"]()
 
+    def test_worker_leaves_work_to_busy_workers_without_failing(self):
+        # Without --wait (Slurm), a worker with nothing ready exits; that is a failure only if nobody is
+        # still working on the plan (the rest is then stuck), not while another worker is training.
+        worker.update(status=lambda run, item: "waiting", is_ready=lambda run, item: False)
+        for busy in (True, False):
+            worker["someone_working"] = lambda run, busy=busy: busy
+            with self.subTest(busy=busy), patch("sys.argv", ["worker", "--run", "test"]):
+                if busy:
+                    worker["main"]()
+                else:
+                    with self.assertRaisesRegex(SystemExit, "incomplete"):
+                        worker["main"]()
+
     def test_check_complete_never_starts_work(self):
         self.items[0]["done"] = self.items[1]["done"] = True
         with patch("sys.argv", ["worker", "--run", "test", "--check-complete"]):
