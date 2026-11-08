@@ -23,7 +23,7 @@ vlu/                 the experiment code (python package)
   eval/libero_client.py  CLI: LIBERO rollouts against the server (CPU, simulator env)
   drift/             drift metrics (PLAN §4): params.py (weights), extract.py (GPU: probe features,
                      Fisher), compare.py (representation + policy drift); see drift/__init__.py
-slurm/               env.sh (paths, environments), worker.sbatch, eval.sbatch, smoke.sbatch, train_op.sbatch
+slurm/               env.sh (paths, environments), worker.sbatch, eval.sbatch, smoke.sbatch, check.sbatch, train_op.sbatch
 tests/               base-level checks without GR00T (fake models with GR00T's layout); see tests/README.md
 scripts/             setup_cluster.sh, prepare_data.py, submit.py (plan + workers), results.py (tables),
                      metrics.py (stream metrics per method: NBT, collateral, relapse, oracle gap, ...)
@@ -128,7 +128,10 @@ sbatch --partition=gpu_large --qos=gpu_large --gres=gpu:4g.96gb:1 --cpus-per-gpu
     --time=2:00:00 --output=smoke-%j.out slurm/smoke.sbatch
 ```
 
-200 training steps of L_A in the throw-away run `smoke`, then 5 rollouts with 2 videos. From the
+200 training steps of L_A in the throw-away run `smoke`, then 5 rollouts with 2 videos. Before a long
+run, also the base tests and a check that every task A–E exists in LIBERO (on a small slice, ~10 min):
+`sbatch --partition=gpu_small --qos=gpu_small --gres=gpu:1g.24gb:1 --cpus-per-gpu=6 --mem-per-gpu=24G
+--time=1:00:00 --output=check-%j.out slurm/check.sbatch` (exit code 0 = all passed). From the
 output take: `steps_per_s` and `peak_mem_gb` (train_log.jsonl), seconds per rollout (eval json),
 and look at the videos in `runs/smoke/LA/eval/final_seed0/videos/`.
 
