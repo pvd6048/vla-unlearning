@@ -33,6 +33,12 @@ expected = {
     "collateral": (.2 + .1 + .1 + .1 + .1) / 5,  # UB hurts A, C; UE hurts A, C, D
     "relapse": .2,                         # B climbs back to .3 after LD; E (last op) has no later op: left out
     "oracle_gap": (0. + .1 + 0.) / 3,      # UB: B; UE: B (.2 vs .1), E
+    # per op, the tasks retained before and after it: LB A .1, LC A B 0, UB A C .15, LD 0, LE 0, UE A C D .1
+    "retain_stability": (.1 + 0 + .15 + 0 + 0 + .1) / 6,
+    "spill": ((.2 + .1) + (.1 + 0 + .1 + .1)) / 2,  # UnCLe: UB moves A .2, C .1; UE moves A .1, B 0, C .1, D .1
+    "relapse_end": .1,                     # UnCLe: B .1 after UB, .2 at the end; E has no later op
+    "forgetting_rebound": (.2 + 0 + 0) / 3,  # ICU-Bench: B (unlearned before LD, LE, UE) rises .2 at LD only
+    "forget_sr_u1": .1, "forget_sr_u2": 0.,  # Plasticity Collapse's forward failure: forget SR after each U op
 }
 a, b = 1 - expected["oracle_gap"], expected["retain_sr"]
 expected["score"] = 2 * a * b / (a + b)
@@ -41,6 +47,10 @@ for name, value in expected.items():
     assert abs(got[name] - value) < 1e-9, (name, got[name], value)
 got = summarize(ops, sr[:-1] + [{}], oracle)  # last eval missing
 assert got["score"] != got["score"], got  # NaN, not a misleading number
+# UnCLe's spill is unsigned: a retained task that improves during the U op counts as much as one that drops.
+assert abs(summarize(["LA", "LB", "UB-ga"], [{"A": .5}, {"A": .5, "B": .9}, {"A": .7, "B": .1}])["spill"] - .2) < 1e-12
+for name in ("spill", "forgetting_rebound", "relapse_end", "retain_stability", "forget_sr_u2"):
+    assert got[name] != got[name], (name, got[name])  # each needs the last eval: NaN, not a smaller number
 
 got = summarize(ops, sr, oracle)
 assert abs(got["nbt_from_l_ops"] + got["nbt_from_u_ops"] - got["nbt"]) < 1e-12, got  # the split adds up to NBT

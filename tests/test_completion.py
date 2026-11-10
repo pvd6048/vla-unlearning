@@ -114,12 +114,13 @@ class CompletionTests(unittest.TestCase):
         source = (ROOT / "scripts" / "run_local.sh").read_text()
         planning = source[source.index('if ! "$MAIN_PY" "$PLAN" --run "$RUN"'):source.index("# 5. One worker")]
         completion = source[source.index("WORKERS_OK=1"):]
-        for mode, plan, drift in (("calibration", "scripts/calibrate.py", "scripts/calibration_drift.py"),
-                                  ("main", "scripts/main_run.py", "scripts/main_drift.py")):
+        for mode, plan, drift, drift_only in (("calibration", "scripts/calibrate.py", "scripts/calibration_drift.py", 0),
+                                              ("main", "scripts/main_run.py", "scripts/main_drift.py", 0),
+                                              ("calibration", "scripts/calibrate.py", "scripts/calibration_drift.py", 1)):
             for failure in ("none", "planning", "submission", "worker", "incomplete", "drift"):
                 # Execute the real launcher blocks with fake processes; no training or Slurm calls.
                 prefix = f'''set -uo pipefail
-MAIN_PY=main; RUN=test; VLU_CPUS=4; OUT=/nonexistent; VLU_RUNS_DIR=/nonexistent; MODE={mode}; PLAN={plan}; DRIFT={drift}
+MAIN_PY=main; RUN=test; VLU_CPUS=4; OUT=/nonexistent; VLU_RUNS_DIR=/nonexistent; MODE={mode}; PLAN={plan}; DRIFT={drift}; DRIFT_ONLY={drift_only}
 ''' + '''package() { :; }
 nvidia-smi() { echo "0, 40000"; echo "1, 45000"; echo "2, 9000"; }
 main() {
@@ -136,10 +137,11 @@ PIDS=()
 '''
                 result = subprocess.run([bash], input=prefix + planning + completion, text=True,
                                         capture_output=True, env={**os.environ, "FAILURE": failure})
-                with self.subTest(mode=mode, failure=failure):
-                    # Drift metrics are extra data: their failure is reported, not fatal.
-                    self.assertEqual(result.returncode, 0 if failure in ("none", "drift") else 1,
-                                     result.stdout + result.stderr)
+                with self.subTest(mode=mode, drift_only=drift_only, failure=failure):
+                    # Drift metrics are extra data: their failure is reported, not fatal. --drift-only does
+                    # not need the rest of the plan to be complete.
+                    ok = ("none", "drift", "incomplete") if drift_only else ("none", "drift")
+                    self.assertEqual(result.returncode, 0 if failure in ok else 1, result.stdout + result.stderr)
                     if failure == "planning":
                         self.assertIn(f"ERROR: {mode} planning failed", result.stdout)
                     if failure == "drift":
@@ -198,24 +200,40 @@ exec(sys.stdin.read())
                         self.assertIn(f"task {letter} OK:", log)
                     self.assertEqual(log.count("closed"), 5)  # every env's render context is closed
 
+    def test_launcher_worker_kinds(self):
+        # The real worker_kinds of step 5: what each GPU's worker may run, by its free memory.
+        bash = os.environ.get("VLU_TEST_BASH") or shutil.which("bash")
+        if not bash:
+            self.skipTest("bash is not available")
+        source = (ROOT / "scripts" / "run_local.sh").read_text()
+        start = source.index("worker_kinds() {")
+        function = source[start:source.index("\n}\n", start) + 3]
+        for drift_only, expected in ((0, "train,eval,features|eval"), (1, "features|")):
+            result = subprocess.run([bash, "-c", f"TRAIN_FREE_MIB=44000; DRIFT_ONLY={drift_only}\n{function}"
+                                     'echo "$(worker_kinds 45000)|$(worker_kinds 20000)"'], text=True, capture_output=True)
+            with self.subTest(drift_only=drift_only):
+                self.assertEqual(result.stdout.strip(), expected, result.stderr)
+
     def test_launcher_options_select_the_run(self):
         bash = os.environ.get("VLU_TEST_BASH") or shutil.which("bash")
         if not bash:
             self.skipTest("bash is not available")
         source = (ROOT / "scripts" / "run_local.sh").read_text()
         block = source[source.index("MODE=calibration PACK=0"):source.index('mkdir -p "$OUT"')]
-        show = 'echo "$MODE $PACK $RUN $PLAN $REPORT $DRIFT $(basename "$OUT")"'
-        cal = "cal scripts/calibrate.py scripts/calibration_report.py scripts/calibration_drift.py calibration_"
-        main = "goal_s0 scripts/main_run.py scripts/main_report.py scripts/main_drift.py main_"
+        show = 'echo "$MODE $PACK $RUN $PLAN $REPORT $DRIFT $(basename "$OUT")$([ "$DRIFT_ONLY" = 1 ] && echo " 1")"'
+        host = socket.gethostname()
+        cal = f"cal scripts/calibrate.py scripts/calibration_report.py scripts/calibration_drift.py calibration_{host}"
+        main = f"goal_s0 scripts/main_run.py scripts/main_report.py scripts/main_drift.py main_{host}"
         cases = {(): f"calibration 0 {cal}", ("--pack",): f"calibration 1 {cal}",
-                 ("--main",): f"main 0 {main}", ("--main", "--pack"): f"main 1 {main}"}
+                 ("--main",): f"main 0 {main}", ("--main", "--pack"): f"main 1 {main}",
+                 ("--drift-only",): f"calibration 0 {cal} 1"}
         env = {k: v for k, v in os.environ.items() if k != "RUN"}
         for args, expected in cases.items():
             result = subprocess.run([bash, "-c", "set -uo pipefail; VLU_STORE=/store\n" + block + show, "run_local", *args],
                                     text=True, capture_output=True, env=env)
             with self.subTest(args=args):
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stdout.strip(), expected + socket.gethostname())
+                self.assertEqual(result.stdout.strip(), expected)
         result = subprocess.run([bash, "-c", block, "run_local", "--mian"], text=True, capture_output=True, env=env)
         self.assertEqual(result.returncode, 2)
         self.assertIn("unknown option --mian", result.stdout)

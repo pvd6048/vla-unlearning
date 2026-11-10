@@ -12,6 +12,9 @@ Per drift X..Y:
     cka_distance     1 - linear CKA(h_X, h_Y)
     pca_overlap      overlap of the top-k PCA subspaces of h_X and h_Y (vlu.drift.metrics.pca_shift)
     pca_distance     movement of the samples in h_X's top-k PCA space, relative to h_X's spread
+    pca_similarity, pca_centroid_shift   Xu et al.'s PCA similarity and PCA shift ("Unlearning Isn't
+                     Deletion"), see vlu.drift.metrics.pca_shift; the mean of pca_centroid_shift over
+                     the layers is their mean PCA distance
   feature "policy":
     flow_divergence  mean squared difference of the predicted velocities at the same noisy action and
                      timestep (normalized action units; a Monte-Carlo estimate over GR00T's training

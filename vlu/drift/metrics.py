@@ -39,18 +39,28 @@ def subspace_overlap(u: torch.Tensor, v: torch.Tensor) -> float:
 
 
 def pca_shift(ref: torch.Tensor, new: torch.Tensor, k: int = 10) -> dict[str, float]:
-    """How the representation `new` moved away from `ref` (same samples), in ref's top-k PCA space:
+    """How the representation `new` moved away from `ref` (same samples). Ours, in ref's top-k PCA space:
       pca_overlap   subspace_overlap of the two top-k PCA subspaces (1 = same principal directions)
       pca_distance  mean distance between each sample's ref and new projection, divided by the RMS
-                    norm of ref's projections (0 = no movement, ~1 = moved as much as the data spread)"""
+                    norm of ref's projections (0 = no movement, ~1 = moved as much as the data spread)
+    Xu et al.'s ("Unlearning Isn't Deletion", Representational_Analysis_Tools: pca_sim_analysis.py,
+    pca_shift_analysis.py), for comparison with their numbers:
+      pca_similarity      |cos| between the first principal directions of ref and of new (each fit on its
+                          own samples). Their code keeps the sign, which a PCA leaves arbitrary.
+      pca_centroid_shift  distance between the centroids of ref and new projected onto ref's top-2
+                          principal directions: the (PC1 shift, PC2) point of their PCA shift; its mean
+                          over layers is their mean PCA distance. Unnormalized, as theirs."""
     mean, basis, _ = pca_basis(ref, k)
     _, new_basis, _ = pca_basis(new, k)
     z_ref = (ref.double() - mean) @ basis.T
     z_new = (new.double() - mean) @ basis.T
     spread = z_ref.square().sum(dim=1).mean().sqrt().clamp_min(1e-300)
+    pc1_new = pca_basis(new, 1)[1][0]
     return {
         "pca_overlap": subspace_overlap(basis, new_basis),
         "pca_distance": float((z_new - z_ref).norm(dim=1).mean() / spread),
+        "pca_similarity": abs(float(basis[0] @ pc1_new)),
+        "pca_centroid_shift": float(((new.double().mean(dim=0) - ref.double().mean(dim=0)) @ basis[:2].T).norm()),
     }
 
 

@@ -244,6 +244,52 @@ assert "no longer planned (kept on disk, not run again): train:LA/LB/UB-ssd@ssd_
 assert stale not in written and len(written) == len(cal), (len(written), len(cal))
 print("calibrate: items of an earlier round no longer planned are dropped from the plan")
 
+# --- run_local.sh --drift-only: features-only workers on the calibration plan -------------------------
+# Of the models trained so far (here base, LA, LA/LB and two variants) the features and LA/LB's Fisher are
+# extracted; untrained variants are left waiting; no training or eval runs; the workers exit 0 (features
+# items are optional), so the drift step can run on what exists.
+FEATURES_STUB = r'''
+import sys, time
+import vlu.worker as w
+from vlu.drift.paths import features_path, fisher_path
+from vlu.nodes import Node
+def command(run, item):
+    assert item["kind"] == "features", item
+    node = Node.from_path(run, item["node"])
+    files = [features_path(node, item["weights"])] + [fisher_path(node, t, item["weights"]) for t in item.get("fisher", [])]
+    return [sys.executable, "-c", "import pathlib, sys, time; time.sleep(0.5)\nfor f in sys.argv[1:]:\n p = pathlib.Path(f); p.parent.mkdir(parents=True, exist_ok=True); p.write_text('x')", *map(str, files)]
+w.command = command
+real_sleep = time.sleep
+w.time.sleep = lambda s: real_sleep(0.2)
+sys.argv = ["worker", "--run", "cal", "--kinds", "features", "--wait"]
+w.main()
+'''
+drift_env = {**ENV, "VLU_RUNS_DIR": tempfile.mkdtemp(prefix="vlu_drift_only_")}
+subprocess.run([sys.executable, str(ROOT / "scripts" / "calibrate.py")], env=drift_env, check=True, capture_output=True)
+trained_now = ["LA", "LA/LB", f"LA/LB/UB-{VARIANTS[1]}", f"LA/LB/UB-{VARIANTS[2]}"]
+for path in trained_now:
+    d = Path(drift_env["VLU_RUNS_DIR"]) / "cal" / path
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "weights.safetensors").write_text("x")
+workers = [subprocess.Popen([sys.executable, "-c", FEATURES_STUB], env=drift_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+           for _ in range(2)]
+outs = [p.communicate(timeout=120)[0] for p in workers]
+assert all(p.returncode == 0 for p in workers), outs
+log = "".join(outs)
+check = subprocess.run([sys.executable, "-c", f"""
+import json
+from vlu.drift.paths import features_path, fisher_path
+from vlu.nodes import Node
+done = [p for p in ["", "LA", "LA/LB"] + ["LA/LB/UB-" + v for v in {VARIANTS!r}] if features_path(Node.from_path("cal", p)).exists()]
+fisher = [t for t in "AB" if fisher_path(Node.from_path("cal", "LA/LB"), t).exists()]
+print(json.dumps([done, fisher]))"""], env=drift_env, capture_output=True, text=True, check=True)
+done, fisher = json.loads(check.stdout)
+assert done == [""] + trained_now and fisher == ["A", "B"], (done, fisher)
+assert "start train" not in log and "start eval" not in log and log.count("start features") == len(trained_now) + 1, log
+assert "optional item(s) not done" in log, log  # the untrained variants' features, reported
+print(f"drift only: features-only workers extracted the {len(done)} trained models' features and LA/LB's Fisher, "
+      "trained and evaluated nothing, and exited 0")
+
 # --- The report on a fake calibration run ----------------------------------------------------------
 random.seed(0)
 run_seed("cal", 0)

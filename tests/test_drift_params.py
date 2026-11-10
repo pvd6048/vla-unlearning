@@ -29,6 +29,44 @@ for shape in [(300, 200), (200, 300), (2048, 1536)]:
 assert top_singular_subspace(torch.zeros(5, 4), 2) is None
 print("metrics: CKA invariances, PCA shift, exact singular subspaces OK")
 
+# Known answers from Xu et al.'s code (Representational_Analysis_Tools): cka_analysis.linear_cka (feature- and
+# Gram-centered), pca_sim_analysis (cosine of the two PC1s), pca_shift_analysis (PCA(2) fit on the reference;
+# shift = mean PC1 projection of new minus ref's, PC2 = each model's mean PC2 projection).
+import numpy as np  # noqa: E402
+try:
+    from sklearn.decomposition import PCA
+
+    def components(a, n):
+        return PCA(n_components=n).fit(a).components_
+except ImportError:  # the same as sklearn's PCA: right singular vectors of the centered data
+    def components(a, n):
+        return np.linalg.svd(a - a.mean(0), full_matrices=False)[2][:n]
+ref = torch.randn(64, 20) @ torch.diag(torch.linspace(3, 0.1, 20))
+new = ref + 0.4 * torch.randn(64, 20) + torch.linspace(-1, 1, 20)
+xr, xn = ref.double().numpy(), new.double().numpy()
+
+
+def their_cka(a, b):
+    def center_gram(k):
+        u = np.ones_like(k) / len(k)
+        return k - u @ k - k @ u + u @ k @ u
+    kx, ky = center_gram((a - a.mean(0)) @ (a - a.mean(0)).T), center_gram((b - b.mean(0)) @ (b - b.mean(0)).T)
+    return np.trace(kx @ ky) / np.sqrt(np.trace(kx @ kx) * np.trace(ky @ ky))
+
+
+c_ref, c_new = components(xr, 1)[0], components(xn, 1)[0]
+their_sim = c_ref @ c_new / (np.linalg.norm(c_ref) * np.linalg.norm(c_new))
+comp = components(xr, 2)
+shift = (xn @ comp[0]).mean() - (xr @ comp[0]).mean()
+their_point_distance = np.hypot(shift, (xn @ comp[1]).mean() - (xr @ comp[1]).mean())
+ours = pca_shift(ref, new)
+assert abs(linear_cka(ref, new) - their_cka(xr, xn)) < 1e-9, (linear_cka(ref, new), their_cka(xr, xn))
+assert abs(ours["pca_similarity"] - abs(their_sim)) < 1e-9, (ours, their_sim)
+assert abs(ours["pca_centroid_shift"] - their_point_distance) < 1e-9, (ours, their_point_distance)
+assert 0.1 < ours["pca_similarity"] < 1 and ours["pca_centroid_shift"] > 0.1  # the toy is not degenerate
+print(f"metrics: linear CKA, PCA similarity ({ours['pca_similarity']:.3f}) and PCA shift distance "
+      f"({ours['pca_centroid_shift']:.3f}) equal Xu et al.'s code")
+
 # --- checkpoint references: runs, snapshots and hyperparameter-variant nodes ----------------------------
 from vlu.drift.weights import Ref
 assert Ref.parse("LA/LB", "r0") == Ref("r0", "LA/LB", "final")

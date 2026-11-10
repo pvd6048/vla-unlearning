@@ -147,7 +147,8 @@ Everything is computed from one **success matrix** `c[i,k]`: the success rate (S
 - Purge nodes are not evaluated, so they take their parent's success rates.
 - The oracle gap is measured at every U op, against that op's retrain oracle (the node `scripts/submit.py` already trains and evaluates), over all tasks unlearned so far.
 - A task that is relearned later (S5) counts as kept again: relapse stops at the relearning op.
-- Forward failure is reported as `oracle_gap_u1`, `oracle_gap_u2`, ...: the gap on the task each U op removes, in U-op order.
+- Forward failure is reported as `forget_sr_u1`, `forget_sr_u2`, ... (Plasticity Collapse's forget accuracy per stage) and `oracle_gap_u1`, ... (the gap on the task each U op removes), in U-op order.
+- Where a paper defines a metric differently from ours, both are reported: relapse (ours: worst later SR) next to UnCLe's `relapse_end` (SR at the end); `collateral` (signed mean) next to UnCLe's `spill`; ICU-Bench's `forgetting_rebound`. NBT uses each node's final checkpoint, where LIBERO takes the best of the evaluated epochs.
 - Plasticity, recovery ratio and robustness are not computed yet; they need extra runs.
 
 **Notation:**
@@ -174,9 +175,12 @@ Everything is computed from one **success matrix** `c[i,k]`: the success rate (S
 | **Forget SR** | `c[X,u_X]`, measured right after unlearning X | Low |
 | **Oracle gap** | `|c[X,k] − c_oracle[X,k]|`, where the oracle is a model never trained on X. The true unlearning target, since the oracle may still succeed somewhat by generalization. | ≈ 0 |
 | **Unlearning collateral** | Mean drop on kept tasks caused by the U op itself: `c[i,u_X−1] − c[i,u_X]` for i ∈ K | ≈ 0 |
-| **Relapse / forgetting rebound** (UnCLe, ICU-Bench) | `max_{k>u_X} c[X,k] − c[X,u_X]`: does X come back as new tasks are learned? | ≈ 0 |
-| **Retain stability rate** (ICU-Bench) | Average size of change in retain SR from one op to the next | Low |
-| **Forward failure** (Plasticity Collapse) | Unlearning quality (oracle gap) plotted against how many U ops came before | Flat |
+| **Spill** (UnCLe) | Per U op, `Σ_{i≠X} |c[i,u_X−1] − c[i,u_X]|` over every task seen before it (unsigned, summed) | ≈ 0 |
+| **Relapse** (ours) | `max_{k>u_X} c[X,k] − c[X,u_X]`: does X come back as new tasks are learned, at its worst? | ≈ 0 |
+| **Relapse** (UnCLe) | `|c[X,end] − c[X,u_X]|`, end = the stream's end (or the op before X is relearned) | ≈ 0 |
+| **Forgetting rebound** (ICU-Bench) | Mean over ops of the rise (if any) of the mean SR of the tasks unlearned before the op | ≈ 0 |
+| **Retain stability rate** (ICU-Bench) | Mean size of the change in retain SR per op, over the tasks retained both before and after it (ICU-Bench's retain set is fixed) | Low |
+| **Forward failure** (Plasticity Collapse) | Forget SR right after each U op (theirs) and the oracle gap on the task it removes (ours), against how many U ops came before | Flat |
 | **Recovery ratio** (relearning attack) | Steps to regain peak SR on X when fine-tuning the unlearned model, divided by the steps needed from the oracle. Near 1 = truly erased; ≪ 1 = only hidden. | ≈ 1 |
 
 ### C. One-number summary
@@ -216,8 +220,8 @@ Everything is computed from one **success matrix** `c[i,k]`: the success rate (S
 |---|---|
 | **Liu et al. 2026, "Pretrained VLAs are Surprisingly Resistant to Forgetting in CL"** (arXiv 2603.03818, ICML oral) | Supplies the CL protocol: LIBERO, 10k steps/task, ER mixed 1:1, NBT metric. GR00T N1.5 recipe: lr 1e-4, bs 16, wd 1e-5. ER gives near-zero forgetting, and "forgotten" skills recover in ~6–11% of the original training steps. **Consequence for item 2: with ER there may be almost no forgetting drift to measure.** We need branches that actually forget (§5.2). |
 | **VLA-Forget** (arXiv 2604.03956) | The VLA unlearning baseline: staged LoRA over vision → projector → action layers, PCGrad, forget/retain/boundary splits. It was not tested in a continual setting. It targets OpenVLA (token-CE), so it must be adapted to GR00T's flow-matching head. |
-| **Unlearning Isn't Deletion** (OpenReview E5SVowO13b) | Supplies the drift toolkit for item 1: PCA similarity/shift, CKA, empirical Fisher, mean PCA distance. Its finding gives the hypothesis for item 4: large PCA shift → recovery fails, while high CKA plus a concentrated Fisher spectrum → reversible. |
-| **Plasticity Collapse in Continual MU** (arXiv 2608.29513) | Sequential unlearning saturates parameter subspaces. This shows up as forward failure (worse forgetting on later requests) and backward failure (re-memorization). Supplies subspace-overlap metrics. |
+| **Unlearning Isn't Deletion** (OpenReview E5SVowO13b; arXiv 2505.16831; code: XiaoyuXU1/Representational_Analysis_Tools) | Supplies the drift toolkit for item 1: PCA similarity/shift, CKA, empirical Fisher, mean PCA distance (`vlu/drift/metrics.py` computes theirs, checked against their code, next to our top-k PCA overlap and normalized PCA distance; their Fisher squares minibatch gradients, as ours). Its finding gives the hypothesis for item 4: large PCA shift → recovery fails, while high CKA plus a concentrated Fisher spectrum → reversible. |
+| **Plasticity Collapse in Continual MU** (arXiv 2608.29513) | Sequential unlearning saturates parameter subspaces. This shows up as forward failure (worse forgetting on later requests) and backward failure (re-memorization). Supplies the failure diagnostics (forget accuracy per stage; re-memorization) and an energy ratio of each update in the shared drift subspace (top singular vectors of the stacked updates; not computed yet, it needs streams with several U ops such as S4). Our per-layer subspace overlap of ΔW (§4) is our own. |
 | **LACU** (ECCV 2026) | In diffusion models, concepts close in representation take collateral damage first. Fixes are locality-aware target selection and replay. GR00T's DiT is in the diffusion family, so this transfers directly. |
 | **UnCLe** (arXiv 2509.17530) | Interleaved learning and unlearning with a hypernetwork, on image classification only. Supplies the *task relapse* metric. |
 | **Forgetting–Retention Dilemma** (PMLR v306 hu26o) | Gradient-based unlearning gets a free ride from CL's own forgetting for *old* tasks but is poor for *recent* ones. This is direct theoretical support for the core hypothesis, and it predicts a **task-age effect** (§5.4). |

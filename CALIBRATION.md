@@ -71,6 +71,20 @@ always enough for us to see what happened.
    as complete.
 5. Writes `summary.md` and packs everything into the `.tar.gz`.
 
+## Drift metrics of the models trained so far (only when we ask for it)
+
+This trains and evaluates nothing. It records how each model trained so far responds to a fixed set of
+test frames, compares the models with each other, and packs `calibration_<hostname>.tar.gz` as usual.
+Don't run it while the calibration or the main run is running. In the `vla-unlearning` folder:
+
+```bash
+git pull
+bash scripts/run_local.sh --drift-only           # about 1-2 hours; needs about 15 GB of free disk
+```
+
+It uses only the GPUs with 44 GB free. If it stops, run the same command again: finished parts are kept.
+Afterwards, `bash scripts/run_local.sh` continues the calibration as normal.
+
 ## Main run (only when we ask for it, after the calibration)
 
 The main run trains the policy on five LIBERO tasks one after another, unlearns two of them with

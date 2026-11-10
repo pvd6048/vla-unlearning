@@ -4,17 +4,21 @@
 #   bash scripts/run_local.sh --main    the main run (run goal_s0, scripts/main_run.py: stream S1)
 #   ... --pack                          only pack what exists now (e.g. while a stuck run is still going;
 #                                       calibration drift metrics are included only if computed before)
+#   ... --drift-only                    only the drift metrics of the models trained so far: extract their
+#                                       missing probe features and Fisher, compute the metrics, pack. No
+#                                       training or eval; the rest of the plan stays for a normal rerun
 # Safe to rerun: finished work is skipped and interrupted work resumes. Everything to send back ends up
 # in $VLU_STORE/<calibration|main>_<host>/ and its .tar.gz (no model weights).
 set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../slurm/env.sh"
 cd "$VLU_PROJECT_DIR"
-MODE=calibration PACK=0
+MODE=calibration PACK=0 DRIFT_ONLY=0
 for arg in "$@"; do
     case "$arg" in
         --main) MODE=main ;;
         --pack) PACK=1 ;;
-        *) echo "unknown option $arg (expected --main and/or --pack)"; exit 2 ;;
+        --drift-only) DRIFT_ONLY=1 ;;
+        *) echo "unknown option $arg (expected --main, --pack, --drift-only)"; exit 2 ;;
     esac
 done
 if [ "$MODE" = main ]; then
@@ -25,7 +29,7 @@ fi
 OUT="$VLU_STORE/${MODE}_$(hostname)"
 mkdir -p "$OUT"
 exec > >(tee -a "$OUT/run_local.log") 2>&1
-echo "=== $(date)  $MODE: run $RUN  output $OUT"
+echo "=== $(date)  $MODE$([ "$DRIFT_ONLY" = 1 ] && echo ", drift only"): run $RUN  output $OUT"
 
 package() {
     cp -f "$VLU_PROJECT_DIR/setup.log" "$OUT/" 2>/dev/null || true
@@ -121,6 +125,7 @@ if ! "$MAIN_PY" scripts/submit.py --run "$RUN" --retry-failed --workers none; th
 fi
 
 # 5. One worker per GPU: GPUs with >= TRAIN_FREE_MIB free train and evaluate, the others only evaluate
+#    (--drift-only: the big GPUs only extract features, which need as much memory for the Fisher; the others idle)
 #    (round 2's peaks: 33.4 GiB for learning, GA and GradDiff alike, so a second graph (GradDiff's retain
 #    batch) does not raise it; 39.5 GiB for NPO with its frozen reference, which NPO-RT (GradDiff's
 #    graphs + NPO's reference) should match; CALIBRATION.md says 44 GB) ---
@@ -131,10 +136,18 @@ if ! printf '%s\n' "${GPUS[@]}" | awk -F', ' -v need="$TRAIN_FREE_MIB" '$2 >= ne
     echo "ERROR: no GPU has $TRAIN_FREE_MIB MiB free for training (nvidia-smi: ${GPUS[*]}); please stop other jobs on the GPUs"
     package; exit 1
 fi
+worker_kinds() {  # worker_kinds <free MiB>: what a GPU's worker runs; nothing = no worker
+    if [ "$1" -ge "$TRAIN_FREE_MIB" ]; then
+        if [ "$DRIFT_ONLY" = 1 ]; then echo features; else echo train,eval,features; fi
+    elif [ "$DRIFT_ONLY" = 0 ]; then
+        echo eval
+    fi
+}
 PIDS=()
 for line in "${GPUS[@]}"; do
     IFS=', ' read -r index free used <<< "$line"
-    kinds=$([ "$free" -ge "$TRAIN_FREE_MIB" ] && echo train,eval,features || echo eval)
+    kinds=$(worker_kinds "$free")
+    if [ -z "$kinds" ]; then echo "GPU $index (${free} MiB free): not used"; continue; fi
     [ "$used" -gt 1000 ] && echo "WARNING: GPU $index already has ${used} MiB in use by another program; a job started there later can still run out of memory"
     echo "GPU $index (${free} MiB free): $kinds, $VLU_EVAL_WORKERS simulator processes per eval"
     CUDA_VISIBLE_DEVICES="$index" "$MAIN_PY" -m vlu.worker --run "$RUN" --kinds "$kinds" --wait \
@@ -154,7 +167,9 @@ DRIFT_GPU=$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nouni
 if ! CUDA_VISIBLE_DEVICES="$DRIFT_GPU" OMP_NUM_THREADS="$VLU_CPUS" "$MAIN_PY" "$DRIFT" --run "$RUN"; then
     echo "WARNING: some drift metrics are missing (see summary.md; logs in $VLU_RUNS_DIR/$RUN/drift_report/, packed as drift/)"
 fi
-if ! "$MAIN_PY" -m vlu.worker --run "$RUN" --check-complete; then
+if [ "$DRIFT_ONLY" = 1 ]; then
+    echo "drift only: training and evals were not run; the rest of the plan is left for a normal rerun"
+elif ! "$MAIN_PY" -m vlu.worker --run "$RUN" --check-complete; then
     echo "ERROR: the experiment did not complete every planned item"; package; exit 1
 fi
 if [ "$WORKERS_OK" = 0 ]; then

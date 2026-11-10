@@ -92,11 +92,11 @@ def main():
     # session (a rerun after a crash reuses what an earlier one made: a saved mask, resume.pt) adds its time.
     sessions = node.dir / "cost_sessions.jsonl"
     log_session({"start": time.time()}, sessions)
-    start = time.time()
+    start = time.monotonic()  # durations from the monotonic clock: a wall-clock adjustment (NTP, WSL) cannot shift them
     try:
         _run(node, op, plan, recipe, model, demos, processor, mcfg, probes, seed, save_at)
     finally:  # also when the session fails; only a killed process (SIGKILL, power loss) leaves no time
-        log_session({"seconds": time.time() - start}, sessions)
+        log_session({"seconds": time.monotonic() - start}, sessions)
     records = [json.loads(line) for line in sessions.read_text().splitlines()]
     starts = sum("start" in r for r in records)
     seconds = [r["seconds"] for r in records if "seconds" in r]
