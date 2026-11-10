@@ -59,6 +59,24 @@ class CompletionTests(unittest.TestCase):
             worker["require_complete"]("test")
         self.assertIn("1 optional item(s) not done: features:LA:final", printed.call_args[0][0])
 
+    def test_ready_only_check_requires_every_item_whose_node_exists(self):
+        # run_local.sh --drift-only: the features of the trained models must all be done (optional or not);
+        # those of models not trained yet are not asked for.
+        self.items[:] = [{"kind": "features", "node": n, "weights": "final", "fisher": [], "optional": True}
+                         for n in ("LA", "LA/LB", "LA/LB/UB-ga")]
+        trained = {"LA", "LA/LB"}
+        with patch.dict(worker, is_ready=lambda run, item: item["node"] in trained):
+            with self.assertRaisesRegex(SystemExit, "incomplete: features:LA/LB:final"):
+                self.items[0]["done"] = True
+                worker["require_complete"]("test", {"features"}, ready_only=True)
+            self.items[1]["done"] = True
+            worker["require_complete"]("test", {"features"}, ready_only=True)  # UB-ga is not trained: not needed
+            worker["require_complete"]("test", {"features"})  # optional anyway without ready_only
+            trained.clear()
+            with self.assertRaisesRegex(SystemExit, "the plan is empty"):
+                self.items.clear()
+                worker["require_complete"]("test", {"features"}, ready_only=True)
+
     def test_worker_does_not_report_success_when_only_failures_remain(self):
         with patch.dict(worker, status=lambda run, item: "failed"), patch("sys.argv", ["worker", "--run", "test"]), \
                 self.assertRaises(SystemExit):
@@ -114,18 +132,20 @@ class CompletionTests(unittest.TestCase):
         source = (ROOT / "scripts" / "run_local.sh").read_text()
         planning = source[source.index('if ! "$MAIN_PY" "$PLAN" --run "$RUN"'):source.index("# 5. One worker")]
         completion = source[source.index("WORKERS_OK=1"):]
-        for mode, plan, drift, drift_only in (("calibration", "scripts/calibrate.py", "scripts/calibration_drift.py", 0),
-                                              ("main", "scripts/main_run.py", "scripts/main_drift.py", 0),
-                                              ("calibration", "scripts/calibrate.py", "scripts/calibration_drift.py", 1)):
-            for failure in ("none", "planning", "submission", "worker", "incomplete", "drift"):
+        runs = (("calibration", "scripts/calibrate.py", "scripts/calibration_drift.py"),
+                ("main", "scripts/main_run.py", "scripts/main_drift.py"))
+        for (mode, plan, drift), drift_only in ((r, d) for r in runs for d in (0, 1)):
+            for failure in ("none", "planning", "submission", "worker", "incomplete", "drift", "left_out"):
                 # Execute the real launcher blocks with fake processes; no training or Slurm calls.
                 prefix = f'''set -uo pipefail
 MAIN_PY=main; RUN=test; VLU_CPUS=4; OUT=/nonexistent; VLU_RUNS_DIR=/nonexistent; MODE={mode}; PLAN={plan}; DRIFT={drift}; DRIFT_ONLY={drift_only}
 ''' + '''package() { :; }
 nvidia-smi() { echo "0, 40000"; echo "1, 45000"; echo "2, 9000"; }
 main() {
+    [[ "$1" = scripts/submit.py ]] && echo "submit $*"
     [[ "$1" = "$DRIFT" ]] && echo "$1 on GPU $CUDA_VISIBLE_DEVICES with $OMP_NUM_THREADS threads"
     [[ "$1" = "$DRIFT" && "$FAILURE" = drift ]] && return 6
+    [[ "$1" = "$DRIFT" && "$FAILURE" = left_out ]] && return 3
     [[ "$1" = "$PLAN" && "$FAILURE" = planning ]] && return 2
     [[ "$1" = scripts/submit.py && "$FAILURE" = submission ]] && return 3
     [[ "$1" = -m && "$FAILURE" = incomplete ]] && return 4
@@ -137,26 +157,35 @@ PIDS=()
 '''
                 result = subprocess.run([bash], input=prefix + planning + completion, text=True,
                                         capture_output=True, env={**os.environ, "FAILURE": failure})
+                out = result.stdout
                 with self.subTest(mode=mode, drift_only=drift_only, failure=failure):
-                    # Drift metrics are extra data: their failure is reported, not fatal. --drift-only does
-                    # not need the rest of the plan to be complete.
-                    ok = ("none", "drift", "incomplete") if drift_only else ("none", "drift")
-                    self.assertEqual(result.returncode, 0 if failure in ok else 1, result.stdout + result.stderr)
+                    # Drift metrics are extra data: their failure is reported, not fatal, except with --drift-only,
+                    # whose only result they are. Drifts left out (exit 3: nodes not trained yet) never are.
+                    # --drift-only needs the features of the trained models done, not the rest of the plan.
+                    ok = ("none", "left_out") if drift_only else ("none", "drift", "left_out")
+                    self.assertEqual(result.returncode, 0 if failure in ok else 1, out + result.stderr)
                     if failure == "planning":
-                        self.assertIn(f"ERROR: {mode} planning failed", result.stdout)
-                    if failure == "drift":
-                        self.assertIn("WARNING: some drift metrics are missing", result.stdout)
+                        self.assertIn(f"ERROR: {mode} planning failed", out)
+                    else:  # --drift-only forgets only the failures of features items: the others stay reported
+                        retry = "features" if drift_only else "train,eval,features"
+                        self.assertIn(f"submit scripts/submit.py --run test --retry-failed --retry-kinds {retry} --workers none", out)
+                    if failure in ("drift", "left_out") and not drift_only:
+                        self.assertIn("WARNING: some drift metrics are missing", out)
+                    if drift_only and failure == "drift":
+                        self.assertIn("ERROR: the drift metrics failed", out)
+                    if drift_only and failure == "incomplete":
+                        self.assertIn("ERROR: the drift features of some trained models are missing", out)
                     if failure not in ("planning", "submission"):  # the drift step runs once the workers are done
-                        self.assertIn(f"{drift} on GPU 1 with 4 threads", result.stdout)  # the GPU with the most free memory
+                        self.assertIn(f"{drift} on GPU 1 with 4 threads", out)  # the GPU with the most free memory
 
     def test_launcher_checks_every_task_in_libero(self):
-        # The real pre-flight block, with a fake simulator interpreter whose make_env knows only some tasks.
+        # The real task_preflight, with a fake simulator interpreter whose make_env knows only some tasks.
         bash = os.environ.get("VLU_TEST_BASH") or shutil.which("bash")
         if not bash:
             self.skipTest("bash is not available")
         source = (ROOT / "scripts" / "run_local.sh").read_text()
-        start = source.index("# Every task A-E exists in LIBERO-Goal")
-        block = source[start:source.index("\nfi\n", start) + 4].replace("source slurm/env.sh;", "source slurm/env.sh; SIM_PY=$FAKE_SIM;")
+        start = source.index("task_preflight() {")
+        block = source[start:source.index("\n}\n", start) + 3].replace("source slurm/env.sh;", "source slurm/env.sh; SIM_PY=$FAKE_SIM;")
         self.assertIn("SIM_PY=$FAKE_SIM", block)
         tmp = Path(tempfile.mkdtemp())
         fake = tmp / "sim_py"
@@ -182,23 +211,38 @@ exec(sys.stdin.read())
         for mode, bad in (("main", ""), ("main", "D"), ("calibration", "D")):
             out = tmp / f"{mode}{bad}"
             out.mkdir(exist_ok=True)
-            result = subprocess.run([bash, "-c", f"set -uo pipefail; OUT={out}; MODE={mode}; VLU_RENDER=mesa; package() {{ :; }}\n"
-                                     f"{block}echo launcher continues"], cwd=ROOT, text=True, capture_output=True,
+            result = subprocess.run([bash, "-c", f"set -uo pipefail; OUT={out}; MODE={mode}; VLU_RENDER=mesa\n"
+                                     f"{block}task_preflight; echo \"status $?\""], cwd=ROOT, text=True, capture_output=True,
                                     env={**os.environ, "FAKE_SIM": str(fake), "BAD_TASKS": bad or "-"})
             log = (out / "environment.txt").read_text()
             with self.subTest(mode=mode, bad=bad):
-                if bad and mode == "main":
-                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                if bad and mode == "main":  # the launcher stops (status 1)
+                    self.assertIn("status 1", result.stdout, result.stdout + result.stderr)
                     self.assertIn("ERROR: a task of vlu/tasks.py is not usable in LIBERO", result.stdout)
                     self.assertIn("LIBERO instruction differs for D", log)
                 elif bad:  # the calibration uses A and B only: warned, not stopped
                     self.assertIn("WARNING: a task of vlu/tasks.py is not usable in LIBERO", result.stdout)
-                    self.assertIn("launcher continues", result.stdout)
+                    self.assertIn("status 0", result.stdout)
                 else:
-                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr + log)
+                    self.assertIn("status 0", result.stdout, result.stdout + result.stderr + log)
                     for letter in "ABCDE":
                         self.assertIn(f"task {letter} OK:", log)
                     self.assertEqual(log.count("closed"), 5)  # every env's render context is closed
+
+    def test_launcher_skips_simulator_checks_for_drift_only(self):
+        # Step 2 as written: --drift-only evaluates nothing, so neither rendering nor the tasks are checked.
+        bash = os.environ.get("VLU_TEST_BASH") or shutil.which("bash")
+        if not bash:
+            self.skipTest("bash is not available")
+        source = (ROOT / "scripts" / "run_local.sh").read_text()
+        start = source.index('if [ "$DRIFT_ONLY" = 0 ]; then\n    if gpu_render_ok')
+        block = source[start:source.index("\nfi\n", start) + 4]
+        fakes = ('OUT=$(mktemp -d); package() { :; }; gpu_render_ok() { echo "render checked"; }; '
+                 'render_test() { :; }; task_preflight() { echo "tasks checked"; }\n')
+        for drift_only, checked in ((0, True), (1, False)):
+            result = subprocess.run([bash, "-c", f"DRIFT_ONLY={drift_only}; {fakes}{block}"], text=True, capture_output=True)
+            with self.subTest(drift_only=drift_only):
+                self.assertEqual("render checked" in result.stdout and "tasks checked" in result.stdout, checked, result.stdout)
 
     def test_launcher_worker_kinds(self):
         # The real worker_kinds of step 5: what each GPU's worker may run, by its free memory.
@@ -222,11 +266,13 @@ exec(sys.stdin.read())
         block = source[source.index("MODE=calibration PACK=0"):source.index('mkdir -p "$OUT"')]
         show = 'echo "$MODE $PACK $RUN $PLAN $REPORT $DRIFT $(basename "$OUT")$([ "$DRIFT_ONLY" = 1 ] && echo " 1")"'
         host = socket.gethostname()
-        cal = f"cal scripts/calibrate.py scripts/calibration_report.py scripts/calibration_drift.py calibration_{host}"
-        main = f"goal_s0 scripts/main_run.py scripts/main_report.py scripts/main_drift.py main_{host}"
-        cases = {(): f"calibration 0 {cal}", ("--pack",): f"calibration 1 {cal}",
-                 ("--main",): f"main 0 {main}", ("--main", "--pack"): f"main 1 {main}",
-                 ("--drift-only",): f"calibration 0 {cal} 1"}
+        cal = "cal scripts/calibrate.py scripts/calibration_report.py scripts/calibration_drift.py"
+        main = "goal_s0 scripts/main_run.py scripts/main_report.py scripts/main_drift.py"
+        cases = {(): f"calibration 0 {cal} calibration_{host}", ("--pack",): f"calibration 1 {cal} calibration_{host}",
+                 ("--main",): f"main 0 {main} main_{host}", ("--main", "--pack"): f"main 1 {main} main_{host}",
+                 # its own output directory: the run's tarball and worker logs stay as they are
+                 ("--drift-only",): f"calibration 0 {cal} calibration_drift_{host} 1",
+                 ("--main", "--drift-only"): f"main 0 {main} main_drift_{host} 1"}
         env = {k: v for k, v in os.environ.items() if k != "RUN"}
         for args, expected in cases.items():
             result = subprocess.run([bash, "-c", "set -uo pipefail; VLU_STORE=/store\n" + block + show, "run_local", *args],

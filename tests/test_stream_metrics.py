@@ -47,6 +47,10 @@ for name, value in expected.items():
     assert abs(got[name] - value) < 1e-9, (name, got[name], value)
 got = summarize(ops, sr[:-1] + [{}], oracle)  # last eval missing
 assert got["score"] != got["score"], got  # NaN, not a misleading number
+# UnCLe's spill is undefined for a U op with no other task: left out, not counted as a perfect 0.
+assert summarize(["LA", "UA-ga"], [{"A": .9}, {"A": .1}])["spill"] != summarize(["LA", "UA-ga"], [{"A": .9}, {"A": .1}])["spill"]
+s3 = summarize(["LA", "UA-ga", "LB", "UB-ga", "LC"], [{"A": .9}, {"A": .1}, {"A": .2, "B": .8}, {"A": .1, "B": .2}, {"A": .1, "B": .2, "C": .9}])
+assert abs(s3["spill"] - .1) < 1e-12, s3["spill"]  # UA: no other task, left out; UB: A moves .1
 # UnCLe's spill is unsigned: a retained task that improves during the U op counts as much as one that drops.
 assert abs(summarize(["LA", "LB", "UB-ga"], [{"A": .5}, {"A": .5, "B": .9}, {"A": .7, "B": .1}])["spill"] - .2) < 1e-12
 for name in ("spill", "forgetting_rebound", "relapse_end", "retain_stability", "forget_sr_u2"):

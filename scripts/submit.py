@@ -183,6 +183,8 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workers", default="large",
                         help="pools to keep a worker in, e.g. large, or large,small:2; 'none' = only update the plan")
     parser.add_argument("--retry-failed", action="store_true", help="forget earlier failures, so they are run again")
+    parser.add_argument("--retry-kinds", default="train,eval,features",
+                        help="with --retry-failed: only the failures of these item kinds (the others stay recorded)")
     parser.add_argument("--dry-run", action="store_true", help="print the new plan items and sbatch commands only")
     return parser
 
@@ -207,8 +209,10 @@ def main():
             print(f"{status(args.run, item):8s} {item_key(item)}" + (f"  tasks {','.join(item['tasks'])}" if item["kind"] == "eval" else ""))
     else:
         if args.retry_failed:
+            retry = set(args.retry_kinds.split(","))
             for item in plan:
-                failed_file(args.run, item).unlink(missing_ok=True)
+                if item["kind"] in retry:
+                    failed_file(args.run, item).unlink(missing_ok=True)
         write_plan(args.run, plan)
 
     counts = Counter(status(args.run, i) for i in plan)

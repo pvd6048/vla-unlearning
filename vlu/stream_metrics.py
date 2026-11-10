@@ -102,10 +102,14 @@ def summarize(ops: list[str], sr: list[dict], oracle: dict[int, dict] | None = N
         nbt_l.append(_mean(sum(step[m] for m in range(k + 1, j + 1) if parsed[m].kind == "L") for j in later))
         nbt_u.append(_mean(sum(step[m] for m in range(k + 1, j + 1) if parsed[m].kind == "U") for j in later))
     defined = [x for x in retain_curve if x is not None]
-    # ICU-Bench's retain stability rate measures a fixed retain set; here, per op, the tasks retained both
-    # before and after it (a task just learned is not a change in retained accuracy).
-    stability = [abs(_mean(c(t, k) for t in common) - _mean(c(t, k - 1) for t in common))
-                 for k in range(1, last + 1) if (common := [t for t in kept[k - 1] if t in kept[k]])]
+
+    def step_changes(sets: list[list[str]]) -> list[float]:
+        """Per op k >= 1: the change of the mean SR over the tasks in both sets[k-1] and sets[k] (ops where
+        there are none are left out). ICU-Bench measures fixed sets: a task entering or leaving one is not
+        a change."""
+        return [_mean(c(t, k) for t in both) - _mean(c(t, k - 1) for t in both)
+                for k in range(1, last + 1) if (both := [t for t in sets[k - 1] if t in sets[k]])]
+
     out = {
         "retain_sr": retain_curve[-1] if retain_curve[-1] is not None else NAN,
         "retain_auc": _mean(defined),
@@ -113,15 +117,18 @@ def summarize(ops: list[str], sr: list[dict], oracle: dict[int, dict] | None = N
         "nbt_from_l_ops": _mean(nbt_l),
         "nbt_from_u_ops": _mean(nbt_u),
         "max_forgetting": _max(x for d in drops for x in d),
-        "retain_stability": _mean(stability),
+        # ICU-Bench's retain stability rate, over the tasks retained before and after each op
+        "retain_stability": _mean(abs(x) for x in step_changes(kept)),
     }
 
     # Unlearning: is the removed task really gone, and what did removing it cost?
     if unlearns:
         out["forget_sr"] = _mean(c(t, j) for t, j in unlearns)
         out["collateral"] = _mean(c(t, j - 1) - c(t, j) for _, j in unlearns for t in kept[j])
-        # UnCLe's spill: per U op, the summed absolute change of every other task seen before it.
-        out["spill"] = _mean(sum(abs(c(t, j - 1) - c(t, j)) for t in dict.fromkeys(task[:j]) if t != x) for x, j in unlearns)
+        # UnCLe's spill: per U op, the summed absolute change of every other task seen before it; a U op with
+        # no other task (e.g. L_A U_A) has none and is left out, as undefined, not counted as 0.
+        out["spill"] = _mean(sum(abs(c(t, j - 1) - c(t, j)) for t in others) for x, j in unlearns
+                             if (others := [t for t in dict.fromkeys(task[:j]) if t != x]))
         # PLAN: max over k > u_X of c[X,k] - c[X,u_X], up to the op that relearns X (if any). A U op
         # with no later op before that has no relapse and is left out.
         later = [(t, j, next_touch(t, j)) for t, j in unlearns if next_touch(t, j) > j + 1]
@@ -130,9 +137,8 @@ def summarize(ops: list[str], sr: list[dict], oracle: dict[int, dict] | None = N
         out["relapse_end"] = _mean(abs(c(t, end - 1) - c(t, j)) for t, j, end in later)
         # ICU-Bench's forgetting rebound: per op, the rise (if any) of the mean SR of the tasks unlearned
         # before it and still unlearned after it, averaged over the ops that have such tasks.
-        rises = [_mean(c(t, k) for t in h) - _mean(c(t, k - 1) for t in h)
-                 for k in range(1, last + 1) if (h := [t for t in gone[k - 1] if t in gone[k]])]
-        out["forgetting_rebound"] = _mean(x if math.isnan(x) else max(0.0, x) for x in rises)  # max(0, nan) would be 0
+        out["forgetting_rebound"] = _mean(x if math.isnan(x) else max(0.0, x)  # max(0, nan) would be 0
+                                          for x in step_changes(gone))
         # Plasticity Collapse's forward failure: the forget SR right after each U op, in U-op order.
         for n, (t, j) in enumerate(unlearns, 1):
             out[f"forget_sr_u{n}"] = c(t, j)

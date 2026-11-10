@@ -87,7 +87,7 @@ for path in w:
 
 env = {**os.environ, "PYTHONPATH": str(ROOT)}
 result = subprocess.run([sys.executable, str(ROOT / "scripts" / "main_drift.py"), "--run", RUN], env=env, text=True, capture_output=True)
-assert result.returncode == 1, result.stdout + result.stderr  # a drift is left out: reported as missing
+assert result.returncode == cd.LEFT_OUT, result.stdout + result.stderr  # a drift is left out: reported as such
 out = cd.report_dir(RUN)
 summary = (out / "summary.md").read_text()
 assert "Left out (checkpoint or features missing): weights: none; features: UF:salun." in summary, summary

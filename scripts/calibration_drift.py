@@ -15,7 +15,8 @@ direction and the Fisher of A and of B at LA/LB) writes params.csv, vlu.drift.co
 features writes representation.csv; pairwise numbers only for the pairs with tauA or tauB. Both go to
 <run>/drift_report/, emptied first, with the tools' logs, summary.md and inputs.json (the files the
 numbers come from: scripts/calibration_report.py flags the report as stale when they change). Exit code 1
-if a tool failed or a variant was left out (run_local.sh then warns that drift metrics are missing).
+if a tool failed or was not run, 3 if only variants were left out (run_local.sh warns in both cases;
+with --drift-only, where untrained variants are expected, only 1 is an error).
 
 The distance to the oracle is measured on O:<v>, not derived from U and tauB: theta_U - theta_LA =
 U + tauB, but ||U||^2 + 2 <U, tauB> + ||tauB||^2 cancels to rounding noise near the oracle.
@@ -261,6 +262,9 @@ def summary(out: Path, weight_drifts, feature_drifts, missing_w, missing_f, stat
     return "\n".join(md)
 
 
+LEFT_OUT = 3  # exit code: every tool ran, but some drifts were left out (not 2: argparse's error code)
+
+
 def compute(run: str, drifts_of, inputs_now: dict, fisher: list[tuple[str, str]], anchors: tuple[str, ...],
             required: str, summarize) -> int:
     """Compute and summarize a run's drift metrics (this script's and scripts/main_drift.py's):
@@ -270,7 +274,8 @@ def compute(run: str, drifts_of, inputs_now: dict, fisher: list[tuple[str, str]]
         anchors        the pairwise numbers are for the pairs with these drifts
         required       a drift without which a tool is not run (e.g. tauB, the unit of the tables)
         summarize(out, weight_drifts, feature_drifts, missing_w, missing_f, states) -> markdown
-    Returns the exit code: 1 if a tool failed or was not run, or a drift was left out."""
+    Returns the exit code: 1 if a tool failed or was not run (LEFT_OUT's 3 is never hidden by it: 1 wins),
+    LEFT_OUT if all ran but drifts were left out (a node without weights or features), else 0."""
     out = report_dir(run)
     shutil.rmtree(out, ignore_errors=True)  # no file of an earlier computation may be read or packed as current
     out.mkdir(parents=True)
@@ -300,7 +305,9 @@ def compute(run: str, drifts_of, inputs_now: dict, fisher: list[tuple[str, str]]
         states[part] = run_tool(module, tool_args, out / f"{stem}.log", out / f"{stem}.csv")
     (out / "summary.md").write_text(summarize(out, weight_drifts, feature_drifts, missing_w, missing_f, states) + "\n")
     print(f"drift report written to {out}")
-    return int(any(s != "ok" for s in states.values()) or bool(missing_w or missing_f))
+    if any(s != "ok" for s in states.values()):
+        return 1
+    return LEFT_OUT if missing_w or missing_f else 0
 
 
 def main():

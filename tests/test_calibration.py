@@ -20,7 +20,7 @@ from calibrate import VARIANTS, items  # noqa: E402
 from submit import merge  # noqa: E402
 from vlu.config import RUNS_DIR  # noqa: E402
 from vlu.nodes import Node, run_seed  # noqa: E402
-from vlu.worker import claim_dir, load_plan, plan_path, someone_working, status, try_claim  # noqa: E402
+from vlu.worker import claim_dir, item_key, load_plan, plan_path, someone_working, status, try_claim  # noqa: E402
 
 ENV = {**os.environ, "PYTHONPATH": str(ROOT)}
 
@@ -289,6 +289,20 @@ assert "start train" not in log and "start eval" not in log and log.count("start
 assert "optional item(s) not done" in log, log  # the untrained variants' features, reported
 print(f"drift only: features-only workers extracted the {len(done)} trained models' features and LA/LB's Fisher, "
       "trained and evaluated nothing, and exited 0")
+
+# --drift-only retries only failed features items: a failed training stays recorded (and reported as failed).
+failed_dir = Path(drift_env["VLU_RUNS_DIR"]) / "cal" / "_failed"
+failed_dir.mkdir(parents=True, exist_ok=True)
+bad_train = {"kind": "train", "node": f"LA/LB/UB-{VARIANTS[3]}", "save_at": []}
+bad_features = {"kind": "features", "node": f"LA/LB/UB-{VARIANTS[3]}", "weights": "final", "fisher": [], "optional": True}
+for item in (bad_train, bad_features):
+    name = item_key(item).replace("<base>", "base").replace("/", "~").replace(":", "_")
+    (failed_dir / f"{name}.json").write_text(json.dumps({"item": item, "exit_code": 1, "log": "x"}))
+subprocess.run([sys.executable, str(ROOT / "scripts" / "submit.py"), "--run", "cal", "--retry-failed", "--retry-kinds", "features",
+                "--workers", "none"], env=drift_env, check=True, capture_output=True)
+left = sorted(f.name for f in failed_dir.iterdir())
+assert left == [f"train_LA~LB~UB-{VARIANTS[3]}.json"], left
+print("submit: --retry-failed --retry-kinds features forgets only the features failures")
 
 # --- The report on a fake calibration run ----------------------------------------------------------
 random.seed(0)

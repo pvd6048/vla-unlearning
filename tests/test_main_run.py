@@ -138,6 +138,11 @@ assert "## Drift metrics\n\nNot computed (scripts/main_drift.py has not run" in 
 assert '{"kept_fraction": 0.5}' in summary and "UB-purge |" not in summary.split("## Unlearning ops")[1].split("## Speed")[0]
 print("report: success rates per node, stream metrics, unlearning ops' probe losses vs. parent and oracle and cost, "
       "speed, drift section")
+# scripts/metrics.py's table: every value ends where its header does (headers longer than 16 characters too).
+import re  # noqa: E402
+block = [line for line in summary.split("## Stream metrics")[1].split("```")[1].splitlines() if line.strip()]
+ends = lambda line: [m.end() for m in re.finditer(r"\S+", line)][1:]  # noqa: E731
+assert "forgetting_rebound" in block[0] and all(ends(row) == ends(block[0]) for row in block[1:]), block
 for method in METHODS:
     line = next(line for line in summary.splitlines() if line.startswith(method + " "))
     assert "nan" not in line.split()[1:4], line  # retain SR, retain AUC, NBT: every eval they need exists

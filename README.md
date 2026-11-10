@@ -113,8 +113,9 @@ policy, distance to the retrain oracle LA), and packs `summary.md` plus all logs
 their op token, e.g. `LA/LB/UB-ga@unlearn_lr=3e-5` (`vlu/nodes.py`, `vlu.ops.recipe_for`).
 
 `scripts/run_local.sh --drift-only` computes the drift metrics of the models trained so far without training or
-evaluating anything (features-only workers, then the drift step and the usual tarball; e.g. for round 2's models,
-which predate the drift code).
+evaluating anything (features-only workers, then the drift step; no simulator checks; its own tarball
+`<calibration|main>_drift_<host>.tar.gz`; an error if a trained model's features or a drift tool fail). E.g. for
+round 2's models, which predate the drift code.
 
 `scripts/run_local.sh --main` runs the main run on the same machine: run `goal_s0`, planned by
 `scripts/main_run.py` (the Week 1 command below for the methods whose hyperparameters are set, plus

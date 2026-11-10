@@ -41,7 +41,8 @@ def main():
 
     names = list(dict.fromkeys(k for row in table.values() for k in row))
     width = max(len("method"), *(len(m) for m in table))
-    print("method".ljust(width), *(n.rjust(16) for n in names))
+    columns = {n: max(16, len(n) + 1) for n in names}  # every header fits: values sit under their own name
+    print("method".ljust(width), *(n.rjust(columns[n]) for n in names))
     for method, row in table.items():
         cells = []
         for n in names:
@@ -49,7 +50,7 @@ def main():
             mean = sum(xs) / len(xs)
             std = math.sqrt(sum((x - mean) ** 2 for x in xs) / (len(xs) - 1)) if len(xs) > 1 else None
             cells.append(f"{mean:.3f}" + (f" ±{std:.3f}" if std is not None else ""))
-        print(method.ljust(width), *(c.rjust(16) for c in cells))
+        print(method.ljust(width), *(c.rjust(columns[n]) for n, c in zip(names, cells)))
 
 
 if __name__ == "__main__":

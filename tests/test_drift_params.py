@@ -64,6 +64,8 @@ assert abs(linear_cka(ref, new) - their_cka(xr, xn)) < 1e-9, (linear_cka(ref, ne
 assert abs(ours["pca_similarity"] - abs(their_sim)) < 1e-9, (ours, their_sim)
 assert abs(ours["pca_centroid_shift"] - their_point_distance) < 1e-9, (ours, their_point_distance)
 assert 0.1 < ours["pca_similarity"] < 1 and ours["pca_centroid_shift"] > 0.1  # the toy is not degenerate
+one = pca_shift(ref, new, k=1)  # their 1 and 2 directions do not depend on our k (compare.py --pca-k)
+assert abs(one["pca_centroid_shift"] - ours["pca_centroid_shift"]) < 1e-12 and abs(one["pca_similarity"] - ours["pca_similarity"]) < 1e-12
 print(f"metrics: linear CKA, PCA similarity ({ours['pca_similarity']:.3f}) and PCA shift distance "
       f"({ours['pca_centroid_shift']:.3f}) equal Xu et al.'s code")
 

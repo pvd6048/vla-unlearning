@@ -101,11 +101,15 @@ def is_ready(run: str, item: dict) -> bool:
     return node.parent.done if item["kind"] == "train" else node.done
 
 
-def require_complete(run: str, kinds: set[str] | None = None) -> None:
+def require_complete(run: str, kinds: set[str] | None = None, ready_only: bool = False) -> None:
     """A successful exit must mean all required items, including failed ones, are done. Optional items
-    that are not done are only reported."""
+    that are not done are only reported. ready_only: only the items whose prerequisites are done (e.g.
+    the drift features of the models trained so far, for run_local.sh --drift-only), optional ones
+    included: each of them must be done."""
     plan = load_plan(run)
     items = [i for i in plan if kinds is None or i["kind"] in kinds]
+    if ready_only:
+        items = [{**i, "optional": False} for i in items if is_ready(run, i)]
     missing = [i for i in items if not is_done(run, i)]
     optional = [item_key(i) for i in missing if i.get("optional")]
     if optional:
@@ -269,12 +273,15 @@ def main():
     parser.add_argument("--kinds", default="train,eval,features", help="item kinds this worker may run")
     parser.add_argument("--wait", action="store_true",
                         help="when nothing is ready, wait while other workers are busy (several workers on one machine)")
-    parser.add_argument("--check-complete", action="store_true", help="check the whole plan without starting work")
+    parser.add_argument("--check-complete", action="store_true",
+                        help="check the plan (the items of --kinds) without starting work")
+    parser.add_argument("--ready-only", action="store_true",
+                        help="with --check-complete: only the items whose prerequisites are done, optional ones included")
     args = parser.parse_args()
-    if args.check_complete:
-        require_complete(args.run)
-        return
     kinds = set(args.kinds.split(","))
+    if args.check_complete:
+        require_complete(args.run, kinds, ready_only=args.ready_only)
+        return
 
     idle_checks = 0
     while True:

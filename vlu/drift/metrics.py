@@ -49,18 +49,21 @@ def pca_shift(ref: torch.Tensor, new: torch.Tensor, k: int = 10) -> dict[str, fl
                           own samples). Their code keeps the sign, which a PCA leaves arbitrary.
       pca_centroid_shift  distance between the centroids of ref and new projected onto ref's top-2
                           principal directions: the (PC1 shift, PC2) point of their PCA shift; its mean
-                          over layers is their mean PCA distance. Unnormalized, as theirs."""
-    mean, basis, _ = pca_basis(ref, k)
-    _, new_basis, _ = pca_basis(new, k)
+                          over layers is their mean PCA distance. Unnormalized, as theirs.
+    Xu et al.'s use 1 and 2 principal directions whatever k is (ref's are computed at least 2 deep)."""
+    if k < 1:
+        raise ValueError(f"pca_shift needs k >= 1, not {k}")
+    mean, ref_basis, _ = pca_basis(ref, max(k, 2))
+    new_mean, new_basis, _ = pca_basis(new, k)
+    basis = ref_basis[:k]
     z_ref = (ref.double() - mean) @ basis.T
     z_new = (new.double() - mean) @ basis.T
     spread = z_ref.square().sum(dim=1).mean().sqrt().clamp_min(1e-300)
-    pc1_new = pca_basis(new, 1)[1][0]
     return {
         "pca_overlap": subspace_overlap(basis, new_basis),
         "pca_distance": float((z_new - z_ref).norm(dim=1).mean() / spread),
-        "pca_similarity": abs(float(basis[0] @ pc1_new)),
-        "pca_centroid_shift": float(((new.double().mean(dim=0) - ref.double().mean(dim=0)) @ basis[:2].T).norm()),
+        "pca_similarity": abs(float(ref_basis[0] @ new_basis[0])),
+        "pca_centroid_shift": float(((new_mean - mean) @ ref_basis[:2].T).norm()),
     }
 
 
