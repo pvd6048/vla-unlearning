@@ -140,21 +140,28 @@ if ! "$MAIN_PY" scripts/submit.py --run "$RUN" --retry-failed --retry-kinds "$RE
 fi
 
 # 5. One worker per GPU: GPUs with >= TRAIN_FREE_MIB free train and evaluate, the others only evaluate
-#    (--drift-only: the big GPUs only extract features, which need as much memory for the Fisher; the others idle)
 #    (round 2's peaks: 33.4 GiB for learning, GA and GradDiff alike, so a second graph (GradDiff's retain
 #    batch) does not raise it; 39.5 GiB for NPO with its frozen reference, which NPO-RT (GradDiff's
-#    graphs + NPO's reference) should match; CALIBRATION.md says 44 GB) ---
+#    graphs + NPO's reference) should match; CALIBRATION.md says 44 GB). --drift-only: GPUs with
+#    >= FEATURES_FREE_MIB free extract features, the others idle. Its heaviest item is a Fisher: the
+#    weights (~9 GiB), one fp32 gradient and one fp32 sum (~6 GiB each), a training batch's activations
+#    (~6 GiB): ~28 GiB, no optimizer state (vlu.drift.extract prints its measured peak) ---
 TRAIN_FREE_MIB=44000
+FEATURES_FREE_MIB=32000
+NEED_MIB=$([ "$DRIFT_ONLY" = 1 ] && echo "$FEATURES_FREE_MIB" || echo "$TRAIN_FREE_MIB")
 mapfile -t GPUS < <(nvidia-smi --query-gpu=index,memory.free,memory.used --format=csv,noheader,nounits)
 export VLU_EVAL_WORKERS=$(( VLU_CPUS / ${#GPUS[@]} - 1 > 1 ? VLU_CPUS / ${#GPUS[@]} - 1 : 1 ))
-if ! printf '%s\n' "${GPUS[@]}" | awk -F', ' -v need="$TRAIN_FREE_MIB" '$2 >= need {ok = 1} END {exit !ok}'; then
-    echo "ERROR: no GPU has $TRAIN_FREE_MIB MiB free for training (nvidia-smi: ${GPUS[*]}); please stop other jobs on the GPUs"
+if ! printf '%s\n' "${GPUS[@]}" | awk -F', ' -v need="$NEED_MIB" '$2 >= need {ok = 1} END {exit !ok}'; then
+    echo "ERROR: no GPU has $NEED_MIB MiB free for $([ "$DRIFT_ONLY" = 1 ] && echo "the drift features" || echo training)" \
+         "(nvidia-smi: ${GPUS[*]}); please stop other jobs on the GPUs"
     package; exit 1
 fi
 worker_kinds() {  # worker_kinds <free MiB>: what a GPU's worker runs; nothing = no worker
-    if [ "$1" -ge "$TRAIN_FREE_MIB" ]; then
-        if [ "$DRIFT_ONLY" = 1 ]; then echo features; else echo train,eval,features; fi
-    elif [ "$DRIFT_ONLY" = 0 ]; then
+    if [ "$DRIFT_ONLY" = 1 ]; then
+        if [ "$1" -ge "$FEATURES_FREE_MIB" ]; then echo features; fi
+    elif [ "$1" -ge "$TRAIN_FREE_MIB" ]; then
+        echo train,eval,features
+    else
         echo eval
     fi
 }

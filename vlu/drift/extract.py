@@ -198,8 +198,11 @@ def main():
         tmp = path.with_name(path.name + ".tmp")
         save_file({k: v.cpu().contiguous() for k, v in fisher.items()}, str(tmp))
         tmp.replace(path)
+        summary["peak_mem_gb"] = torch.cuda.max_memory_allocated() / 2**30  # so far in this process
         path.with_suffix(".json").write_text(json.dumps(summary, indent=2) + "\n")
         print(f"wrote {path}: {summary}")
+    # The launcher's memory threshold for features-only workers (scripts/run_local.sh) is checked against this.
+    print(f"peak GPU memory {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB", flush=True)
 
 
 if __name__ == "__main__":

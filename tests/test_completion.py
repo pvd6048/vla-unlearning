@@ -252,9 +252,12 @@ exec(sys.stdin.read())
         source = (ROOT / "scripts" / "run_local.sh").read_text()
         start = source.index("worker_kinds() {")
         function = source[start:source.index("\n}\n", start) + 3]
-        for drift_only, expected in ((0, "train,eval,features|eval"), (1, "features|")):
-            result = subprocess.run([bash, "-c", f"TRAIN_FREE_MIB=44000; DRIFT_ONLY={drift_only}\n{function}"
-                                     'echo "$(worker_kinds 45000)|$(worker_kinds 20000)"'], text=True, capture_output=True)
+        # 43329 MiB: an A6000 with another program's 4.5 GB on it (the guide's machine, 2026-11-11): too little
+        # to train, enough for the drift features (a Fisher needs ~28 GiB)
+        for drift_only, expected in ((0, "train,eval,features|eval|eval"), (1, "features|features|")):
+            result = subprocess.run([bash, "-c", f"TRAIN_FREE_MIB=44000; FEATURES_FREE_MIB=32000; DRIFT_ONLY={drift_only}\n{function}"
+                                     'echo "$(worker_kinds 45000)|$(worker_kinds 43329)|$(worker_kinds 19574)"'],
+                                    text=True, capture_output=True)
             with self.subTest(drift_only=drift_only):
                 self.assertEqual(result.stdout.strip(), expected, result.stderr)
 
