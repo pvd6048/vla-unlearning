@@ -18,7 +18,7 @@ Run `cal` (seed 0), tasks A and B of LIBERO-Goal:
 
 Disk: a node's weights are ~6.5 GB (1.62B trainable parameters in fp32), so only weights that are
 evaluated are saved: LA's 2k/5k snapshots and every node's final weights (about 265 GB in all), plus
-the two Fisher files (6.5 GB each) and the probe features (~50 MB per node).
+the two Fisher files (6.5 GB each) and the probe features (~100 MB per node, float32).
 """
 
 import argparse

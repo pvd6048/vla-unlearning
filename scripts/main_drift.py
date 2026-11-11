@@ -141,6 +141,7 @@ def summary(out: Path, weight_drifts, feature_drifts, missing_w, missing_f, stat
     if missing_w or missing_f:
         md += [f"Left out (checkpoint or features missing): weights: {', '.join(missing_w) or 'none'}; "
                f"features: {', '.join(missing_f) or 'none'}.", ""]
+    md += cd.nonfinite_note(r, feature_drifts)
     names = [n for n, _, _ in weight_drifts if not n.startswith("O:")]
     md += ["### Weights", "",
            "‖D‖ = L2 norm of the change of the trainable weights (plus frozen weights an op edited). cos / proj on "

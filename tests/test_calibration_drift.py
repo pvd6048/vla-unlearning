@@ -1,7 +1,8 @@
 """Known-answer checks of scripts/calibration_drift.py on fake checkpoints and probe features: the
 distances to the retrain oracle (weights, policy, DiT representations) against the toy tensors, the
 pairwise numbers of the restricted pairs against an all-pairs run, the Fisher selectivity, the DiT
-share, nodes left out, and a failed tool (no numbers reported, also none of an earlier run).
+share, nodes left out, a diverged checkpoint's inf features (NaN where they enter, the rest computed,
+named in the summary), and a failed tool (no numbers reported, also none of an earlier run).
     python tests/test_calibration_drift.py
 """
 import csv
@@ -58,7 +59,7 @@ N = len(TASKS) * PER
 
 def features(velocity):
     return {"tasks": [t for t in TASKS for _ in range(PER)],
-            "features": {name: torch.randn(N, 16).half() for name in ("vlm.layer12.image", "vlm.layer12.text", "vl.image",
+            "features": {name: torch.randn(N, 16) for name in ("vlm.layer12.image", "vlm.layer12.text", "vl.image",
                                                                      "vl.text", "dit.block00.x-text", "dit.block01.self")},
             "attn_ratio": {"dit.block00.x-text": torch.rand(N), "dit.block01.self": torch.rand(N)},
             "velocity": velocity, "velocity_swapped": velocity + 0.1 * torch.randn_like(velocity),
@@ -141,6 +142,29 @@ weights_left, features_left = left_out.split("weights: ", 1)[1].split("; feature
 assert "ssd@ssd_reference=retain" in weights_left and NPO_RT not in weights_left and GA not in weights_left, weights_left
 assert NPO_RT in features_left and GA not in features_left, features_left
 print("summary: every computed drift has a row; variants without weights / features are listed")
+
+# A diverged checkpoint: one inf activation on one of B's probe frames, in one DiT block. Only the numbers
+# that include that entry are NaN; the tool still runs, the rest is computed, and the summary names it.
+diverged = torch.load(features_path(Node.from_path(RUN, UB)), weights_only=False)
+diverged["features"]["dit.block01.self"][PER + 3, 5] = float("inf")
+torch.save(diverged, features_path(Node.from_path(RUN, UB)))
+result = subprocess.run(script, env=env, capture_output=True, text=True)
+assert result.returncode == cd.LEFT_OUT, result.stdout + result.stderr
+assert f"cal:{UB} (drift {u}) has inf / NaN values" in (out / "representation.log").read_text()
+r = cd.read(out / "representation.csv")
+nan = lambda feature, task, metric, d=u: math.isnan(r[(feature, task, metric, d, "")])  # noqa: E731
+assert all(nan("dit.block01.self", t, m) for t in ("B", "all") for m in ("cka_distance", "pca_overlap", "pca_centroid_shift"))
+assert not any(nan("dit.block01.self", "A", m) or nan("dit.block00.x-text", "B", m) for m in ("cka_distance", "pca_overlap"))
+assert nan("dit.block01.self", "B", "cka_distance", o), "the oracle drift ends at the same checkpoint"
+assert r[("dit.block01.self", "all", "nonfinite_end", u, "")] == 1 and r[("dit.block01.self", "all", "nonfinite_start", u, "")] == 0
+assert r[("policy", "all", "nonfinite_end", u, "")] == 0 and r[("dit.block00.x-text", "all", "nonfinite_end", u, "")] == 0
+m = cd.policy_metrics(r, cd.dit_cka(r), u)
+assert math.isnan(m["cka_dit_B"]) and math.isnan(m["cka_oracle_B"]), "a mean over blocks with a NaN block is NaN"
+assert not math.isnan(m["cka_dit_A"]) and math.isclose(m["B_to_oracle"], truth, rel_tol=1e-5), "the policy is unaffected"
+summary = (out / "summary.md").read_text()
+assert f"**Non-finite probe features** (" in summary and f": {UB} (1 of 7 features)." in summary, summary
+assert "Incomplete" not in summary and f"| {GA} |" in summary.split("### Policy", 1)[1]
+print("diverged checkpoint: NaN only where its inf enters (also the DiT mean), the rest computed, named in the summary")
 
 # A failed tool reports no number, also none left by an earlier run; the script exits non-zero.
 (out / "representation.csv").write_text("feature,task,metric,drift_i,drift_j,value\npolicy,all,flow_divergence,tauB,,123\n")

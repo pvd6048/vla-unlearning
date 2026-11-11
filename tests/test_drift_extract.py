@@ -107,6 +107,7 @@ N = len(TASKS) * ex.PROBE_PER_TASK
 assert len(a["tasks"]) == N and a["velocity"].shape == (N, 16, 7) and a["velocity_swapped"].shape == (N, 16, 7)
 assert sorted(a["features"]) == ["dit.block00.x-text", "dit.block01.self", "dit.block02.x-image", "dit.block03.self",
                                  "vl.image", "vl.text", "vlm.layer01.image", "vlm.layer01.text", "vlm.layer02.image", "vlm.layer02.text"], sorted(a["features"])
+assert all(v.dtype == torch.float32 for v in a["features"].values()), "float16 overflows to inf on diverged checkpoints"
 assert all(v.shape[0] == N for v in a["features"].values()) and sorted(a["attn_ratio"]) == sorted(k for k in a["features"] if k.startswith("dit."))
 assert all(torch.equal(a["features"][k], b["features"][k]) for k in a["features"]) and torch.equal(a["velocity"], b["velocity"]), "not deterministic"
 assert not torch.equal(a["velocity"], a["velocity_swapped"])
@@ -127,6 +128,18 @@ from vlu.drift.paths import features_path
 from vlu.nodes import Node
 for path, data in [("LA", a), ("LA/LB", ex.extract_features(Fake().cuda().eval(), processor, mcfg))]:
     p = features_path(Node.from_path("toy", path)); p.parent.mkdir(parents=True, exist_ok=True); torch.save(data, p)
+
+# A features file of an older layout is not taken as done: the worker extracts the node again.
+import vlu.worker  # noqa: E402
+from vlu.drift.paths import FEATURES_VERSION  # noqa: E402
+item = {"kind": "features", "node": "LA/LC", "weights": "final", "fisher": []}
+new_file = features_path(Node.from_path("toy", "LA/LC"))
+new_file.parent.mkdir(parents=True, exist_ok=True)
+(new_file.parent / "features.pt").write_bytes(b"version 2")  # the name of the float16 layout
+assert new_file.name == f"features_v{FEATURES_VERSION}.pt" and not vlu.worker.is_done("toy", item)
+new_file.write_bytes(b"x")
+assert vlu.worker.is_done("toy", item)
+print("layout: features stored as float32; the version is in the file name, so an older file is extracted again")
 
 # compare.py on the two checkpoints: a no-op drift changes nothing.
 import csv

@@ -87,6 +87,10 @@ It uses only the GPUs with 32 GB free (training needs 44 GB; this does not train
 send it. If it stops, run the same command again: finished parts are kept. Afterwards,
 `bash scripts/run_local.sh` continues the calibration as normal.
 
+If you ran it before 12 November 2026: running it again extracts every model's features again (about
+1 hour; they are now stored at full precision). The old files, `runs/cal/**/drift/features.pt`, are no
+longer used; you can delete them with `find runs/cal -path '*/drift/features.pt' -delete`.
+
 ## Main run (only when we ask for it, after the calibration)
 
 The main run trains the policy on five LIBERO tasks one after another, unlearns two of them with

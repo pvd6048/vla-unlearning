@@ -4,6 +4,7 @@ Fisher weighting, singular subspaces, and frozen overrides.   python tests/test_
 """
 import csv
 import json
+import math
 import os
 import subprocess
 import sys
@@ -27,7 +28,14 @@ for shape in [(300, 200), (200, 300), (2048, 1536)]:
     exact = torch.linalg.svd(w, full_matrices=False)[0][:, :8].T
     assert abs(subspace_overlap(exact, top_singular_subspace(w, 8)) - 1) < 1e-3, shape
 assert top_singular_subspace(torch.zeros(5, 4), 2) is None
-print("metrics: CKA invariances, PCA shift, exact singular subspaces OK")
+for bad_value in (float("inf"), float("nan")):  # a diverged checkpoint's overflowing activations: undefined, no crash
+    bad = x.clone()
+    bad[3, 5] = bad_value
+    for a, b in ((x, bad), (bad, x)):
+        s = pca_shift(a, b)
+        assert sorted(s) == sorted(pca_shift(x, x)) and all(math.isnan(v) for v in s.values()), s
+        assert math.isnan(linear_cka(a, b))
+print("metrics: CKA invariances, PCA shift, exact singular subspaces OK; NaN (not an SVD error) on inf / NaN input")
 
 # Known answers from Xu et al.'s code (Representational_Analysis_Tools): cka_analysis.linear_cka (feature- and
 # Gram-centered), pca_sim_analysis (cosine of the two PC1s), pca_shift_analysis (PCA(2) fit on the reference;

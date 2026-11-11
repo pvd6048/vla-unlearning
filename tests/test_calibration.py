@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from calibrate import VARIANTS, items  # noqa: E402
 from submit import merge  # noqa: E402
 from vlu.config import RUNS_DIR  # noqa: E402
+from vlu.drift.paths import features_path  # noqa: E402
 from vlu.nodes import Node, run_seed  # noqa: E402
 from vlu.worker import claim_dir, item_key, load_plan, plan_path, someone_working, status, try_claim  # noqa: E402
 
@@ -374,13 +375,13 @@ assert "LA/LB/weights.safetensors" in used and len(used) == 2 + len(VARIANTS) - 
 retrained = Node.from_path("cal", "LA/LB/UB-ga@unlearn_lr=1e-7").weights_path
 os.utime(retrained, ns=(0, 0))  # rewritten since the report
 Node.from_path("cal", "LA/LB/UB-ga@unlearn_lr=3e-7").weights_path.unlink()
-features = Node.from_path("cal", "LA").dir / "drift" / "features.pt"
+features = features_path(Node.from_path("cal", "LA"))
 features.parent.mkdir()
 features.write_text("x")  # extracted since
 report()
 stale = next(line for line in (out / "summary.md").read_text().splitlines() if "Stale" in line)
 assert ("changed or removed since: LA/LB/UB-ga@unlearn_lr=1e-7/weights.safetensors, LA/LB/UB-ga@unlearn_lr=3e-7/weights.safetensors; "
-        "new since: LA/drift/features.pt.") in stale, stale
+        f"new since: LA/drift/{features.name}.") in stale, stale
 print("report: the drift summary goes into summary.md, its files into drift/ (logs also without a summary), "
       "nothing of an earlier pack; a stale drift report is marked")
 

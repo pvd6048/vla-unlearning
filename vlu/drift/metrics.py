@@ -1,10 +1,15 @@
 """The math of the drift metrics, on plain tensors (no GR00T, no files), so it is easy to check.
 
 Representations are (N, D) matrices: N probe samples (the same samples for every checkpoint), D
-features. All functions compute in float64.
+features. All functions compute in float64. A representation with a non-finite value (a diverged
+checkpoint's overflowing activations) gives NaN: the metric is undefined there.
 """
 
 import torch
+
+
+def _finite(*xs: torch.Tensor) -> bool:
+    return all(bool(torch.isfinite(x).all()) for x in xs)
 
 
 def _centered(x: torch.Tensor) -> torch.Tensor:
@@ -16,7 +21,10 @@ def linear_cka(x: torch.Tensor, y: torch.Tensor) -> float:
     """Linear CKA (Kornblith et al. 2019) between two representations of the same N samples:
     1 = identical up to rotation and isotropic scaling, 0 = unrelated. Computed with N x N Gram
     matrices, so D may be large. NaN if either representation does not vary across the samples
-    (e.g. the shift of a drift that changes nothing): CKA is undefined there, not 0."""
+    (e.g. the shift of a drift that changes nothing): CKA is undefined there, not 0. NaN also if either has a
+    non-finite value."""
+    if not _finite(x, y):
+        return float("nan")
     k, l = _centered(x) @ _centered(x).T, _centered(y) @ _centered(y).T
     if not (k.norm() > 0 and l.norm() > 0):
         return float("nan")
@@ -38,6 +46,9 @@ def subspace_overlap(u: torch.Tensor, v: torch.Tensor) -> float:
     return float((u.double() @ v.double().T).square().sum() / min(u.shape[0], v.shape[0]))
 
 
+PCA_METRICS = ("pca_overlap", "pca_distance", "pca_similarity", "pca_centroid_shift")  # pca_shift's keys
+
+
 def pca_shift(ref: torch.Tensor, new: torch.Tensor, k: int = 10) -> dict[str, float]:
     """How the representation `new` moved away from `ref` (same samples). Ours, in ref's top-k PCA space:
       pca_overlap   subspace_overlap of the two top-k PCA subspaces (1 = same principal directions)
@@ -50,21 +61,26 @@ def pca_shift(ref: torch.Tensor, new: torch.Tensor, k: int = 10) -> dict[str, fl
       pca_centroid_shift  distance between the centroids of ref and new projected onto ref's top-2
                           principal directions: the (PC1 shift, PC2) point of their PCA shift; its mean
                           over layers is their mean PCA distance. Unnormalized, as theirs.
-    Xu et al.'s use 1 and 2 principal directions whatever k is (ref's are computed at least 2 deep)."""
+    Xu et al.'s use 1 and 2 principal directions whatever k is (ref's are computed at least 2 deep).
+    All NaN if either representation has a non-finite value (the SVD is undefined)."""
     if k < 1:
         raise ValueError(f"pca_shift needs k >= 1, not {k}")
+    if not _finite(ref, new):
+        return dict.fromkeys(PCA_METRICS, float("nan"))
     mean, ref_basis, _ = pca_basis(ref, max(k, 2))
     new_mean, new_basis, _ = pca_basis(new, k)
     basis = ref_basis[:k]
     z_ref = (ref.double() - mean) @ basis.T
     z_new = (new.double() - mean) @ basis.T
     spread = z_ref.square().sum(dim=1).mean().sqrt().clamp_min(1e-300)
-    return {
+    out = {
         "pca_overlap": subspace_overlap(basis, new_basis),
         "pca_distance": float((z_new - z_ref).norm(dim=1).mean() / spread),
         "pca_similarity": abs(float(ref_basis[0] @ new_basis[0])),
         "pca_centroid_shift": float(((new_mean - mean) @ ref_basis[:2].T).norm()),
     }
+    assert tuple(out) == PCA_METRICS
+    return out
 
 
 def cosine(a: torch.Tensor, b: torch.Tensor) -> float:

@@ -32,6 +32,11 @@ Cross-modal alignment, per drift, each as <metric>_start (at X), <metric>_end (a
                      x-text / x-image blocks: how much the action head draws on language / vision
     language_sensitivity  (feature "policy") mean ||v(swapped instruction) - v||^2 / mean ||v||^2:
                      0 = the policy ignores the instruction ("linguistic blindness")
+
+Non-finite values, per drift and feature (task "all"):
+    nonfinite_start, nonfinite_end   number of inf / NaN entries at X and at Y (feature "policy": the
+                     velocities and flow-matching errors). Non-zero only for a diverged checkpoint whose
+                     activations overflow; the metrics on that feature are then NaN (vlu.drift.metrics).
 """
 
 import argparse
@@ -58,6 +63,14 @@ def load(ref: Ref, cache: dict) -> dict:
     return cache[ref]
 
 
+def nonfinite(data: dict) -> dict[str, int]:
+    """{feature: number of inf / NaN entries} of a checkpoint's probe file, "policy" for its velocities and
+    flow-matching errors."""
+    counts = {name: int((~torch.isfinite(h)).sum()) for name, h in data["features"].items()}
+    counts["policy"] = sum(int((~torch.isfinite(data[k])).sum()) for k in ("velocity", "velocity_swapped", "sse"))
+    return counts
+
+
 def vl_alignment(data: dict, layer: str, idx: torch.Tensor) -> float:
     image = data["features"][f"{layer}.image"][idx].double()
     text = data["features"][f"{layer}.text"][idx].double()
@@ -80,7 +93,8 @@ def main():
     args = parser.parse_args()
 
     cache = {}
-    drifts = [(name, load(x, cache), load(y, cache)) for name, x, y in (parse_drift(d, args.run) for d in args.drift)]
+    specs = [parse_drift(d, args.run) for d in args.drift]  # (name, X, Y)
+    drifts = [(name, load(x, cache), load(y, cache)) for name, x, y in specs]
     tasks = drifts[0][1]["tasks"]
     for _, a, b in drifts:
         if a["tasks"] != tasks or b["tasks"] != tasks or a["probe"] != b["probe"]:
@@ -94,6 +108,16 @@ def main():
     subsets["all"] = torch.arange(len(tasks))
 
     rows = []
+    for (name, x, y), (_, a, b) in zip(specs, drifts):
+        start, end = nonfinite(a), nonfinite(b)
+        for feature in start:
+            rows += [[feature, "all", "nonfinite_start", name, "", start[feature]],
+                     [feature, "all", "nonfinite_end", name, "", end[feature]]]
+        for ref, counts in ((x, start), (y, end)):
+            bad = {feature: n for feature, n in counts.items() if n}
+            if bad:
+                print(f"WARNING: {ref} (drift {name}) has inf / NaN values, a diverged checkpoint? {bad}; "
+                      "its metrics on these features are NaN", flush=True)
     for feature in drifts[0][1]["features"]:
         for task, idx in subsets.items():
             shifts = {}

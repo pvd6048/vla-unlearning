@@ -7,9 +7,10 @@ information on some tasks (for vlu.drift.params --fisher). GPU job, main environ
 Probe set: PROBE_PER_TASK evenly spread frames of every task A–E (the same frames for every
 checkpoint, including tasks it never saw), processed without augmentation. The flow-matching noise
 and timesteps are fixed by seed, so every checkpoint gets exactly the same inputs. Written to
-<node dir>/drift/features.pt (vlu/drift/paths.py):
+<node dir>/drift/features_v<FEATURES_VERSION>.pt (vlu/drift/paths.py):
     tasks      list of N task letters (one per probe sample)
-    features   {name: (N, D) float16}, mean-pooled hidden states:
+    features   {name: (N, D) float32}, mean-pooled hidden states (not float16: it overflows to inf above
+               65504, which diverged checkpoints reach, and its 3 digits are coarser than the smallest drifts):
         vlm.layerXX.image / .text   each trainable LLM layer, pooled over the image / text tokens
         vl.image / vl.text          the VL embeddings the DiT attends to (after the VL layer norm)
         dit.blockXX.<kind>          each DiT block (kind: x-text, x-image or self), pooled over the action tokens
@@ -111,10 +112,10 @@ def extract_features(model, processor, mcfg) -> dict:
             image = (inputs["input_ids"] == image_token) & valid
             for name, h in recorder.outputs.items():
                 if name.startswith("vlm.") or name == "vl":
-                    features[f"{name}.image"].append(_masked_mean(h.float(), image).half().cpu())
-                    features[f"{name}.text"].append(_masked_mean(h.float(), valid & ~image).half().cpu())
+                    features[f"{name}.image"].append(_masked_mean(h.float(), image).cpu())
+                    features[f"{name}.text"].append(_masked_mean(h.float(), valid & ~image).cpu())
                 elif name.startswith("dit."):
-                    features[name].append(h[:, -horizon:].float().mean(dim=1).half().cpu())
+                    features[name].append(h[:, -horizon:].float().mean(dim=1).cpu())
             for name, update in recorder.attn_outputs.items():
                 ratio = update[:, -horizon:].float().norm(dim=-1) / recorder.block_inputs[name][:, -horizon:].float().norm(dim=-1).clamp_min(1e-6)
                 attn_ratio[name].append(ratio.mean(dim=1).cpu())

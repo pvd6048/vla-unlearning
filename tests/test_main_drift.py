@@ -74,9 +74,9 @@ for path in w:
     if path == SALUN + "/LD/LE":
         continue  # features missing: its drift is left out
     feats = {"tasks": [t for t in TASKS for _ in range(PER)],
-             "features": {"vlm.layer12.image": torch.randn(N, 16).half(), "vlm.layer12.text": torch.randn(N, 16).half(),
-                          "vl.image": torch.randn(N, 16).half(), "vl.text": torch.randn(N, 16).half(),
-                          "dit.block00.x-text": dit[path].half(), "dit.block01.self": dit[path].half()},
+             "features": {"vlm.layer12.image": torch.randn(N, 16), "vlm.layer12.text": torch.randn(N, 16),
+                          "vl.image": torch.randn(N, 16), "vl.text": torch.randn(N, 16),
+                          "dit.block00.x-text": dit[path], "dit.block01.self": dit[path]},
              "attn_ratio": {"dit.block00.x-text": torch.rand(N), "dit.block01.self": torch.rand(N)},
              "velocity": v[path], "velocity_swapped": v[path] + 0.1 * torch.randn(N, 16, 7),
              "sse": 10 * torch.rand(N), "n_valid": torch.full((N,), 112.0),
@@ -116,7 +116,7 @@ print(f"weights: U:ssd norm, cos/proj on tauB, cos with F_B ({expect[3]:.3f}; Fi
 
 fd = lambda x, y: float((v[y][b] - v[x][b]).double().square().mean())  # noqa: E731
 shift = lambda x, y: (v[y][b] - v[x][b]).double().flatten()  # noqa: E731
-cka_b = lambda x, y: 1 - linear_cka(dit[x][b].half().float(), dit[y][b].half().float())  # noqa: E731
+cka_b = lambda x, y: 1 - linear_cka(dit[x][b], dit[y][b])  # noqa: E731
 pr = next(line for line in summary.splitlines() if line.startswith("| U:ssd |") and "->" in line).split(" | ")
 for got, want in [(pr[1], fd(T0, SSD)), (pr[4], fd(ORACLE, SSD) / fd(ORACLE, T0)), (pr[7], cka_b(T0, SSD)),
                   (pr[8], cka_b(ORACLE, SSD)), (pr[9].rstrip(" |"), cos(shift(T0, SSD), shift(C, F)))]:

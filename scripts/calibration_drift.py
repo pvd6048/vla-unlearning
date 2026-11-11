@@ -177,12 +177,31 @@ def weight_metrics(p: dict, d: str) -> dict | None:
 
 
 def dit_cka(r: dict) -> dict[tuple[str, str], float]:
-    """{(drift, task): CKA distance of the DiT blocks' features, mean over blocks}"""
+    """{(drift, task): CKA distance of the DiT blocks' features, mean over blocks}; NaN if a block's is NaN
+    (e.g. inf features of a diverged checkpoint), not a mean over fewer blocks."""
     values = defaultdict(list)
     for (feature, task, metric, drift, _), v in r.items():
-        if metric == "cka_distance" and feature.startswith("dit.") and not math.isnan(v):
+        if metric == "cka_distance" and feature.startswith("dit."):
             values[(drift, task)].append(v)
     return {k: statistics.mean(v) for k, v in values.items()}
+
+
+def nonfinite_note(r: dict, feature_drifts) -> list[str]:
+    """Summary lines naming the checkpoints with inf / NaN probe features (representation.csv's
+    nonfinite_start / nonfinite_end rows), whose metrics on those features are NaN."""
+    ends = {name: (x, y) for name, x, y in feature_drifts}
+    features, bad = set(), defaultdict(set)
+    for (feature, _, metric, d, _), v in r.items():
+        if metric in ("nonfinite_start", "nonfinite_end") and d in ends:
+            features.add(feature)
+            if v > 0:
+                bad[ends[d][metric == "nonfinite_end"] or "base"].add(feature)
+    if not bad:
+        return []
+    return ["**Non-finite probe features** (inf / NaN: a diverged checkpoint's activations overflow; the metrics "
+            "on these features are NaN, shown as -; per feature in `drift/representation.log`): "
+            + "; ".join(f"{node} ({len(f)} of {len(features)} features{', policy among them' if 'policy' in f else ''})"
+                        for node, f in sorted(bad.items())) + ".", ""]
 
 
 def policy_metrics(r: dict, cka: dict, d: str) -> dict | None:
@@ -237,6 +256,7 @@ def summary(out: Path, weight_drifts, feature_drifts, missing_w, missing_f, stat
     if missing_w or missing_f:
         md += [f"Left out (checkpoint or features missing): weights: {', '.join(missing_w) or 'none'}; "
                f"features: {', '.join(missing_f) or 'none'}.", ""]
+    md += nonfinite_note(r, feature_drifts)
     names = [n for n, _, _ in weight_drifts if not n.startswith("O:")]
     md += ["### Weights", "",
            "Trainable weights plus any frozen weight an op edited (VLA-Forget's vision layers). ‖D‖ = L2 norm; "
