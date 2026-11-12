@@ -143,28 +143,64 @@ assert "ssd@ssd_reference=retain" in weights_left and NPO_RT not in weights_left
 assert NPO_RT in features_left and GA not in features_left, features_left
 print("summary: every computed drift has a row; variants without weights / features are listed")
 
-# A diverged checkpoint: one inf activation on one of B's probe frames, in one DiT block. Only the numbers
-# that include that entry are NaN; the tool still runs, the rest is computed, and the summary names it.
+# A diverged checkpoint (vlu.drift.compare): an inf DiT feature and an inf velocity on one of B's probe frames,
+# a NaN attention ratio, and a finite but huge velocity on an E frame (its square overflows float32). Only the
+# numbers that include a non-finite entry are undefined; the tool still runs, the rest is computed, the tables
+# show "-" (not "inf", nor a ratio of 0), and the summary names the checkpoint, the log once.
 diverged = torch.load(features_path(Node.from_path(RUN, UB)), weights_only=False)
 diverged["features"]["dit.block01.self"][PER + 3, 5] = float("inf")
+diverged["attn_ratio"]["dit.block00.x-text"][PER + 4] = float("nan")
+diverged["velocity"][PER + 5, 0, 0] = float("inf")
+diverged["velocity"][4 * PER + 2, 0, 0] = 1e20
 torch.save(diverged, features_path(Node.from_path(RUN, UB)))
 result = subprocess.run(script, env=env, capture_output=True, text=True)
 assert result.returncode == cd.LEFT_OUT, result.stdout + result.stderr
-assert f"cal:{UB} (drift {u}) has inf / NaN values" in (out / "representation.log").read_text()
+log = (out / "representation.log").read_text()
+assert log.count(f"cal:{UB} has inf / NaN values") == 1, "named once, although it ends two drifts (U and O)"
 r = cd.read(out / "representation.csv")
 nan = lambda feature, task, metric, d=u: math.isnan(r[(feature, task, metric, d, "")])  # noqa: E731
 assert all(nan("dit.block01.self", t, m) for t in ("B", "all") for m in ("cka_distance", "pca_overlap", "pca_centroid_shift"))
 assert not any(nan("dit.block01.self", "A", m) or nan("dit.block00.x-text", "B", m) for m in ("cka_distance", "pca_overlap"))
 assert nan("dit.block01.self", "B", "cka_distance", o), "the oracle drift ends at the same checkpoint"
-assert r[("dit.block01.self", "all", "nonfinite_end", u, "")] == 1 and r[("dit.block01.self", "all", "nonfinite_start", u, "")] == 0
-assert r[("policy", "all", "nonfinite_end", u, "")] == 0 and r[("dit.block00.x-text", "all", "nonfinite_end", u, "")] == 0
+count = lambda feature, end="end": r[(feature, "all", f"nonfinite_{end}", u, "")]  # noqa: E731
+assert count("dit.block01.self") == 1 and count("dit.block01.self", "start") == 0
+assert count("dit.block00.x-text") == 1 and count("policy") == 1 and count("vl.image") == 0, "attention ratio, velocity"
+fd_e = r[("policy", "E", "flow_divergence", u, "")]
+assert math.isfinite(fd_e) and fd_e > 1e36, f"a finite velocity's square must not overflow ({fd_e})"
 m = cd.policy_metrics(r, cd.dit_cka(r), u)
+assert math.isinf(m["fd_B"]) and m["B_to_oracle"] is None and math.isfinite(m["fd_A"]), m
 assert math.isnan(m["cka_dit_B"]) and math.isnan(m["cka_oracle_B"]), "a mean over blocks with a NaN block is NaN"
-assert not math.isnan(m["cka_dit_A"]) and math.isclose(m["B_to_oracle"], truth, rel_tol=1e-5), "the policy is unaffected"
+assert not math.isnan(m["cka_dit_A"])
+assert cd.fmt(float("inf")) == cd.fmt(float("-inf")) == cd.fmt(float("nan")) == "-" and cd.ratio(1.0, float("inf")) is None
 summary = (out / "summary.md").read_text()
-assert f"**Non-finite probe features** (" in summary and f": {UB} (1 of 7 features)." in summary, summary
-assert "Incomplete" not in summary and f"| {GA} |" in summary.split("### Policy", 1)[1]
-print("diverged checkpoint: NaN only where its inf enters (also the DiT mean), the rest computed, named in the summary")
+assert f": {UB} (3 of 7 features, policy among them)." in summary and "**Non-finite probe features** (" in summary, summary
+policy_table = summary.split("### Policy", 1)[1]
+row = next(line for line in policy_table.splitlines() if line.startswith(f"| {GA} |")).split(" | ")
+assert row[1] != "-" and row[2] == "-" and row[3] == "-" and "inf" not in policy_table, row  # fd A, fd B, B dist. to oracle
+assert "Incomplete" not in summary and cd.BF16_CAVEAT in summary
+print("diverged checkpoint: undefined only where its inf / NaN enters (also the DiT mean), shown as -, named once; "
+      "huge finite velocities do not overflow")
+
+# A PCA whose SVD does not converge costs only its own cells, with a warning (vlu.drift.compare.pca_metrics).
+import contextlib  # noqa: E402
+import io  # noqa: E402
+import vlu.drift.compare as compare  # noqa: E402
+from vlu.drift.metrics import PCA_METRICS  # noqa: E402
+
+
+def no_convergence(*_):
+    raise torch.linalg.LinAlgError("linalg.svd: The algorithm failed to converge")
+
+
+compare.pca_shift = no_convergence
+sys.argv = ["compare", "--run", RUN, "--drift", "tauB=LA..LA/LB", "--out", str(stubs.TMP / "svd.csv")]
+with contextlib.redirect_stdout(io.StringIO()) as printed:
+    compare.main()
+svd = cd.read(stubs.TMP / "svd.csv")
+pca = [v for k, v in svd.items() if k[2] in PCA_METRICS]
+assert pca and all(math.isnan(v) for v in pca) and "PCA of vl.image, task B, drift tauB failed" in printed.getvalue()
+assert all(math.isfinite(svd[(f, "B", "cka_distance", "tauB", "")]) for f in ("vl.image", "dit.block00.x-text"))
+print("SVD failure: NaN for that PCA's cells only, with a warning; the tool finishes")
 
 # A failed tool reports no number, also none left by an earlier run; the script exits non-zero.
 (out / "representation.csv").write_text("feature,task,metric,drift_i,drift_j,value\npolicy,all,flow_divergence,tauB,,123\n")

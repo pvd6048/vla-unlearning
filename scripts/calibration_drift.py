@@ -141,13 +141,20 @@ def pair(rows: dict, a: str, b: str, metric: str, where: tuple[str, str]):
 
 
 def ratio(a, b):
-    return None if a is None or b is None or b == 0 or math.isnan(a) or math.isnan(b) else a / b
+    """a / b; None if either is missing, NaN or infinite (a diverged checkpoint's), or b is 0."""
+    return None if a is None or b is None or b == 0 or not (math.isfinite(a) and math.isfinite(b)) else a / b
+
+
+# The probe features' precision (vlu/drift/extract.py), for the summaries.
+BF16_CAVEAT = ("The probe features come from a forward pass under bf16 autocast, as in training and evaluation: "
+               "its matrix products are rounded to 8 significant bits, so a representation or policy change at that "
+               "level (the smallest drifts) is rounding, not a measured difference.")
 
 
 # Markdown helpers, also used by scripts/calibration_report.py.
 def fmt(x, spec: str = ".3g") -> str:
-    """A number for a table: '-' if missing or NaN."""
-    return "-" if x is None or (isinstance(x, float) and math.isnan(x)) else f"{x:{spec}}"
+    """A number for a table: '-' if missing, NaN or infinite."""
+    return "-" if x is None or (isinstance(x, float) and not math.isfinite(x)) else f"{x:{spec}}"
 
 
 def table(header: list[str], rows: list[list]) -> list[str]:
@@ -188,7 +195,7 @@ def dit_cka(r: dict) -> dict[tuple[str, str], float]:
 
 def nonfinite_note(r: dict, feature_drifts) -> list[str]:
     """Summary lines naming the checkpoints with inf / NaN probe features (representation.csv's
-    nonfinite_start / nonfinite_end rows), whose metrics on those features are NaN."""
+    nonfinite_start / nonfinite_end rows), whose metrics on those features are NaN or inf."""
     ends = {name: (x, y) for name, x, y in feature_drifts}
     features, bad = set(), defaultdict(set)
     for (feature, _, metric, d, _), v in r.items():
@@ -199,7 +206,7 @@ def nonfinite_note(r: dict, feature_drifts) -> list[str]:
     if not bad:
         return []
     return ["**Non-finite probe features** (inf / NaN: a diverged checkpoint's activations overflow; the metrics "
-            "on these features are NaN, shown as -; per feature in `drift/representation.log`): "
+            "on these features are NaN or inf, shown as -; per feature in `drift/representation.log`): "
             + "; ".join(f"{node} ({len(f)} of {len(features)} features{', policy among them' if 'policy' in f else ''})"
                         for node, f in sorted(bad.items())) + ".", ""]
 
@@ -250,7 +257,7 @@ def summary(out: Path, weight_drifts, feature_drifts, missing_w, missing_f, stat
           "(LA..LA/LB/UB-v). Raw numbers: `drift/params.csv` (weights, per module and layer) and "
           "`drift/representation.csv` (probe features: CKA, PCA, policy, vision-language alignment, attention "
           "ratios, per task); pairwise numbers for the pairs with tauA or tauB. One training seed: no noise "
-          "floor; the random direction is the only control.", ""]
+          "floor; the random direction is the only control. " + BF16_CAVEAT, ""]
     if any(s != "ok" for s in states.values()):
         md += ["**Incomplete**: " + "; ".join(f"{part}: {s}" for part, s in states.items()) + ".", ""]
     if missing_w or missing_f:

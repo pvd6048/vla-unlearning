@@ -10,7 +10,9 @@ and timesteps are fixed by seed, so every checkpoint gets exactly the same input
 <node dir>/drift/features_v<FEATURES_VERSION>.pt (vlu/drift/paths.py):
     tasks      list of N task letters (one per probe sample)
     features   {name: (N, D) float32}, mean-pooled hidden states (not float16: it overflows to inf above
-               65504, which diverged checkpoints reach, and its 3 digits are coarser than the smallest drifts):
+               65504, which diverged checkpoints reach). Their precision is set by the forward pass, which
+               runs under bf16 autocast as in training and evaluation (matrix products rounded to 8
+               significant bits; the backbone's flash attention needs bf16 anyway), not by this storage:
         vlm.layerXX.image / .text   each trainable LLM layer, pooled over the image / text tokens
         vl.image / vl.text          the VL embeddings the DiT attends to (after the VL layer norm)
         dit.blockXX.<kind>          each DiT block (kind: x-text, x-image or self), pooled over the action tokens

@@ -34,9 +34,13 @@ Cross-modal alignment, per drift, each as <metric>_start (at X), <metric>_end (a
                      0 = the policy ignores the instruction ("linguistic blindness")
 
 Non-finite values, per drift and feature (task "all"):
-    nonfinite_start, nonfinite_end   number of inf / NaN entries at X and at Y (feature "policy": the
-                     velocities and flow-matching errors). Non-zero only for a diverged checkpoint whose
-                     activations overflow; the metrics on that feature are then NaN (vlu.drift.metrics).
+    nonfinite_start, nonfinite_end   number of inf / NaN entries at X and at Y (a DiT block: its features
+                     and attention ratios; feature "policy": the velocities and flow-matching errors).
+                     Non-zero only for a diverged checkpoint whose activations overflow; the metrics on
+                     that feature are then NaN or inf (vlu.drift.metrics). Each such checkpoint is named
+                     once in the log.
+A PCA whose SVD does not converge (on finite input) gives NaN for its PCA metrics and a warning; every
+other number is still computed.
 """
 
 import argparse
@@ -46,7 +50,7 @@ from pathlib import Path
 
 import torch
 
-from vlu.drift.metrics import cosine, linear_cka, pca_shift
+from vlu.drift.metrics import PCA_METRICS, cosine, linear_cka, pca_shift
 from vlu.drift.params import parse_drift
 from vlu.drift.paths import FEATURES_VERSION, features_path
 from vlu.drift.weights import Ref
@@ -64,11 +68,24 @@ def load(ref: Ref, cache: dict) -> dict:
 
 
 def nonfinite(data: dict) -> dict[str, int]:
-    """{feature: number of inf / NaN entries} of a checkpoint's probe file, "policy" for its velocities and
-    flow-matching errors."""
-    counts = {name: int((~torch.isfinite(h)).sum()) for name, h in data["features"].items()}
-    counts["policy"] = sum(int((~torch.isfinite(data[k])).sum()) for k in ("velocity", "velocity_swapped", "sse"))
+    """{feature: number of inf / NaN entries} of a checkpoint's probe file: a DiT block's count includes its
+    attention ratios; "policy" counts the velocities and flow-matching errors."""
+    bad = lambda t: int((~torch.isfinite(t)).sum())  # noqa: E731
+    counts = {name: bad(h) for name, h in data["features"].items()}
+    for block, ratio in data["attn_ratio"].items():
+        counts[block] = counts.get(block, 0) + bad(ratio)
+    counts["policy"] = sum(bad(data[k]) for k in ("velocity", "velocity_swapped", "sse"))
     return counts
+
+
+def pca_metrics(ha: torch.Tensor, hb: torch.Tensor, k: int, where: str) -> dict[str, float]:
+    """pca_shift, or NaN for each of its metrics (with a warning) if an SVD does not converge: one such
+    cell does not cost every other number of the run."""
+    try:
+        return pca_shift(ha, hb, k)
+    except torch.linalg.LinAlgError as e:
+        print(f"WARNING: PCA of {where} failed ({e}); its PCA metrics are NaN", flush=True)
+        return dict.fromkeys(PCA_METRICS, float("nan"))
 
 
 def vl_alignment(data: dict, layer: str, idx: torch.Tensor) -> float:
@@ -108,16 +125,16 @@ def main():
     subsets["all"] = torch.arange(len(tasks))
 
     rows = []
-    for (name, x, y), (_, a, b) in zip(specs, drifts):
-        start, end = nonfinite(a), nonfinite(b)
-        for feature in start:
-            rows += [[feature, "all", "nonfinite_start", name, "", start[feature]],
-                     [feature, "all", "nonfinite_end", name, "", end[feature]]]
-        for ref, counts in ((x, start), (y, end)):
-            bad = {feature: n for feature, n in counts.items() if n}
-            if bad:
-                print(f"WARNING: {ref} (drift {name}) has inf / NaN values, a diverged checkpoint? {bad}; "
-                      "its metrics on these features are NaN", flush=True)
+    counts = {}  # once per checkpoint: a checkpoint ends or starts many drifts (LA/LB starts every U drift)
+    for ref in dict.fromkeys(r for _, x, y in specs for r in (x, y)):
+        counts[ref] = nonfinite(cache[ref])
+        if bad := {feature: n for feature, n in counts[ref].items() if n}:
+            print(f"WARNING: {ref} has inf / NaN values, a diverged checkpoint? {bad}; "
+                  "its metrics on these features are NaN or inf", flush=True)
+    for name, x, y in specs:
+        for feature in counts[x]:
+            rows += [[feature, "all", "nonfinite_start", name, "", counts[x][feature]],
+                     [feature, "all", "nonfinite_end", name, "", counts[y][feature]]]
     for feature in drifts[0][1]["features"]:
         for task, idx in subsets.items():
             shifts = {}
@@ -125,7 +142,7 @@ def main():
                 ha, hb = a["features"][feature][idx].float(), b["features"][feature][idx].float()
                 shifts[name] = hb - ha
                 rows.append([feature, task, "cka_distance", name, "", 1 - linear_cka(ha, hb)])
-                for metric, value in pca_shift(ha, hb, args.pca_k).items():
+                for metric, value in pca_metrics(ha, hb, args.pca_k, f"{feature}, task {task}, drift {name}").items():
                     rows.append([feature, task, metric, name, "", value])
             for i, j in pairs:
                 rows.append([feature, task, "shift_cka", i, j, linear_cka(shifts[i], shifts[j])])
@@ -133,11 +150,11 @@ def main():
     for task, idx in subsets.items():
         vshift = {}
         for name, a, b in drifts:
-            va, vb = a["velocity"][idx], b["velocity"][idx]
+            va, vb = a["velocity"][idx].double(), b["velocity"][idx].double()  # float64, as vlu.drift.metrics
             vshift[name] = vb - va
             rows.append(["policy", task, "flow_divergence", name, "", float((vb - va).square().mean())])
-            loss_a = (a["sse"][idx] / a["n_valid"][idx]).mean()
-            loss_b = (b["sse"][idx] / b["n_valid"][idx]).mean()
+            loss_a = (a["sse"][idx].double() / a["n_valid"][idx]).mean()
+            loss_b = (b["sse"][idx].double() / b["n_valid"][idx]).mean()
             rows.append(["policy", task, "fm_loss_change", name, "", float(loss_b - loss_a)])
         for i, j in pairs:
             rows.append(["policy", task, "velocity_shift_cos", i, j, cosine(vshift[i], vshift[j])])

@@ -91,7 +91,7 @@ assert result.returncode == cd.LEFT_OUT, result.stdout + result.stderr  # a drif
 out = cd.report_dir(RUN)
 summary = (out / "summary.md").read_text()
 assert "Left out (checkpoint or features missing): weights: none; features: UF:salun." in summary, summary
-assert "Incomplete" not in summary and (out / "params.csv").exists() and (out / "representation.csv").exists()
+assert "Incomplete" not in summary and cd.BF16_CAVEAT in summary and (out / "params.csv").exists() and (out / "representation.csv").exists()
 assert json.loads((out / "inputs.json").read_text()) == md.inputs(RUN) and md.input_changes(RUN) == ([], [])
 print("main_drift: every drift computed; the one without features listed as left out; inputs recorded")
 

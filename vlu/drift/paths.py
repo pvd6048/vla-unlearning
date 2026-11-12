@@ -5,7 +5,7 @@ from pathlib import Path
 from vlu.nodes import Node
 
 # Layout of the features file written by vlu.drift.extract (3: float32 features; 2 stored float16, which
-# overflowed to inf on diverged checkpoints and rounded away the smallest drifts).
+# overflowed to inf on diverged checkpoints).
 FEATURES_VERSION = 3
 
 

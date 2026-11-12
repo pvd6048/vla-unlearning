@@ -135,7 +135,8 @@ def summary(out: Path, weight_drifts, feature_drifts, missing_w, missing_f, stat
           "incidental forgetting of B = branch F (purge, then LD LE) minus branch C (LD LE with B replayed); U:m = "
           "unlearning B from theta0; UF:m = unlearning B, then LD LE, minus C. Raw numbers per module and layer: "
           "`drift/params.csv`, per probe task and feature: `drift/representation.csv` (pairwise numbers for the pairs "
-          "with tauB or F_B). One training seed: no noise floor; the controls are the random direction and tauD.", ""]
+          "with tauB or F_B). One training seed: no noise floor; the controls are the random direction and tauD. "
+          + cd.BF16_CAVEAT, ""]
     if any(s != "ok" for s in states.values()):
         md += ["**Incomplete**: " + "; ".join(f"{part}: {s}" for part, s in states.items()) + ".", ""]
     if missing_w or missing_f:

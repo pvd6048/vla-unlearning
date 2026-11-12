@@ -12,7 +12,7 @@ python tests/test_ops.py             # NPO/NPO-RT/SSD/SalUn plans (vlu/ops.py), 
 python tests/test_vlaforget.py       # vlu/{vlaforget,lora}.py, frozen overrides in vlu/model.py
 python tests/test_stream_metrics.py  # vlu/stream_metrics.py (plain Python, no torch needed)
 python tests/test_calibration.py     # local workers (no Slurm), calibration plan and report (plain Python)
-python tests/test_calibration_drift.py # scripts/calibration_drift.py: distances to the oracle, restricted pairs, diverged checkpoints, failed tools
+python tests/test_calibration_drift.py # scripts/calibration_drift.py: distances to the oracle, restricted pairs, diverged checkpoints, SVD failures, failed tools
 python tests/test_completion.py      # workers and run_local.sh fail on failed / unfinished required items (vlu/worker.py); run_local.sh options
 python tests/test_main_run.py        # main run: plan of S1 + oracles + control branch, report (plain Python)
 python tests/test_main_drift.py      # scripts/main_drift.py: forgetting vs. unlearning drifts against direct computation

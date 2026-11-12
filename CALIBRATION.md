@@ -12,8 +12,8 @@ us how to set our hyperparameters. You don't need to interpret anything: run it 
   same time. The run checks the free memory at the start, warns about GPUs already in use, and stops
   if no GPU has 44 GB free.
 - NVIDIA driver 570 or newer (CUDA 12.8); 525 or newer usually works too.
-- About 350 GB of free disk (it fills to about 305 GB: 25 GB of software, model and data, 265 GB of
-  trained model weights, 15 GB of drift data), 64 GB of RAM or more, internet access during setup (about 15 GB is downloaded).
+- About 350 GB of free disk (it fills to about 307 GB: 25 GB of software, model and data, 265 GB of
+  trained model weights, 17 GB of drift data), 64 GB of RAM or more, internet access during setup (about 15 GB is downloaded).
 - `git`, `curl`, `cmake` and a C compiler (`build-essential` on Ubuntu). No root access or Slurm is needed.
 
 ## Steps
@@ -80,7 +80,7 @@ the main run is running. In the `vla-unlearning` folder:
 
 ```bash
 git pull
-bash scripts/run_local.sh --drift-only           # about 1-2 hours; needs about 15 GB of free disk
+bash scripts/run_local.sh --drift-only           # about 1-2 hours; needs about 17 GB of free disk
 ```
 
 It uses only the GPUs with 32 GB free (training needs 44 GB; this does not train). If it reports an error, it packs the `.tar.gz` anyway; please
@@ -88,8 +88,12 @@ send it. If it stops, run the same command again: finished parts are kept. After
 `bash scripts/run_local.sh` continues the calibration as normal.
 
 If you ran it before 12 November 2026: running it again extracts every model's features again (about
-1 hour; they are now stored at full precision). The old files, `runs/cal/**/drift/features.pt`, are no
-longer used; you can delete them with `find runs/cal -path '*/drift/features.pt' -delete`.
+1 hour; they are now stored in float32, which does not overflow). The old files, `drift/features.pt` in
+each model's folder, are no longer used; you can delete them (about 1.5 GB) with
+
+```bash
+source slurm/env.sh && find "$VLU_RUNS_DIR/cal" -path '*/drift/features.pt' -delete
+```
 
 ## Main run (only when we ask for it, after the calibration)
 

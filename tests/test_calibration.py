@@ -68,7 +68,7 @@ race_item = {"kind": "train", "node": "LD", "save_at": []}
 race = claim_dir("two", race_item); race.mkdir(parents=True)
 (race / "owner.json").write_text(json.dumps({"job": f"local{dead.pid}@{os.uname().nodename}"}))
 RACER = r"""
-import sys, time
+import pathlib, sys, time
 import vlu.worker as w
 real_alive = w._job_alive
 def slow_alive(job):  # everyone checks the owner first, then all act one after another
@@ -79,10 +79,17 @@ w._job_alive = slow_alive
 time.sleep(float(sys.argv[1]) - time.time())  # start together
 won = w.try_claim(w.claim_dir("two", {"kind": "train", "node": "LD", "save_at": []}))
 print("WON" if won else "lost", flush=True)
-time.sleep(max(0.0, float(sys.argv[1]) + 2.0 - time.time()))  # a winner keeps working: its claim stays live
+# A winner keeps working, so its claim stays live, until every racer has decided (not for a fixed time: the
+# serialized checks take ~1.9 s, and a winner that had exited would rightly be taken over).
+decided = pathlib.Path(sys.argv[3])
+(decided / sys.argv[2]).touch()
+while len(list(decided.iterdir())) < 8 and time.time() < float(sys.argv[1]) + 60:
+    time.sleep(0.05)
 """
 start = str(time.time() + 6)  # time for every process to start (imports) before the race
-racers = [subprocess.Popen([sys.executable, "-c", RACER, start, str(i)], env=ENV, stdout=subprocess.PIPE, text=True) for i in range(8)]
+decided = tempfile.mkdtemp(prefix="vlu_race_")
+racers = [subprocess.Popen([sys.executable, "-c", RACER, start, str(i), decided], env=ENV, stdout=subprocess.PIPE, text=True)
+          for i in range(8)]
 results = [r.communicate(timeout=60)[0].strip() for r in racers]
 assert sum(r.endswith("WON") for r in results) == 1 and sum(r == "lost" for r in results) == 7, results
 assert json.loads((race / "owner.json").read_text())["job"].startswith("local")
