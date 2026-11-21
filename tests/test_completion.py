@@ -17,7 +17,7 @@ from unittest.mock import patch
 # Load the orchestration functions without importing Linux-only fcntl on Windows.
 ROOT = Path(__file__).resolve().parents[1]
 tree = ast.parse((ROOT / "vlu" / "worker.py").read_text())
-names = {"item_key", "require_complete", "main", "_job_alive", "ENDED_STATES"}
+names = {"item_key", "require_complete", "main", "fits", "_job_alive", "ENDED_STATES"}
 worker = {"argparse": argparse, "os": os, "socket": socket, "subprocess": subprocess}
 exec(compile(ast.Module(body=[n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names)
                               or (isinstance(n, ast.Assign) and n.targets[0].id in names)],
@@ -140,6 +140,7 @@ class CompletionTests(unittest.TestCase):
             for failure in ("none", "planning", "submission", "worker", "incomplete", "drift", "left_out"):
                 # Execute the real launcher blocks with fake processes; no training or Slurm calls.
                 prefix = f'''set -uo pipefail
+source {ROOT}/slurm/lib.sh
 MAIN_PY=main; RUN=test; VLU_CPUS=4; OUT=/nonexistent; VLU_RUNS_DIR=/nonexistent; MODE={mode}; PLAN={plan}; DRIFT={drift}; DRIFT_ONLY={drift_only}
 ''' + '''package() { :; }
 nvidia-smi() { echo "0, 40000"; echo "1, 45000"; echo "2, 9000"; }
@@ -181,19 +182,21 @@ PIDS=()
                         self.assertIn(f"{drift} on GPU 1 with 4 threads", out)  # the GPU with the most free memory
 
     def test_launcher_checks_every_task_in_libero(self):
-        # The real task_preflight, with a fake simulator interpreter whose make_env knows only some tasks.
+        # The real task_preflight and scripts/check_tasks.py, with a fake simulator interpreter whose make_env
+        # knows only some tasks. The tasks a run evaluates must be usable (select_mode: the calibration A and B,
+        # the main run all); a problem with another task is a warning.
         bash = os.environ.get("VLU_TEST_BASH") or shutil.which("bash")
         if not bash:
             self.skipTest("bash is not available")
         source = (ROOT / "scripts" / "run_local.sh").read_text()
         start = source.index("task_preflight() {")
-        block = source[start:source.index("\n}\n", start) + 3].replace("source slurm/env.sh;", "source slurm/env.sh; SIM_PY=$FAKE_SIM;")
+        block = source[start:source.index("\n}\n", start) + 3].replace("source slurm/env.sh\n", "source slurm/env.sh; SIM_PY=$FAKE_SIM\n")
         self.assertIn("SIM_PY=$FAKE_SIM", block)
         tmp = Path(tempfile.mkdtemp())
         fake = tmp / "sim_py"
         fake.write_text(f"""#!/bin/sh
 exec {sys.executable} -c '
-import os, sys, types
+import os, runpy, sys, types
 module = types.ModuleType("vlu.eval.libero_client")
 class Env:
     def __init__(self):
@@ -206,30 +209,30 @@ def make_env(letter):
     return Env(), list(range(50))
 module.make_env = make_env
 sys.modules["vlu.eval.libero_client"] = module
-exec(sys.stdin.read())
-'
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+' "$@"
 """)
         fake.chmod(0o755)
-        for mode, bad in (("main", ""), ("main", "D"), ("calibration", "D")):
+        for mode, bad, stops in (("main", "", False), ("main", "D", True), ("calibration", "D", False),
+                                 ("calibration", "A", True), ("calibration", "", False)):
             out = tmp / f"{mode}{bad}"
             out.mkdir(exist_ok=True)
-            result = subprocess.run([bash, "-c", f"set -uo pipefail; OUT={out}; MODE={mode}; VLU_RENDER=mesa\n"
+            result = subprocess.run([bash, "-c", f"set -uo pipefail; source slurm/lib.sh; select_mode {mode}; OUT={out}; VLU_RENDER=mesa\n"
                                      f"{block}task_preflight; echo \"status $?\""], cwd=ROOT, text=True, capture_output=True,
                                     env={**os.environ, "FAKE_SIM": str(fake), "BAD_TASKS": bad or "-"})
             log = (out / "environment.txt").read_text()
             with self.subTest(mode=mode, bad=bad):
-                if bad and mode == "main":  # the launcher stops (status 1)
-                    self.assertIn("status 1", result.stdout, result.stdout + result.stderr)
-                    self.assertIn("ERROR: a task of vlu/tasks.py is not usable in LIBERO", result.stdout)
-                    self.assertIn("LIBERO instruction differs for D", log)
-                elif bad:  # the calibration uses A and B only: warned, not stopped
-                    self.assertIn("WARNING: a task of vlu/tasks.py is not usable in LIBERO", result.stdout)
-                    self.assertIn("status 0", result.stdout)
-                else:
-                    self.assertIn("status 0", result.stdout, result.stdout + result.stderr + log)
-                    for letter in "ABCDE":
-                        self.assertIn(f"task {letter} OK:", log)
-                    self.assertEqual(log.count("closed"), 5)  # every env's render context is closed
+                self.assertIn(f"status {int(stops)}", result.stdout, result.stdout + result.stderr + log)
+                if stops:
+                    self.assertIn("ERROR: a task this run evaluates is not usable in LIBERO", result.stdout)
+                    self.assertIn(f"LIBERO instruction differs for {bad}", log)
+                    self.assertIn(f"task {bad} NOT USABLE", log)
+                elif bad:  # not evaluated by the calibration: warned, not stopped
+                    self.assertIn(f"WARNING: task {bad} not usable", result.stdout)
+                for letter in "ABCDE":  # every task is checked, also after a failure
+                    self.assertIn(f"task {letter} OK:" if letter != bad else f"differs for {letter}", log)
+                self.assertEqual(log.count("closed"), 5 - bool(bad))  # every env's render context is closed
 
     def test_launcher_skips_simulator_checks_for_drift_only(self):
         # Step 2 as written: --drift-only evaluates nothing, so neither rendering nor the tasks are checked.
@@ -254,35 +257,33 @@ exec(sys.stdin.read())
         source = (ROOT / "scripts" / "run_local.sh").read_text()
         start = source.index("worker_kinds() {")
         function = source[start:source.index("\n}\n", start) + 3]
-        # 43329 MiB: an A6000 with another program's 4.5 GB on it (the guide's machine, 2026-11-11): too little
-        # to train, enough for the drift features (a Fisher needs ~28 GiB)
-        for drift_only, expected in ((0, "train,eval,features|eval|eval"), (1, "features|features|")):
-            result = subprocess.run([bash, "-c", f"TRAIN_FREE_MIB=44000; FEATURES_FREE_MIB=32000; DRIFT_ONLY={drift_only}\n{function}"
-                                     'echo "$(worker_kinds 45000)|$(worker_kinds 43329)|$(worker_kinds 19574)"'],
-                                    text=True, capture_output=True)
+        # 43329 MiB: an A6000 with another program's 4.5 GB on it (the guide's machine, 2026-11-11): too little to
+        # train, enough for a Fisher (28.6 GiB). 26299 and 24095 MiB: the guide's other GPUs (shared): features
+        # without a Fisher (12.1 GiB peak). 12000: too little for features.
+        for drift_only, expected in ((0, "train,eval,features|eval|eval|eval|eval"),
+                                     (1, "features|features|features --no-fisher|features --no-fisher|")):
+            result = subprocess.run([bash, "-c", f"TRAIN_FREE_MIB=44000; FISHER_FREE_MIB=32000; FEATURES_FREE_MIB=16000; "
+                                     f"DRIFT_ONLY={drift_only}\n{function}"
+                                     'echo "$(worker_kinds 45000)|$(worker_kinds 43329)|$(worker_kinds 26299)|$(worker_kinds 24095)|'
+                                     '$(worker_kinds 12000)"'], text=True, capture_output=True)
             with self.subTest(drift_only=drift_only):
                 self.assertEqual(result.stdout.strip(), expected, result.stderr)
-        # No Fisher left (the bar drops to 16000 MiB): the guide's GPUs of 2026-11-11 (26299 and 24095 MiB free,
-        # shared with other programs) extract features too; 12000 is too little for features (12.1 GiB peak).
-        result = subprocess.run([bash, "-c", f"TRAIN_FREE_MIB=44000; FEATURES_FREE_MIB=16000; DRIFT_ONLY=1\n{function}"
-                                 'echo "$(worker_kinds 43934)|$(worker_kinds 26299)|$(worker_kinds 24095)|$(worker_kinds 12000)"'],
-                                text=True, capture_output=True)
-        self.assertEqual(result.stdout.strip(), "features|features|features|", result.stderr)
 
-    def test_launcher_lowers_the_features_bar_only_without_fisher(self):
-        # The real block of step 5, with a stand-in for "python -m vlu.worker --fisher-left".
+    def test_launcher_needs_a_fisher_gpu_only_while_a_fisher_is_left(self):
+        # The real block of step 5 that sets the memory at least one GPU must have, with a stand-in for
+        # "python -m vlu.worker --fisher-left".
         bash = os.environ.get("VLU_TEST_BASH") or shutil.which("bash")
         if not bash:
             self.skipTest("bash is not available")
         source = (ROOT / "scripts" / "run_local.sh").read_text()
-        start = source.index("FEATURES_FREE_MIB=32000\n")
+        start = source.index("TRAIN_FREE_MIB=44000\n")
         block = source[start:source.index("\nfi\n", start) + 4]
-        for drift_only, left, expected in ((1, "0", "16000"), (1, "2", "32000"), (0, "0", "32000"), (1, "Traceback", "32000")):
+        for drift_only, left, expected in ((1, "0", "16000"), (1, "2", "32000"), (0, "0", "44000"), (1, "Traceback", "32000")):
             fake = f"echo {left}"  # MAIN_PY: prints what --fisher-left would; a crash keeps the safe bar
             result = subprocess.run([bash, "-c", f"MAIN_PY=fake; RUN=cal; DRIFT_ONLY={drift_only}\nfake() {{ {fake}; }}\n{block}"
-                                     'echo "bar $FEATURES_FREE_MIB"'], text=True, capture_output=True)
+                                     'echo "need $NEED_MIB"'], text=True, capture_output=True)
             with self.subTest(drift_only=drift_only, left=left):
-                self.assertEqual(result.stdout.strip().splitlines()[-1], f"bar {expected}", result.stdout + result.stderr)
+                self.assertEqual(result.stdout.strip().splitlines()[-1], f"need {expected}", result.stdout + result.stderr)
 
     def test_cluster_job_matches_the_large_pool(self):
         # slurm/run.sbatch requests what scripts/submit.py's gpu_large workers request (the facility's template),
@@ -293,30 +294,33 @@ exec(sys.stdin.read())
         pools = next(ast.literal_eval(n.value) for n in submit_tree.body
                      if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "POOLS")
         self.assertLessEqual(set(pools["large"]["sbatch"]) | {"--signal=B:USR1@900"}, directives)
-        self.assertIn(f'--kinds {pools["large"]["kinds"]} &', source)
+        self.assertIn(f'-m vlu.worker --run "$RUN" --kinds {pools["large"]["kinds"]}', source)
         bash = os.environ.get("VLU_TEST_BASH") or shutil.which("bash")
         if not bash:
             self.skipTest("bash is not available")
         block = source[source.index("MODE=calibration\n"):source.index('OUT="$VLU_STORE')]
-        for args, expected in (("", "calibration cal scripts/calibrate.py scripts/calibration_report.py scripts/calibration_drift.py"),
-                               ("--main", "main goal_s0 scripts/main_run.py scripts/main_report.py scripts/main_drift.py")):
-            result = subprocess.run([bash, "-c", f"set -- {args}\n{block}" + 'echo "$MODE $RUN $PLAN $REPORT $DRIFT"'],
-                                    text=True, capture_output=True)
+        for args, expected in (("", "calibration cal scripts/calibrate.py scripts/calibration_report.py scripts/calibration_drift.py A,B"),
+                               ("--main", "main goal_s0 scripts/main_run.py scripts/main_report.py scripts/main_drift.py -")):
+            result = subprocess.run([bash, "-c", f"source {ROOT}/slurm/lib.sh; set -- {args}\n{block}"
+                                     'echo "$MODE $RUN $PLAN $REPORT $DRIFT ${REQUIRED_TASKS:--}"'],
+                                    text=True, capture_output=True, env={**os.environ, "RUN": "other"})  # an exported RUN is ignored
             with self.subTest(args=args):
                 self.assertEqual(result.stdout.strip(), expected, result.stderr)
-        result = subprocess.run([bash, "-c", f"set -- --pack\n{block}"], text=True, capture_output=True)
+        result = subprocess.run([bash, "-c", f"source {ROOT}/slurm/lib.sh; set -- --pack\n{block}"], text=True, capture_output=True)
         self.assertEqual(result.returncode, 2, "unknown options are refused")
         self.assertEqual(subprocess.run([bash, "-n", str(ROOT / "slurm" / "run.sbatch")]).returncode, 0)
 
     def test_cluster_job_flow(self):
-        # The real slurm/run.sbatch with fake programs (Python, check.sbatch, sbatch, nvidia-smi) in a fake repo:
-        # what runs on a first launch and on a successor, re-queueing at the time-limit signal, and failures.
+        # The real slurm/run.sbatch and slurm/lib.sh with fake programs (Python, check.sbatch, sbatch, scancel,
+        # nvidia-smi) in a fake repo: what runs on a first launch and on a successor, failures, and the time-limit
+        # signal while the worker runs and while the drift metrics run (handled at once, not after them).
         bash = os.environ.get("VLU_TEST_BASH") or shutil.which("bash")
         if not bash:
             self.skipTest("bash is not available")
         root = Path(tempfile.mkdtemp())
         (root / "slurm").mkdir()
-        shutil.copy(ROOT / "slurm" / "run.sbatch", root / "slurm" / "run.sbatch")
+        for name in ("run.sbatch", "lib.sh"):
+            shutil.copy(ROOT / "slurm" / name, root / "slurm" / name)
         bin_dir = root / "bin"
         bin_dir.mkdir()
         fake_python = "\n".join([
@@ -324,40 +328,55 @@ exec(sys.stdin.read())
             'echo "python $*" >> "$CALLS"',
             'case "$*" in',
             '    -) cat > /dev/null; [ "$FAILURE" != flash ] ;;',
-            '    *"--kinds train,eval,features") [ "$FAILURE" = signal ] && sleep 3; [ "$FAILURE" != worker ] ;;',
+            '    *"--kinds train,eval,features")',
+            '        if [ "$FAILURE" = signal ]; then touch "$CALLS.busy"; sleep 2; fi',
+            '        [ "$FAILURE" != worker ] ;;',
+            '    *_drift.py*)',
+            '        if [ "$FAILURE" = signal_drift ]; then touch "$CALLS.busy"; sleep 2; echo "drift ends" >> "$CALLS"; fi ;;',
             '    *--check-complete*) [ "$FAILURE" != incomplete ] ;;',
             "    *) exit 0 ;;",
             "esac", ""])
         fakes = {
             "slurm/env.sh": 'MAIN_PY="$VLU_PROJECT_DIR/bin/python"; VLU_STORE="$VLU_PROJECT_DIR/store"; VLU_RUNS_DIR="$VLU_STORE/runs"\n'
                             "VLU_CPUS=4; VLU_RENDER=mesa\n",
-            "slurm/check.sbatch": 'echo "check.sbatch" >> "$CALLS"; [ "$FAILURE" != check ]\n',
+            "slurm/check.sbatch": 'echo "check.sbatch $*" >> "$CALLS"; [ "$FAILURE" != check ]\n',
             "bin/python": fake_python,
-            "bin/sbatch": '#!/bin/bash\necho "sbatch $*" >> "$CALLS"\n',
+            "bin/sbatch": '#!/bin/bash\necho "sbatch $*" >> "$CALLS"; echo "4567;cluster"\n',
+            "bin/scancel": '#!/bin/bash\necho "scancel $*" >> "$CALLS"\n',
             "bin/nvidia-smi": '#!/bin/bash\necho "GPU 0: fake (MIG 4g.96gb)"\n',
         }
         for name, text in fakes.items():
             (root / name).write_text(text)
             (root / name).chmod(0o755)
         for args, successor, failure in (("", "", "none"), ("--main", "", "none"), ("", "1", "none"), ("--main", "", "signal"),
-                                         ("", "", "flash"), ("", "", "check"), ("", "", "worker"), ("", "", "incomplete")):
+                                         ("", "", "signal_drift"), ("", "", "flash"), ("", "", "check"), ("", "", "worker"),
+                                         ("", "", "incomplete")):
             calls = root / "calls.txt"
             calls.write_text("")
+            shutil.rmtree(root / "store", ignore_errors=True)
             env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "VLU_PROJECT_DIR": str(root), "CALLS": str(calls),
                    "FAILURE": failure, "SLURM_JOB_ID": "123", "VLU_SUCCESSOR": successor}
+            busy = Path(f"{calls}.busy")
+            busy.unlink(missing_ok=True)
             proc = subprocess.Popen([bash, str(root / "slurm" / "run.sbatch"), *args.split()], env=env, cwd=root,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            if failure == "signal":
-                time.sleep(1.5)
+            if failure.startswith("signal"):
+                deadline = time.time() + 30
+                while not busy.exists() and time.time() < deadline:  # the worker (or the drift step) has started
+                    time.sleep(0.05)
                 proc.send_signal(signal.SIGUSR1)  # Slurm's --signal=B:USR1@900, 15 minutes before the time limit
             out = proc.communicate(timeout=60)[0]
             log = calls.read_text()
             mode, run = ("main", "goal_s0") if args else ("calibration", "cal")
             with self.subTest(args=args, successor=successor, failure=failure):
-                self.assertEqual(proc.returncode, 0 if failure in ("none", "signal") else 1, out)
-                # The checks run on the first launch only; a failed flash-attn check stops before the others.
+                self.assertEqual(proc.returncode, 0 if failure in ("none", "signal", "signal_drift") else 1, out)
+                # The checks run on the first launch only; a failed flash-attn check stops before the others. The
+                # calibration needs only its tasks A and B usable.
                 self.assertEqual("python -\n" in log, not successor, log)
                 self.assertEqual("check.sbatch" in log, not successor and failure != "flash", log)
+                if "check.sbatch" in log:
+                    self.assertIn("check.sbatch --required A,B\n" if mode == "calibration" else "check.sbatch \n", log)
+                self.assertTrue((root / "store" / f"{mode}_cluster.tar.gz").exists(), "packed, also after a failure")
                 if failure in ("flash", "check"):
                     self.assertNotIn("vlu.worker", log, "no run after a failed check")
                     continue
@@ -368,11 +387,31 @@ exec(sys.stdin.read())
                          f"python -m vlu.worker --run {run} --check-complete", f"_report.py --run {run} --out"]
                 positions = [log.find(x) for x in order]
                 self.assertTrue(all(p >= 0 for p in positions) and positions == sorted(positions), log)
-                self.assertTrue((root / "store" / f"{mode}_cluster.tar.gz").exists())
-                if failure == "signal":
-                    self.assertIn(f"sbatch --dependency=afterany:123 --export=ALL,VLU_SUCCESSOR=1 {root}/slurm/run.sbatch --main", log)
+                if failure.startswith("signal"):
+                    queued = f"sbatch --parsable --dependency=afterany:123 --export=ALL,VLU_SUCCESSOR=1 {root}/slurm/run.sbatch{' ' + args if args else ''}\n"
+                    self.assertIn(queued, log)
+                    if failure == "signal_drift":  # queued while the drift step runs, not after it
+                        self.assertLess(log.index(queued), log.index("drift ends"), log)
+                    # the job finished before the time limit after all: the successor would only repeat the end
+                    self.assertTrue(log.endswith("scancel 4567\n"), log)
                 else:
-                    self.assertNotIn("sbatch ", log)
+                    self.assertFalse([line for line in log.splitlines() if line.startswith(("sbatch ", "scancel "))], log)
+
+    def test_wait_for_returns_the_childs_exit_code_through_a_signal(self):
+        # slurm/lib.sh's wait_for: the time-limit signal interrupts `wait` (status 138), and the child may exit
+        # while the trap runs (here: the trap sleeps past the child's end). The child's own status must come back.
+        bash = os.environ.get("VLU_TEST_BASH") or shutil.which("bash")
+        if not bash:
+            self.skipTest("bash is not available")
+        for code in (0, 5):
+            script = (f"source {ROOT}/slurm/lib.sh; trap 'sleep 0.6' USR1\n"
+                      f"(sleep 0.3; exit {code}) & child=$!\n(sleep 0.1; kill -USR1 $$) &\n"
+                      'wait_for "$child"; echo "status $?"\n'
+                      "(sleep 0.2; exit 3) & child=$!\n"  # no signal
+                      'wait_for "$child"; echo "status $?"')
+            result = subprocess.run([bash, "-c", script], text=True, capture_output=True, timeout=30)
+            with self.subTest(code=code):
+                self.assertEqual(result.stdout.split(), ["status", str(code), "status", "3"], result.stderr)
 
     def test_launcher_options_select_the_run(self):
         bash = os.environ.get("VLU_TEST_BASH") or shutil.which("bash")
@@ -391,12 +430,14 @@ exec(sys.stdin.read())
                  ("--main", "--drift-only"): f"main 0 {main} main_drift_{host} 1"}
         env = {k: v for k, v in os.environ.items() if k != "RUN"}
         for args, expected in cases.items():
-            result = subprocess.run([bash, "-c", "set -uo pipefail; VLU_STORE=/store\n" + block + show, "run_local", *args],
+            result = subprocess.run([bash, "-c", f"set -uo pipefail; VLU_STORE=/store; source {ROOT}/slurm/lib.sh\n" + block + show,
+                                     "run_local", *args],
                                     text=True, capture_output=True, env=env)
             with self.subTest(args=args):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout.strip(), expected)
-        result = subprocess.run([bash, "-c", block, "run_local", "--mian"], text=True, capture_output=True, env=env)
+        result = subprocess.run([bash, "-c", f"source {ROOT}/slurm/lib.sh\n" + block, "run_local", "--mian"], text=True,
+                                capture_output=True, env=env)
         self.assertEqual(result.returncode, 2)
         self.assertIn("unknown option --mian", result.stdout)
 

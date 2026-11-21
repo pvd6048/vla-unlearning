@@ -10,7 +10,7 @@ retain gradients, keep the top-k; (2) put LoRA adapters on them (earlier adapter
 (3) train the adapters for the stage's step budget with four gradients combined by PCGrad:
     g1 = grad[ L_FM(retain) + beta * KL(theta0 || theta)(retain) ]
     g2 = grad[ -lambda_f * L_FM(forget) ]
-    g3 = grad[ -lambda_m * KL(theta || theta0)(forget) ]                       (mismatch)
+    g3 = grad[ -lambda_m * KL(theta0 || theta)(forget) ]                       (mismatch)
     g4 = grad[ lambda_feat * (F(retain) + F(boundary)) ],  F = MSE(h_V, h_V0) + gamma * MSE(h_P, h_P0)
 At the end every adapter is merged into its base weight. theta0 = the model before the op (frozen copy).
 
@@ -23,7 +23,8 @@ Mapping to GR00T (OpenVLA -> GR00T):
            (GR00T generates actions with the DiT); score Sig = ||g_f|| / (||g_r|| + eps), top_k_reasoning
     token cross-entropy  -> flow-matching loss L_FM
     KL between policies  -> mean squared difference of the two models' predicted velocities at the same
-                            noisy action and timestep (the flow-model analogue of a KL between policies)
+                            noisy action and timestep (the flow-model analogue of a KL between policies;
+                            symmetric, so the KL's direction, theta0 first in both terms of the code, does not matter)
     h_V, h_P             -> vision tower output (post-layernorm), projector (mlp1) output
 
 Choices where the paper and the authors' code differ or say nothing (recorded in vlaforget.json):
@@ -357,7 +358,12 @@ def run(ctx: OpContext, probes: dict, recipe: Recipe, forget_task: str, retain_t
             # graph (the other order kept the LLM + DiT activations alive into the next step and stage).
             g4 = flat_grad(cfg.lambda_feat * feat_r, params, retain_graph=True)
             g1 = flat_grad(retain_fm + cfg.beta_kl * retain_kl, params)
-            out_m, mine_m, ref_m = paired_forward(model, ref, taps, ref_taps, batch["boundary"])
+            # The feature loss depends on this stage's adapters only if they sit in the vision tower or the projector:
+            # in the reasoning stage (LLM / DiT adapters, earlier ones frozen) its gradient is zero (feat_r has no
+            # graph), so the boundary pass, needed there only for the logged loss, builds no graph either. The
+            # same forward runs (same flow-matching noise drawn), so the weights are the same as with a graph.
+            with torch.set_grad_enabled(feat_r.requires_grad):
+                out_m, mine_m, ref_m = paired_forward(model, ref, taps, ref_taps, batch["boundary"])
             feat_m = feature_loss(mine_m, ref_m, cfg.gamma)
             del out_m, mine_m, ref_m  # only feat_m is needed: drop the forward's LLM + DiT graph now
             check_finite({"feat_m": feat_m}, f"VLA-Forget {stage} step {step + 1}")

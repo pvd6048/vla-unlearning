@@ -83,7 +83,9 @@ git pull
 bash scripts/run_local.sh --drift-only           # about 1-2 hours; needs about 17 GB of free disk
 ```
 
-It uses the GPUs with 32 GB free, or 16 GB once the two large items it computes first exist (training needs 44 GB; this does not train). If it reports an error, it packs the `.tar.gz` anyway; please
+It needs one GPU with 32 GB free while a Fisher (the two large items) is still to compute; GPUs with
+16 GB free extract the other models' features meanwhile, and once both Fishers exist 16 GB is enough
+(training needs 44 GB; this does not train). If it reports an error, it packs the `.tar.gz` anyway; please
 send it. If it stops, run the same command again: finished parts are kept. Afterwards,
 `bash scripts/run_local.sh` continues the calibration as normal.
 

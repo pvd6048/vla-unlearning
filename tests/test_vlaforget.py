@@ -174,6 +174,7 @@ class Held:
 
 
 held_at = {"selection": [], "step": []}  # at each stage's layer selection; at each training forward
+with_graph = []  # at each training forward: whether it builds a graph
 real_selection, real_forward = vf.selection_scores, vf.paired_forward
 selecting = [False]
 
@@ -192,6 +193,7 @@ def counting_forward(*args):
     if not selecting[0]:
         gc.collect()
         held_at["step"].append(saved[0])
+        with_graph.append(torch.is_grad_enabled())
     return real_forward(*args)
 
 
@@ -207,6 +209,9 @@ assert held_at["step"][0::3] == [0] * 21, held_at["step"]
 # Within a step, only loss-level pieces (at most 7 here) may stay while the next forward runs, never a forward's
 # network graph (26-32 here: the retain pass's, when its FM + KL backward kept the graph for the feature loss).
 assert max(held_at["step"]) <= 7, held_at["step"]
+# The boundary pass (every third) builds a graph only where the feature loss has a gradient: vision and projector
+# stages (6 + 6 steps), not the reasoning stage (9), whose LLM / DiT adapters come after the features.
+assert with_graph[0::3] == with_graph[1::3] == [True] * 21 and with_graph[2::3] == [True] * 12 + [False] * 9, with_graph
 report = json.loads((node.dir / "vlaforget.json").read_text())
 assert not any(isinstance(mod, lora.LoRALinear) for mod in model.modules()), "adapters left in the model"
 assert {n: p.requires_grad for n, p in model.named_parameters()} == flags_before, "requires_grad flags not restored"

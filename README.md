@@ -23,9 +23,10 @@ vlu/                 the experiment code (python package)
   eval/libero_client.py  CLI: LIBERO rollouts against the server (CPU, simulator env)
   drift/             drift metrics (PLAN §4): params.py (weights), extract.py (GPU: probe features,
                      Fisher), compare.py (representation + policy drift); see drift/__init__.py
-slurm/               env.sh (paths, environments), run.sbatch (a whole calibration / main run), worker.sbatch, eval.sbatch, smoke.sbatch, check.sbatch, train_op.sbatch
+slurm/               env.sh (paths, environments), lib.sh (shell functions of the launchers), run.sbatch (a whole
+                     calibration / main run), worker.sbatch, eval.sbatch, smoke.sbatch, check.sbatch, train_op.sbatch
 tests/               base-level checks without GR00T (fake models with GR00T's layout); see tests/README.md
-scripts/             setup_cluster.sh, prepare_data.py, submit.py (plan + workers), results.py (tables),
+scripts/             setup_cluster.sh, prepare_data.py, submit.py (plan + workers), check_tasks.py (tasks A-E in LIBERO), results.py (tables),
                      metrics.py (stream metrics per method: NBT, collateral, relapse, oracle gap, ...)
 ```
 
@@ -137,12 +138,14 @@ sbatch slurm/run.sbatch              # the calibration;  sbatch slurm/run.sbatch
 ```
 
 Its first launch tests that flash-attn's kernels run on the GPU, runs the base tests and the LIBERO task
-check (`slurm/check.sbatch`), writes the plan and retries earlier failures; then one worker runs the plan
-(train, eval, features; rendering with Mesa, as MIG slices have no graphics API). 15 minutes before the
-48 h limit it queues its own successor (`squeue -u $USER` shows it pending), which resumes the
-interrupted training from its checkpoint and carries on. When the plan is done: drift metrics, the
+check (`slurm/check.sbatch`; the calibration needs only A and B usable, a problem with C-E is a warning),
+writes the plan and retries earlier failures; then one worker runs the plan (train, eval, features;
+rendering with Mesa, as MIG slices have no graphics API). When the plan is done: drift metrics, the
 completeness check, and the report packed into `$VLU_STORE/<calibration|main>_cluster.tar.gz` (copy it
-off with scp; no weights). Progress meanwhile: `tail -f vlu-run-<job>.out`, or
+off with scp; no weights; also packed after a failure). 15 minutes before the 48 h limit, whatever step
+it is in, it queues its own successor (`squeue -u $USER` shows it pending), which resumes the interrupted
+training from its checkpoint, skips what is done, and computes the drift metrics and the report again; if
+the job finishes before the limit after all, it cancels that successor. Progress meanwhile: `tail -f vlu-run-<job>.out`, or
 `source slurm/env.sh && $MAIN_PY scripts/submit.py --run cal --workers none`. A report of what exists
 now, without a GPU: `$MAIN_PY scripts/calibration_report.py --run cal --out <dir>`. Do not also start a
 `submit.py --workers large` worker on the same run: one GPU's worth is the cluster cap.
@@ -158,7 +161,8 @@ sbatch --partition=gpu_large --qos=gpu_large --gres=gpu:4g.96gb:1 --cpus-per-gpu
 200 training steps of L_A in the throw-away run `smoke`, then 5 rollouts with 2 videos. Before a long
 run, also the base tests and a check that every task A–E exists in LIBERO (on a small slice, ~10 min):
 `sbatch --partition=gpu_small --qos=gpu_small --gres=gpu:1g.24gb:1 --cpus-per-gpu=6 --mem-per-gpu=24G
---time=1:00:00 --output=check-%j.out slurm/check.sbatch` (exit code 0 = all passed). From the
+--time=1:00:00 --output=check-%j.out slurm/check.sbatch` (exit code 0 = all passed; with `--required A,B` at the
+end it checks every task but needs only A and B usable). From the
 output take: `steps_per_s` and `peak_mem_gb` (train_log.jsonl), seconds per rollout (eval json),
 and look at the videos in `runs/smoke/LA/eval/final_seed0/videos/`.
 

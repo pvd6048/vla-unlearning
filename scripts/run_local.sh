@@ -12,6 +12,7 @@
 # in $VLU_STORE/<calibration|main>[_drift]_<host>/ and its .tar.gz (no model weights).
 set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../slurm/env.sh"
+source "$VLU_PROJECT_DIR/slurm/lib.sh"  # select_mode, package, finish_run
 cd "$VLU_PROJECT_DIR"
 MODE=calibration PACK=0 DRIFT_ONLY=0
 for arg in "$@"; do
@@ -22,26 +23,17 @@ for arg in "$@"; do
         *) echo "unknown option $arg (expected --main, --pack, --drift-only)"; exit 2 ;;
     esac
 done
-if [ "$MODE" = main ]; then
-    RUN="${RUN:-goal_s0}" PLAN=scripts/main_run.py REPORT=scripts/main_report.py DRIFT=scripts/main_drift.py
-else
-    RUN="${RUN:-cal}" PLAN=scripts/calibrate.py REPORT=scripts/calibration_report.py DRIFT=scripts/calibration_drift.py
-fi
+select_mode "$MODE"  # RUN PLAN REPORT DRIFT REQUIRED_TASKS
 # --drift-only packs into its own directory: the tarball and worker logs of the run itself stay as they are
 OUT="$VLU_STORE/${MODE}$([ "$DRIFT_ONLY" = 1 ] && echo _drift)_$(hostname)"
 mkdir -p "$OUT"
 exec > >(tee -a "$OUT/run_local.log") 2>&1
 echo "=== $(date)  $MODE$([ "$DRIFT_ONLY" = 1 ] && echo ", drift only"): run $RUN  output $OUT"
 
-package() {
-    cp -f "$VLU_PROJECT_DIR/setup.log" "$OUT/" 2>/dev/null || true
-    "$MAIN_PY" "$REPORT" --run "$RUN" --out "$OUT" || echo "WARNING: report failed"
-    tar czf "$OUT.tar.gz" -C "$(dirname "$OUT")" "$(basename "$OUT")"
-    echo "=== $(date)  done. Please send back: $OUT.tar.gz ($(du -h "$OUT.tar.gz" | cut -f1))"
-}
 if [ "$PACK" = 1 ]; then
     [ -f "$OUT/environment.txt" ] || nvidia-smi > "$OUT/environment.txt" 2>&1
     package
+    echo "Please send back: $OUT.tar.gz"
     exit 0
 fi
 
@@ -83,27 +75,20 @@ gpu_render_ok() {
         render_test gpu "$index" >> "$OUT/environment.txt" 2>&1 || return 1
     done
 }
-# Every task A-E exists in LIBERO-Goal with its training instruction and enough initial states (make_env
-# checks the instruction): found now, not at the first eval of a task, hours into the run. The calibration
-# uses only A and B: there it is a warning, an early one for the main run. Returns 1 = stop.
+# Every task A-E exists in LIBERO-Goal with its training instruction and enough initial states
+# (scripts/check_tasks.py): found now, not at the first eval of a task, hours into the run. The tasks the
+# run evaluates (REQUIRED_TASKS; the calibration: A and B) must be usable; for the others it is a warning
+# (an early one for the main run). Returns 1 = stop.
 task_preflight() {
     if VLU_RENDER_DEVICE=$([ "$VLU_RENDER" = gpu ] && nvidia-smi --query-gpu=index --format=csv,noheader | head -1 || echo 0) \
-     bash -c 'source slurm/env.sh; CUDA_VISIBLE_DEVICES="" MUJOCO_EGL_DEVICE_ID=$VLU_RENDER_DEVICE "$SIM_PY" - <<"PY"
-import sys
-sys.path.insert(0, ".")
-from vlu.config import RECIPE
-from vlu.eval.libero_client import make_env
-from vlu.tasks import TASKS
-for letter in TASKS:
-    env, init_states = make_env(letter)
-    env._env.close()  # its MuJoCo / EGL render context: one open at a time
-    assert len(init_states) >= RECIPE.eval_episodes, f"task {letter}: {len(init_states)} initial states"
-    print(f"task {letter} OK: {TASKS[letter]}, {len(init_states)} initial states")
-PY' >> "$OUT/environment.txt" 2>&1; then
+       REQUIRED_TASKS="$REQUIRED_TASKS" bash -c 'source slurm/env.sh
+CUDA_VISIBLE_DEVICES="" MUJOCO_EGL_DEVICE_ID=$VLU_RENDER_DEVICE "$SIM_PY" scripts/check_tasks.py ${REQUIRED_TASKS:+--required "$REQUIRED_TASKS"}' \
+       >> "$OUT/environment.txt" 2>&1; then
+        grep "^WARNING" "$OUT/environment.txt" | tail -5
         return 0
     fi
-    if [ "$MODE" = main ]; then echo "ERROR: a task of vlu/tasks.py is not usable in LIBERO (see environment.txt)"; return 1; fi
-    echo "WARNING: a task of vlu/tasks.py is not usable in LIBERO (see environment.txt); the main run would stop here"
+    echo "ERROR: a task this run evaluates is not usable in LIBERO (see environment.txt)"
+    return 1
 }
 if [ "$DRIFT_ONLY" = 0 ]; then
     if gpu_render_ok; then export VLU_RENDER=gpu
@@ -143,18 +128,21 @@ fi
 #    (round 2's peaks: 33.4 GiB for learning, GA and GradDiff alike, so a second graph (GradDiff's retain
 #    batch) does not raise it; 39.5 GiB for NPO with its frozen reference, which NPO-RT (GradDiff's
 #    graphs + NPO's reference) should match; CALIBRATION.md says 44 GB). --drift-only: GPUs with
-#    >= FEATURES_FREE_MIB free extract features, the others idle. Its heaviest item is a Fisher: the
-#    weights (~9 GiB), one fp32 gradient and one fp32 sum (~6 GiB each), a training batch's activations
-#    (~6 GiB), no optimizer state: measured 28.6 GiB allocated (calibration, Fisher of B at LA/LB). Features
-#    alone peak at 12.1 GiB, so once no Fisher is left to compute, GPUs with >= 16000 MiB free extract
-#    them too (vlu.drift.extract prints its peak) ---
+#    >= FISHER_FREE_MIB free extract features and Fishers, those with >= FEATURES_FREE_MIB only the features
+#    items without a Fisher left to compute (worker --no-fisher), the others idle. A Fisher: the weights
+#    (~9 GiB), one fp32 gradient and one fp32 sum (~6 GiB each), a training batch's activations (~6 GiB), no
+#    optimizer state: measured 28.6 GiB allocated (calibration, Fisher of B at LA/LB). Features alone: 12.1 GiB
+#    (vlu.drift.extract prints its peak). A GPU for a Fisher is needed only while one is left to compute ---
 TRAIN_FREE_MIB=44000
-FEATURES_FREE_MIB=32000
-if [ "$DRIFT_ONLY" = 1 ] && [ "$("$MAIN_PY" -m vlu.worker --run "$RUN" --fisher-left)" = 0 ]; then
-    FEATURES_FREE_MIB=16000
-    echo "no Fisher left to compute: GPUs with $FEATURES_FREE_MIB MiB free extract features"
+FISHER_FREE_MIB=32000
+FEATURES_FREE_MIB=16000
+if [ "$DRIFT_ONLY" = 1 ]; then
+    FISHER_LEFT=$("$MAIN_PY" -m vlu.worker --run "$RUN" --fisher-left)
+    if [ "$FISHER_LEFT" = 0 ]; then NEED_MIB=$FEATURES_FREE_MIB; else NEED_MIB=$FISHER_FREE_MIB; fi  # a crash: the safe bar
+    echo "Fisher files left to compute: ${FISHER_LEFT:-unknown}"
+else
+    NEED_MIB=$TRAIN_FREE_MIB
 fi
-NEED_MIB=$([ "$DRIFT_ONLY" = 1 ] && echo "$FEATURES_FREE_MIB" || echo "$TRAIN_FREE_MIB")
 mapfile -t GPUS < <(nvidia-smi --query-gpu=index,memory.free,memory.used --format=csv,noheader,nounits)
 export VLU_EVAL_WORKERS=$(( VLU_CPUS / ${#GPUS[@]} - 1 > 1 ? VLU_CPUS / ${#GPUS[@]} - 1 : 1 ))
 if ! printf '%s\n' "${GPUS[@]}" | awk -F', ' -v need="$NEED_MIB" '$2 >= need {ok = 1} END {exit !ok}'; then
@@ -162,9 +150,10 @@ if ! printf '%s\n' "${GPUS[@]}" | awk -F', ' -v need="$NEED_MIB" '$2 >= need {ok
          "(nvidia-smi: ${GPUS[*]}); please stop other jobs on the GPUs"
     package; exit 1
 fi
-worker_kinds() {  # worker_kinds <free MiB>: what a GPU's worker runs; nothing = no worker
+worker_kinds() {  # worker_kinds <free MiB>: what a GPU's worker runs (its options); nothing = no worker
     if [ "$DRIFT_ONLY" = 1 ]; then
-        if [ "$1" -ge "$FEATURES_FREE_MIB" ]; then echo features; fi
+        if [ "$1" -ge "$FISHER_FREE_MIB" ]; then echo features
+        elif [ "$1" -ge "$FEATURES_FREE_MIB" ]; then echo "features --no-fisher"; fi
     elif [ "$1" -ge "$TRAIN_FREE_MIB" ]; then
         echo train,eval,features
     else
@@ -179,7 +168,8 @@ for line in "${GPUS[@]}"; do
     if [ -z "$kinds" ]; then echo "GPU $index (${free} MiB free): not used"; continue; fi
     [ "$used" -gt 1000 ] && echo "WARNING: GPU $index already has ${used} MiB in use by another program; a job started there later can still run out of memory"
     echo "GPU $index (${free} MiB free): $kinds, $VLU_EVAL_WORKERS simulator processes per eval"
-    CUDA_VISIBLE_DEVICES="$index" "$MAIN_PY" -m vlu.worker --run "$RUN" --kinds "$kinds" --wait \
+    # shellcheck disable=SC2086  # kinds: the item kinds, then the worker's options
+    CUDA_VISIBLE_DEVICES="$index" "$MAIN_PY" -m vlu.worker --run "$RUN" --kinds $kinds --wait \
         > "$OUT/worker_gpu$index.log" 2>&1 &
     PIDS+=($!)
     sleep 30  # start one at a time (each loads a 3B model)
@@ -189,31 +179,7 @@ for pid in "${PIDS[@]}"; do
     wait "$pid" || WORKERS_OK=0
 done
 
-# 6. Drift metrics from the checkpoints and features that exist (on the GPU with the most free memory;
-#    CPU threads for the parts on the CPU); exit code 3 = only drifts left out (nodes without weights or
-#    features). A drift failure is reported, not fatal, except with --drift-only, whose only result they
-#    are. Then the report --------------------------------------------------------------------------------
-"$MAIN_PY" scripts/submit.py --run "$RUN" --workers none
+# 6. Drift metrics (on the GPU with the most free memory), completeness, report: finish_run (slurm/lib.sh) ----
 DRIFT_GPU=$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits | sort -t, -k2 -nr | head -1 | cut -d, -f1)
-CUDA_VISIBLE_DEVICES="$DRIFT_GPU" OMP_NUM_THREADS="$VLU_CPUS" "$MAIN_PY" "$DRIFT" --run "$RUN"
-DRIFT_STATUS=$?
-DRIFT_LOGS="see summary.md; logs in $VLU_RUNS_DIR/$RUN/drift_report/, packed as drift/"
-if [ "$DRIFT_ONLY" = 1 ]; then
-    if [ "$DRIFT_STATUS" != 0 ] && [ "$DRIFT_STATUS" != 3 ]; then
-        echo "ERROR: the drift metrics failed ($DRIFT_LOGS)"; package; exit 1
-    fi
-    # Left out may only be models not trained yet: the features of every trained one must exist.
-    if ! "$MAIN_PY" -m vlu.worker --run "$RUN" --kinds features --check-complete --ready-only; then
-        echo "ERROR: the drift features of some trained models are missing (logs in failed/)"; package; exit 1
-    fi
-    echo "drift only: training and evals were not run; models not trained yet are left out of the drift metrics"
-else
-    if [ "$DRIFT_STATUS" != 0 ]; then echo "WARNING: some drift metrics are missing ($DRIFT_LOGS)"; fi
-    if ! "$MAIN_PY" -m vlu.worker --run "$RUN" --check-complete; then
-        echo "ERROR: the experiment did not complete every planned item"; package; exit 1
-    fi
-fi
-if [ "$WORKERS_OK" = 0 ]; then
-    echo "ERROR: a worker exited unsuccessfully"; package; exit 1
-fi
-package
+finish_run "$DRIFT_ONLY" "$WORKERS_OK" || exit 1
+echo "Please send back: $OUT.tar.gz"

@@ -6,6 +6,7 @@
 #   sbatch <resources> slurm/worker.sbatch <run> <kinds, e.g. train,eval>
 set -euo pipefail
 source "${VLU_PROJECT_DIR:?export VLU_PROJECT_DIR (scripts/submit.py does)}/slurm/env.sh"
+source "$VLU_PROJECT_DIR/slurm/lib.sh"
 
 RUN="$1"; KINDS="$2"
 echo "host $(hostname)  job ${SLURM_JOB_ID:-none}  run $RUN  kinds $KINDS  cpus $VLU_CPUS"
@@ -23,8 +24,5 @@ trap queue_successor USR1
 "$MAIN_PY" -m vlu.worker --run "$RUN" --kinds "$KINDS" &
 WORKER=$!
 set +e
-while true; do   # a signal interrupts `wait`; keep waiting until the worker has really exited
-    wait "$WORKER"; STATUS=$?
-    kill -0 "$WORKER" 2>/dev/null || break
-done
-exit "$STATUS"
+wait_for "$WORKER"  # through the USR1 trap (slurm/lib.sh)
+exit $?

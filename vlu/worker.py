@@ -101,12 +101,22 @@ def is_ready(run: str, item: dict) -> bool:
     return node.parent.done if item["kind"] == "train" else node.done
 
 
+def missing_fisher(run: str, item: dict) -> list[str]:
+    """The tasks whose Fisher file a features item still has to compute."""
+    node = Node.from_path(run, item["node"])
+    return [t for t in item.get("fisher", []) if not fisher_path(node, t, item["weights"]).exists()]
+
+
 def fisher_left(run: str) -> int:
-    """How many Fisher files the features items that can run now (their model is trained) still need. A
-    Fisher takes ~29 GiB of GPU memory, features alone ~12 GiB: scripts/run_local.sh --drift-only lets
-    smaller GPUs extract features when none is left."""
-    return sum(not fisher_path(Node.from_path(run, i["node"]), t, i["weights"]).exists()
-               for i in load_plan(run) if i["kind"] == "features" and is_ready(run, i) for t in i.get("fisher", []))
+    """How many Fisher files the features items that can run now (their model is trained) still need:
+    scripts/run_local.sh --drift-only needs a GPU large enough for a Fisher (~29 GiB) only while one is left."""
+    return sum(len(missing_fisher(run, i)) for i in load_plan(run) if i["kind"] == "features" and is_ready(run, i))
+
+
+def fits(run: str, item: dict, no_fisher: bool) -> bool:
+    """Whether a worker may run the item. no_fisher: a GPU too small for a Fisher (~29 GiB; features alone
+    ~12 GiB) leaves the features items that still compute one to the other workers."""
+    return not (no_fisher and item["kind"] == "features" and missing_fisher(run, item))
 
 
 def require_complete(run: str, kinds: set[str] | None = None, ready_only: bool = False) -> None:
@@ -285,6 +295,8 @@ def main():
                         help="check the plan (the items of --kinds) without starting work")
     parser.add_argument("--ready-only", action="store_true",
                         help="with --check-complete: only the items whose prerequisites are done, optional ones included")
+    parser.add_argument("--no-fisher", action="store_true",
+                        help="leave the features items that still compute a Fisher to other workers (a small GPU)")
     parser.add_argument("--fisher-left", action="store_true",
                         help="print how many Fisher files the ready features items still need, and exit")
     args = parser.parse_args()
@@ -303,14 +315,16 @@ def main():
             require_complete(args.run, kinds)
             print("nothing left to do", flush=True)
             return
-        item = next((i for i in pending if is_ready(args.run, i) and take(args.run, i)), None)
+        item = next((i for i in pending if is_ready(args.run, i) and fits(args.run, i, args.no_fisher) and take(args.run, i)), None)
         if item is None:
             # Three idle checks a minute apart, so a worker between two items (or still starting) does
             # not look idle.
             idle_checks = 0 if args.wait and someone_working(args.run) else idle_checks + 1
             if not args.wait or idle_checks >= 3:
+                too_big = sum(not fits(args.run, i, args.no_fisher) for i in pending)
                 print(f"{len(pending)} item(s) left, but none is ready and free (they wait for other workers, "
-                      f"or for a failed item); exiting", flush=True)
+                      f"or for a failed item{f'; {too_big} compute a Fisher, which this worker leaves to others' if too_big else ''}); "
+                      "exiting", flush=True)
                 if someone_working(args.run, verified=True):
                     # Other workers are still on the plan (e.g. an eval-only Slurm worker while the trainer
                     # trains): leaving the rest to them is not a failure. Only if their jobs are known to

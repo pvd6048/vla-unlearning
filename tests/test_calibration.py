@@ -30,15 +30,21 @@ ENV = {**os.environ, "PYTHONPATH": str(ROOT)}
 STUB = r'''
 import sys, time, pathlib
 import vlu.worker as w
+from vlu.drift.paths import features_path, fisher_path
 from vlu.nodes import Node
 def command(run, item):
     node = Node.from_path(run, item["node"])
-    files = [node.weights_path] if item["kind"] == "train" else [node.eval_dir(item["weights"], item["seed"]) / f"{t}.json" for t in w.eval_todo(run, item)]
+    if item["kind"] == "train":
+        files = [node.weights_path]
+    elif item["kind"] == "features":
+        files = [features_path(node, item["weights"])] + [fisher_path(node, t, item["weights"]) for t in w.missing_fisher(run, item)]
+    else:
+        files = [node.eval_dir(item["weights"], item["seed"]) / f"{t}.json" for t in w.eval_todo(run, item)]
     return [sys.executable, "-c", "import pathlib, sys, time; time.sleep(1.5)\nfor f in sys.argv[1:]:\n p = pathlib.Path(f); p.parent.mkdir(parents=True, exist_ok=True); p.write_text('{}')", *map(str, files)]
 w.command = command
 real_sleep = time.sleep
 w.time.sleep = lambda s: real_sleep(0.5)  # poll faster than the real 60 s
-sys.argv = ["worker", "--run", "two", "--kinds", sys.argv[1], *sys.argv[2:]]
+sys.argv = ["worker", "--run", "two", "--kinds", sys.argv[1], *sys.argv[2:]]  # a later --run wins
 w.main()
 '''
 run_seed("two", 0)
@@ -82,6 +88,35 @@ fisher_path(Node.from_path("fl", "LA/LB"), "B").write_text("x")
 left = subprocess.run([sys.executable, "-m", "vlu.worker", "--run", "fl", "--fisher-left"], env=ENV, capture_output=True, text=True)
 assert left.stdout.strip() == "0" and left.returncode == 0, left.stdout + left.stderr
 print("fisher_left: counts the missing Fisher files of trained models only (worker --fisher-left)")
+
+# run_local.sh --drift-only: a GPU too small for a Fisher runs a --no-fisher worker. It leaves the features items
+# that still compute a Fisher to the large GPU's worker and extracts the others; alone, it reports what it left.
+from vlu.drift.paths import features_path as fpath  # noqa: E402
+nf = [{"kind": "features", "node": n, "weights": "final", "fisher": fisher, "optional": True}
+      for n, fisher in (("LA/LB", ["A", "B"]), ("", []), ("LA", []), ("LA/LB/UB-purge", []))]
+(RUNS_DIR / "nf").mkdir()
+write_plan("nf", nf)
+for path in ("LA", "LA/LB", "LA/LB/UB-purge"):
+    Node.from_path("nf", path).weights_path.parent.mkdir(parents=True, exist_ok=True)
+    Node.from_path("nf", path).weights_path.write_text("x")
+alone = subprocess.run([sys.executable, "-c", STUB, "features", "--no-fisher", "--run", "nf"], env=ENV, capture_output=True, text=True, timeout=120)
+# (the calibration's features are optional items: the worker exits 0; finish_run's --check-complete --ready-only fails)
+assert "1 compute a Fisher, which this worker leaves to others" in alone.stdout and "not done: features:LA/LB:final" in alone.stdout, \
+    alone.stdout + alone.stderr
+assert "start features:LA/LB:final" not in alone.stdout and fisher_left("nf") == 2, alone.stdout
+assert all(fpath(Node.from_path("nf", n), "final").exists() for n in ("", "LA", "LA/LB/UB-purge")), alone.stdout
+for n in ("", "LA", "LA/LB/UB-purge"):  # again, with both workers: the small one starts first and must still leave LA/LB alone
+    fpath(Node.from_path("nf", n), "final").unlink()
+small = subprocess.Popen([sys.executable, "-c", STUB, "features", "--no-fisher", "--wait", "--run", "nf"], env=ENV,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+time.sleep(0.5)
+large = subprocess.Popen([sys.executable, "-c", STUB, "features", "--wait", "--run", "nf"], env=ENV,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+out_s, out_l = small.communicate(timeout=120)[0], large.communicate(timeout=120)[0]
+assert small.returncode == 0 and large.returncode == 0, (out_s, out_l)
+assert "start features:LA/LB:final" in out_l and "start features:LA/LB:final" not in out_s and "start features:" in out_s, (out_s, out_l)
+assert fisher_left("nf") == 0 and all(status("nf", i) == "done" for i in load_plan("nf"))
+print("workers: a --no-fisher worker leaves the Fisher item to the large GPU's worker and extracts the rest")
 
 # Many workers racing to take over the same stale claim: exactly one may win.
 race_item = {"kind": "train", "node": "LD", "save_at": []}

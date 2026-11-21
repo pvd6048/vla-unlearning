@@ -146,7 +146,8 @@ multiplied by 0.19–0.43.
 Using I_retain keeps both steps as they were in the paper's experiments: at s = 1/100, I_full is I_retain
 up to 1%, wherever the retained data matter. α then means the same at every U op of a stream. The
 authors' ASSD code also takes the reference importance from the retain loader.
-`ssd@ssd_alpha=5+ssd_reference=all` stays in the calibration as the literal version.
+`ssd_reference=all` (the literal version) stays in the code, but calibration round 3 no longer runs it:
+at the calibration's share s = 0.43 it can select nothing at α = 5 (above), so its outcome is known.
 
 **The first calibration's SSD runs** computed the literal D differently from the official code. Each
 batch mixed the kept tasks (drawn uniformly, s = 1/2), so the forget term entered I_full with a weight

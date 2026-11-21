@@ -35,9 +35,6 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 
 # GPU numbering: nvidia-smi / EGL order everywhere (CUDA's default puts the fastest GPU first).
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-# PyTorch's allocator grows its memory segments instead of caching fixed blocks: less fragmentation (a
-# VLA-Forget run ran out of memory with 2 GiB reserved but unusable), same numbers. A value set before wins.
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 # MuJoCo rendering (EGL). VLU_RENDER=mesa (default): Mesa's software EGL, needed on the cluster's MIG
 # slices, which have no graphics API. VLU_RENDER=gpu: the NVIDIA EGL driver of a full GPU
