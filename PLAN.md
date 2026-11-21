@@ -33,6 +33,8 @@ During continual learning on a VLA (NVIDIA GR00T), **incidental forgetting** of 
 
 GA, NPO, SSD and SalUn are VLA-Forget's baselines. VLA-Forget itself needs porting from OpenVLA, so it is **week 2**.
 
+**GA and Gradient Difference are dropped** after the calibration on GR00T (rounds 1-2): at no learning rate did they forget B while keeping A (GA: 1e-7 forgot nothing, 3e-7 lost A; GradDiff 3e-7 was halfway on both), the collapse anticipated under Risks. Their code stays (`vlu/ops.py`), and their calibration results are reported as such. NPO-RT (NPO plus GradDiff's retain term, the NPO authors' default) is calibrated instead.
+
 Every unlearning method gets the **same step budget per U op**. "Loss" here means GR00T's flow-matching loss; GR00T has no token cross-entropy.
 
 **Day by day:**
@@ -209,7 +211,7 @@ Everything is computed from one **success matrix** `c[i,k]`: the success rate (S
 | # | Item | Plan section |
 |---|---|---|
 | 1 | Taxonomy of drifts in CL and unlearning for VLAs, and how to measure each | §4 |
-| 2 | **Core:** from a common checkpoint, run a CL branch (e.g. ER) and a CL + unlearning branch (e.g. GA). Are the drifts similar? Do they point the same way? | §5 |
+| 2 | **Core:** from a common checkpoint, run a CL branch (e.g. ER) and a CL + unlearning branch (e.g. SalUn). Are the drifts similar? Do they point the same way? | §5 |
 | 3 | Vary the CL and unlearning methods. Are the correlations consistent? Which pairs "sync"? | §6 |
 | 4 | Incidental vs. intentional *relearning* after unlearning. Can we predict which tasks recover? | §7 |
 | 5 | A new VLA unlearning benchmark (L/U op streams such as `L_A L_B L_C U_B L_D L_E U_E`) | §8 |
@@ -363,7 +365,7 @@ The same infrastructure, packaged as **L/U op streams over LIBERO**.
 |---|---|---|
 | **P0 Infra** | GR00T N1.6 + LIBERO environment, parallel rollout eval, op-stream runner with a checkpoint cache, probe-set builder, drift-metric library (§4) with noise-floor controls | Single-task LIBERO-Goal SR close to published; seed-noise floor measured |
 | **P1 Reproduce CL** | Sequential FT vs. ER for GR00T on LIBERO-Spatial and LIBERO-Goal | NBT matches the CL paper; confirms which F-variant actually forgets |
-| **P2 Core pilot (item 2)** | Branches C/F/U/UF for one target task with ER + GA, then repeated for 3 target tasks × 3 seeds | A clear yes or no on alignment versus the noise floor → **go/no-go for the "exploit" direction** |
+| **P2 Core pilot (item 2)** | Branches C/F/U/UF for one target task with ER + SalUn, then repeated for 3 target tasks × 3 seeds | A clear yes or no on alignment versus the noise floor → **go/no-go for the "exploit" direction** |
 | **P3 Grid (item 3)** | CL × unlearning matrix | Alignment matrix and efficacy |
 | **P4 Relearning (item 4)** | Relapse and recovery runs, predictor analysis | Correlation results |
 | **P5 Exploit / benchmark** | If aligned: forgetting-subspace-guided CL and unlearning. Either way: release the S1–S7 benchmark | Paper |
@@ -374,7 +376,7 @@ The same infrastructure, packaged as **L/U op streams over LIBERO**.
 
 - **No measurable forgetting** (VLAs resist it): handled by the F-variants in §5.2, and a null result is still informative.
 - **Cosine similarity is meaningless in raw high dimensions:** use per-layer comparisons, subspace angles and noise-floor normalization. Report *relative to seed noise* only.
-- **GA on `L_FM` collapses the policy:** unlearning drift would then be dominated by generic destruction. Hence the generic-drift control and bounded methods (NPO, task-vector negation, Gradient Difference).
+- **GA on `L_FM` collapses the policy:** unlearning drift would then be dominated by generic destruction. Hence the generic-drift control and bounded methods (NPO, task-vector negation, Gradient Difference). Observed in the calibration: GA and Gradient Difference lost the retained task at every rate that forgot B, and are dropped.
 - **Mode connectivity and permutation symmetry:** these are not an issue, because all branches share θ₀ and fine-tuning stays in the same basin. We confirm this with linear-interpolation loss curves.
 - **Zero-shot base SR on LIBERO tasks:** the oracle, not 0%, is the unlearning reference.
 

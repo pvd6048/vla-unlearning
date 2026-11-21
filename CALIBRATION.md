@@ -83,12 +83,12 @@ git pull
 bash scripts/run_local.sh --drift-only           # about 1-2 hours; needs about 17 GB of free disk
 ```
 
-It uses only the GPUs with 32 GB free (training needs 44 GB; this does not train). If it reports an error, it packs the `.tar.gz` anyway; please
+It uses the GPUs with 32 GB free, or 16 GB once the two large items it computes first exist (training needs 44 GB; this does not train). If it reports an error, it packs the `.tar.gz` anyway; please
 send it. If it stops, run the same command again: finished parts are kept. Afterwards,
 `bash scripts/run_local.sh` continues the calibration as normal.
 
 If you ran it before 12 November 2026: running it again extracts every model's features again (about
-1 hour; they are now stored in float32, which does not overflow). The old files, `drift/features.pt` in
+20-60 minutes, depending on how many GPUs have 16 GB free; they are now stored in float32, which does not overflow). The old files, `drift/features.pt` in
 each model's folder, are no longer used; you can delete them (about 1.5 GB) with
 
 ```bash

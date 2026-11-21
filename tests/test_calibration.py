@@ -63,6 +63,26 @@ assert not someone_working("two") and try_claim(claim), "the dead worker's claim
 assert someone_working("two") and not try_claim(claim), "our own live claim must hold"
 print("claims: a dead local worker's claim is taken over, a live one holds")
 
+# run_local.sh --drift-only: a Fisher still to compute (on a trained model) keeps the 32 GB bar for features workers.
+from vlu.drift.paths import fisher_path  # noqa: E402
+from vlu.worker import fisher_left, write_plan  # noqa: E402
+fl = [{"kind": "features", "node": "LA/LB", "weights": "final", "fisher": ["A", "B"], "optional": True},
+      {"kind": "features", "node": "LA/LB/LC", "weights": "final", "fisher": ["C"], "optional": True},  # not trained
+      {"kind": "train", "node": "LA/LB"}]
+(RUNS_DIR / "fl").mkdir()
+write_plan("fl", fl)
+assert fisher_left("fl") == 0, "LA/LB is not trained yet: its Fisher cannot run now"
+for path in ("LA", "LA/LB"):
+    Node.from_path("fl", path).weights_path.parent.mkdir(parents=True, exist_ok=True)
+    Node.from_path("fl", path).weights_path.write_text("x")
+assert fisher_left("fl") == 2
+f = fisher_path(Node.from_path("fl", "LA/LB"), "A"); f.parent.mkdir(parents=True); f.write_text("x")
+assert fisher_left("fl") == 1
+fisher_path(Node.from_path("fl", "LA/LB"), "B").write_text("x")
+left = subprocess.run([sys.executable, "-m", "vlu.worker", "--run", "fl", "--fisher-left"], env=ENV, capture_output=True, text=True)
+assert left.stdout.strip() == "0" and left.returncode == 0, left.stdout + left.stderr
+print("fisher_left: counts the missing Fisher files of trained models only (worker --fisher-left)")
+
 # Many workers racing to take over the same stale claim: exactly one may win.
 race_item = {"kind": "train", "node": "LD", "save_at": []}
 race = claim_dir("two", race_item); race.mkdir(parents=True)
@@ -345,7 +365,7 @@ out = Path(tempfile.mkdtemp()) / "report"
 subprocess.run([sys.executable, str(ROOT / "scripts" / "calibration_report.py"), "--run", "cal", "--out", str(out)], env=ENV, check=True)
 summary = (out / "summary.md").read_text()
 for needed in ["## Learning", "## Speed and memory per op", "## Unlearning variants", "## Stream metrics", "oracle_gap",
-               "ga@unlearn_lr=3e-5", "dampened_fraction", "| failed |"]:
+               "npo_rt@unlearn_lr=3e-6", "dampened_fraction", "| failed |"]:
     assert needed in summary, needed
 assert "CUDA out of memory" in next((out / "failed").iterdir()).read_text()
 assert (out / "nodes" / "LA" / "train_log.jsonl").exists() and (out / "nodes" / "base" / "eval").exists()
@@ -379,15 +399,15 @@ assert "Stale" not in summary and (out / "drift" / "params.csv").exists()
 used = json.loads((drift / "inputs.json").read_text())
 # LA, LA/LB and the variants' weights, but purge's (its weights are LA/LB's) and the failed one's
 assert "LA/LB/weights.safetensors" in used and len(used) == 2 + len(VARIANTS) - 2, sorted(used)
-retrained = Node.from_path("cal", "LA/LB/UB-ga@unlearn_lr=1e-7").weights_path
+retrained = Node.from_path("cal", "LA/LB/UB-npo@unlearn_lr=1e-7").weights_path
 os.utime(retrained, ns=(0, 0))  # rewritten since the report
-Node.from_path("cal", "LA/LB/UB-ga@unlearn_lr=3e-7").weights_path.unlink()
+Node.from_path("cal", "LA/LB/UB-npo@unlearn_lr=3e-7").weights_path.unlink()
 features = features_path(Node.from_path("cal", "LA"))
 features.parent.mkdir()
 features.write_text("x")  # extracted since
 report()
 stale = next(line for line in (out / "summary.md").read_text().splitlines() if "Stale" in line)
-assert ("changed or removed since: LA/LB/UB-ga@unlearn_lr=1e-7/weights.safetensors, LA/LB/UB-ga@unlearn_lr=3e-7/weights.safetensors; "
+assert ("changed or removed since: LA/LB/UB-npo@unlearn_lr=1e-7/weights.safetensors, LA/LB/UB-npo@unlearn_lr=3e-7/weights.safetensors; "
         f"new since: LA/drift/{features.name}.") in stale, stale
 print("report: the drift summary goes into summary.md, its files into drift/ (logs also without a summary), "
       "nothing of an earlier pack; a stale drift report is marked")

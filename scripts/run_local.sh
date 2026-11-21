@@ -145,10 +145,15 @@ fi
 #    graphs + NPO's reference) should match; CALIBRATION.md says 44 GB). --drift-only: GPUs with
 #    >= FEATURES_FREE_MIB free extract features, the others idle. Its heaviest item is a Fisher: the
 #    weights (~9 GiB), one fp32 gradient and one fp32 sum (~6 GiB each), a training batch's activations
-#    (~6 GiB), no optimizer state: measured 28.6 GiB allocated (calibration, Fisher of B at LA/LB; 12.1 GiB
-#    for features alone; vlu.drift.extract prints its peak) ---
+#    (~6 GiB), no optimizer state: measured 28.6 GiB allocated (calibration, Fisher of B at LA/LB). Features
+#    alone peak at 12.1 GiB, so once no Fisher is left to compute, GPUs with >= 16000 MiB free extract
+#    them too (vlu.drift.extract prints its peak) ---
 TRAIN_FREE_MIB=44000
 FEATURES_FREE_MIB=32000
+if [ "$DRIFT_ONLY" = 1 ] && [ "$("$MAIN_PY" -m vlu.worker --run "$RUN" --fisher-left)" = 0 ]; then
+    FEATURES_FREE_MIB=16000
+    echo "no Fisher left to compute: GPUs with $FEATURES_FREE_MIB MiB free extract features"
+fi
 NEED_MIB=$([ "$DRIFT_ONLY" = 1 ] && echo "$FEATURES_FREE_MIB" || echo "$TRAIN_FREE_MIB")
 mapfile -t GPUS < <(nvidia-smi --query-gpu=index,memory.free,memory.used --format=csv,noheader,nounits)
 export VLU_EVAL_WORKERS=$(( VLU_CPUS / ${#GPUS[@]} - 1 > 1 ? VLU_CPUS / ${#GPUS[@]} - 1 : 1 ))

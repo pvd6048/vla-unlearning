@@ -4,10 +4,12 @@ import ast
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -260,6 +262,117 @@ exec(sys.stdin.read())
                                     text=True, capture_output=True)
             with self.subTest(drift_only=drift_only):
                 self.assertEqual(result.stdout.strip(), expected, result.stderr)
+        # No Fisher left (the bar drops to 16000 MiB): the guide's GPUs of 2026-11-11 (26299 and 24095 MiB free,
+        # shared with other programs) extract features too; 12000 is too little for features (12.1 GiB peak).
+        result = subprocess.run([bash, "-c", f"TRAIN_FREE_MIB=44000; FEATURES_FREE_MIB=16000; DRIFT_ONLY=1\n{function}"
+                                 'echo "$(worker_kinds 43934)|$(worker_kinds 26299)|$(worker_kinds 24095)|$(worker_kinds 12000)"'],
+                                text=True, capture_output=True)
+        self.assertEqual(result.stdout.strip(), "features|features|features|", result.stderr)
+
+    def test_launcher_lowers_the_features_bar_only_without_fisher(self):
+        # The real block of step 5, with a stand-in for "python -m vlu.worker --fisher-left".
+        bash = os.environ.get("VLU_TEST_BASH") or shutil.which("bash")
+        if not bash:
+            self.skipTest("bash is not available")
+        source = (ROOT / "scripts" / "run_local.sh").read_text()
+        start = source.index("FEATURES_FREE_MIB=32000\n")
+        block = source[start:source.index("\nfi\n", start) + 4]
+        for drift_only, left, expected in ((1, "0", "16000"), (1, "2", "32000"), (0, "0", "32000"), (1, "Traceback", "32000")):
+            fake = f"echo {left}"  # MAIN_PY: prints what --fisher-left would; a crash keeps the safe bar
+            result = subprocess.run([bash, "-c", f"MAIN_PY=fake; RUN=cal; DRIFT_ONLY={drift_only}\nfake() {{ {fake}; }}\n{block}"
+                                     'echo "bar $FEATURES_FREE_MIB"'], text=True, capture_output=True)
+            with self.subTest(drift_only=drift_only, left=left):
+                self.assertEqual(result.stdout.strip().splitlines()[-1], f"bar {expected}", result.stdout + result.stderr)
+
+    def test_cluster_job_matches_the_large_pool(self):
+        # slurm/run.sbatch requests what scripts/submit.py's gpu_large workers request (the facility's template),
+        # runs the same item kinds, and re-queues itself as they do (--signal=B:USR1@900).
+        source = (ROOT / "slurm" / "run.sbatch").read_text()
+        directives = {line.split(None, 1)[1] for line in source.splitlines() if line.startswith("#SBATCH ")}
+        submit_tree = ast.parse((ROOT / "scripts" / "submit.py").read_text())
+        pools = next(ast.literal_eval(n.value) for n in submit_tree.body
+                     if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "POOLS")
+        self.assertLessEqual(set(pools["large"]["sbatch"]) | {"--signal=B:USR1@900"}, directives)
+        self.assertIn(f'--kinds {pools["large"]["kinds"]} &', source)
+        bash = os.environ.get("VLU_TEST_BASH") or shutil.which("bash")
+        if not bash:
+            self.skipTest("bash is not available")
+        block = source[source.index("MODE=calibration\n"):source.index('OUT="$VLU_STORE')]
+        for args, expected in (("", "calibration cal scripts/calibrate.py scripts/calibration_report.py scripts/calibration_drift.py"),
+                               ("--main", "main goal_s0 scripts/main_run.py scripts/main_report.py scripts/main_drift.py")):
+            result = subprocess.run([bash, "-c", f"set -- {args}\n{block}" + 'echo "$MODE $RUN $PLAN $REPORT $DRIFT"'],
+                                    text=True, capture_output=True)
+            with self.subTest(args=args):
+                self.assertEqual(result.stdout.strip(), expected, result.stderr)
+        result = subprocess.run([bash, "-c", f"set -- --pack\n{block}"], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 2, "unknown options are refused")
+        self.assertEqual(subprocess.run([bash, "-n", str(ROOT / "slurm" / "run.sbatch")]).returncode, 0)
+
+    def test_cluster_job_flow(self):
+        # The real slurm/run.sbatch with fake programs (Python, check.sbatch, sbatch, nvidia-smi) in a fake repo:
+        # what runs on a first launch and on a successor, re-queueing at the time-limit signal, and failures.
+        bash = os.environ.get("VLU_TEST_BASH") or shutil.which("bash")
+        if not bash:
+            self.skipTest("bash is not available")
+        root = Path(tempfile.mkdtemp())
+        (root / "slurm").mkdir()
+        shutil.copy(ROOT / "slurm" / "run.sbatch", root / "slurm" / "run.sbatch")
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        fake_python = "\n".join([
+            "#!/bin/bash",
+            'echo "python $*" >> "$CALLS"',
+            'case "$*" in',
+            '    -) cat > /dev/null; [ "$FAILURE" != flash ] ;;',
+            '    *"--kinds train,eval,features") [ "$FAILURE" = signal ] && sleep 3; [ "$FAILURE" != worker ] ;;',
+            '    *--check-complete*) [ "$FAILURE" != incomplete ] ;;',
+            "    *) exit 0 ;;",
+            "esac", ""])
+        fakes = {
+            "slurm/env.sh": 'MAIN_PY="$VLU_PROJECT_DIR/bin/python"; VLU_STORE="$VLU_PROJECT_DIR/store"; VLU_RUNS_DIR="$VLU_STORE/runs"\n'
+                            "VLU_CPUS=4; VLU_RENDER=mesa\n",
+            "slurm/check.sbatch": 'echo "check.sbatch" >> "$CALLS"; [ "$FAILURE" != check ]\n',
+            "bin/python": fake_python,
+            "bin/sbatch": '#!/bin/bash\necho "sbatch $*" >> "$CALLS"\n',
+            "bin/nvidia-smi": '#!/bin/bash\necho "GPU 0: fake (MIG 4g.96gb)"\n',
+        }
+        for name, text in fakes.items():
+            (root / name).write_text(text)
+            (root / name).chmod(0o755)
+        for args, successor, failure in (("", "", "none"), ("--main", "", "none"), ("", "1", "none"), ("--main", "", "signal"),
+                                         ("", "", "flash"), ("", "", "check"), ("", "", "worker"), ("", "", "incomplete")):
+            calls = root / "calls.txt"
+            calls.write_text("")
+            env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "VLU_PROJECT_DIR": str(root), "CALLS": str(calls),
+                   "FAILURE": failure, "SLURM_JOB_ID": "123", "VLU_SUCCESSOR": successor}
+            proc = subprocess.Popen([bash, str(root / "slurm" / "run.sbatch"), *args.split()], env=env, cwd=root,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            if failure == "signal":
+                time.sleep(1.5)
+                proc.send_signal(signal.SIGUSR1)  # Slurm's --signal=B:USR1@900, 15 minutes before the time limit
+            out = proc.communicate(timeout=60)[0]
+            log = calls.read_text()
+            mode, run = ("main", "goal_s0") if args else ("calibration", "cal")
+            with self.subTest(args=args, successor=successor, failure=failure):
+                self.assertEqual(proc.returncode, 0 if failure in ("none", "signal") else 1, out)
+                # The checks run on the first launch only; a failed flash-attn check stops before the others.
+                self.assertEqual("python -\n" in log, not successor, log)
+                self.assertEqual("check.sbatch" in log, not successor and failure != "flash", log)
+                if failure in ("flash", "check"):
+                    self.assertNotIn("vlu.worker", log, "no run after a failed check")
+                    continue
+                retry = "" if successor else " --retry-failed"
+                first_submit = next(line for line in log.splitlines() if line.startswith("python scripts/submit.py"))
+                self.assertEqual(first_submit, f"python scripts/submit.py --run {run}{retry} --workers none", log)
+                order = [f"python -m vlu.worker --run {run} --kinds train,eval,features", f"_drift.py --run {run}",
+                         f"python -m vlu.worker --run {run} --check-complete", f"_report.py --run {run} --out"]
+                positions = [log.find(x) for x in order]
+                self.assertTrue(all(p >= 0 for p in positions) and positions == sorted(positions), log)
+                self.assertTrue((root / "store" / f"{mode}_cluster.tar.gz").exists())
+                if failure == "signal":
+                    self.assertIn(f"sbatch --dependency=afterany:123 --export=ALL,VLU_SUCCESSOR=1 {root}/slurm/run.sbatch --main", log)
+                else:
+                    self.assertNotIn("sbatch ", log)
 
     def test_launcher_options_select_the_run(self):
         bash = os.environ.get("VLU_TEST_BASH") or shutil.which("bash")

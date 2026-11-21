@@ -157,7 +157,56 @@ print("4b. selection_scores with one gradient buffer: identical scores to the pr
 model = Fake().cuda(); model.load_state_dict(base_state)
 ctx.model = model
 node.dir.mkdir(parents=True, exist_ok=True)
-plan.custom_train(ctx, probes)
+# Memory: no activation saved for backward may outlive its training step. A graph kept alive into the next
+# step, or into the next stage's layer selection, doubled the memory on GR00T: the reasoning stage ran out of
+# memory on a 48 GB GPU. Count the saved activations still held at every step's start and every selection.
+import gc  # noqa: E402
+saved = [0]
+
+
+class Held:
+    def __init__(self, t):
+        self.t = t.detach()  # keeps the memory alive as autograd would; t itself could point back to its graph (a cycle)
+        saved[0] += 1
+
+    def __del__(self):
+        saved[0] -= 1
+
+
+held_at = {"selection": [], "step": []}  # at each stage's layer selection; at each training forward
+real_selection, real_forward = vf.selection_scores, vf.paired_forward
+selecting = [False]
+
+
+def counting_selection(*args, **kwargs):
+    gc.collect()
+    held_at["selection"].append(saved[0])
+    selecting[0] = True
+    try:
+        return real_selection(*args, **kwargs)
+    finally:
+        selecting[0] = False
+
+
+def counting_forward(*args):
+    if not selecting[0]:
+        gc.collect()
+        held_at["step"].append(saved[0])
+    return real_forward(*args)
+
+
+vf.selection_scores, vf.paired_forward = counting_selection, counting_forward
+try:
+    with torch.autograd.graph.saved_tensors_hooks(Held, lambda h: h.t):
+        plan.custom_train(ctx, probes)
+finally:
+    vf.selection_scores, vf.paired_forward = real_selection, real_forward
+# A training step is three forwards (forget, retain, boundary): each step and each selection starts with nothing held.
+assert held_at["selection"] == [0, 0, 0] and len(held_at["step"]) == 3 * 21, held_at
+assert held_at["step"][0::3] == [0] * 21, held_at["step"]
+# Within a step, only loss-level pieces (at most 7 here) may stay while the next forward runs, never a forward's
+# network graph (26-32 here: the retain pass's, when its FM + KL backward kept the graph for the feature loss).
+assert max(held_at["step"]) <= 7, held_at["step"]
 report = json.loads((node.dir / "vlaforget.json").read_text())
 assert not any(isinstance(mod, lora.LoRALinear) for mod in model.modules()), "adapters left in the model"
 assert {n: p.requires_grad for n, p in model.named_parameters()} == flags_before, "requires_grad flags not restored"
@@ -184,7 +233,7 @@ log = [json.loads(l) for l in open(node.dir / "train_log.jsonl")]
 assert log[0]["stage"] == "start" and log[-1]["stage"] == "merged" and any(r.get("conflicts", 0) > 0 for r in log)
 # Logged on the op's global step (every log_every = 5) and at each stage end (6, 12, 21), as vlu/train.py.
 assert [r["step"] for r in log if "stage" in r and r["stage"] in vf.STAGES] == [5, 6, 10, 12, 15, 20, 21], [r["step"] for r in log]
-print("5. op: selections", sel)
+print("5. op: selections", sel, "; no saved activation outlives its step (nor reaches the next selection)")
 print("   adapters merged, flags restored, overrides", sorted(ov), "merge rel. change", report["merge"]["max_relative_change"])
 
 # --- 5. Save/load round trip with frozen overrides --------------------------------------------

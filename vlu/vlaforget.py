@@ -102,17 +102,22 @@ class Taps:
 
 def paired_forward(model, ref, taps: Taps, ref_taps: Taps, inputs: dict):
     """Forward theta (with graph) and theta0 (no graph) on the same inputs with the same flow-matching
-    noise and timesteps (the RNG state is replayed). Returns (theta's output, theta's taps, theta0's taps)."""
+    noise and timesteps (the RNG state is replayed). Returns (theta's output, theta's taps, theta0's taps).
+    The taps are emptied: an output kept there would keep its forward's whole graph (its saved activations)
+    alive after the caller is done with it."""
     rng = torch.get_rng_state(), torch.cuda.get_rng_state()
     with torch.autocast("cuda", dtype=torch.bfloat16):
         out = model(inputs)
     mine = dict(taps.out)
+    taps.out.clear()
     torch.set_rng_state(rng[0])
     torch.cuda.set_rng_state(rng[1])
     ref.train(model.training)
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
         ref(inputs)
-    return out, mine, dict(ref_taps.out)
+    theirs = dict(ref_taps.out)
+    ref_taps.out.clear()
+    return out, mine, theirs
 
 
 def velocity_kl(out: dict, mine: dict, theirs: dict) -> torch.Tensor:
@@ -347,10 +352,14 @@ def run(ctx: OpContext, probes: dict, recipe: Recipe, forget_task: str, retain_t
             feat_r = feature_loss(mine_r, ref_r, cfg.gamma)
             check_finite({"retain_fm": retain_fm, "retain_kl": retain_kl, "feat_r": feat_r},
                          f"VLA-Forget {stage} step {step + 1}")
-            g1 = flat_grad(retain_fm + cfg.beta_kl * retain_kl, params, retain_graph=True)
-            g4 = flat_grad(cfg.lambda_feat * feat_r, params)
-            _, mine_m, ref_m = paired_forward(model, ref, taps, ref_taps, batch["boundary"])
+            # Memory: the last backward through a graph frees its saved activations. The feature loss reaches
+            # only the vision / projector part, so it goes first; the FM + KL backward then frees the whole
+            # graph (the other order kept the LLM + DiT activations alive into the next step and stage).
+            g4 = flat_grad(cfg.lambda_feat * feat_r, params, retain_graph=True)
+            g1 = flat_grad(retain_fm + cfg.beta_kl * retain_kl, params)
+            out_m, mine_m, ref_m = paired_forward(model, ref, taps, ref_taps, batch["boundary"])
             feat_m = feature_loss(mine_m, ref_m, cfg.gamma)
+            del out_m, mine_m, ref_m  # only feat_m is needed: drop the forward's LLM + DiT graph now
             check_finite({"feat_m": feat_m}, f"VLA-Forget {stage} step {step + 1}")
             g4 = g4 + flat_grad(cfg.lambda_feat * feat_m, params)
             g, conflicts = pcgrad([g1, g2, g3, g4], generator)
@@ -362,6 +371,8 @@ def run(ctx: OpContext, probes: dict, recipe: Recipe, forget_task: str, retain_t
 
             metrics = {"forget_fm": forget_fm.item(), "mismatch": mismatch.item(), "retain_fm": retain_fm.item(),
                        "retain_kl": retain_kl.item(), "feat": (feat_r + feat_m).item(), "conflicts": conflicts, "grad_norm": grad_norm}
+            # Nothing of this step's graphs outlives it (the next step, or the next stage's layer selection).
+            del out_f, mine_f, ref_f, out_r, mine_r, ref_r, forget_fm, mismatch, retain_fm, retain_kl, feat_r, feat_m
             for k, v in metrics.items():
                 window[k] = window.get(k, 0.0) + v
             done += 1

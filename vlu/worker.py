@@ -101,6 +101,14 @@ def is_ready(run: str, item: dict) -> bool:
     return node.parent.done if item["kind"] == "train" else node.done
 
 
+def fisher_left(run: str) -> int:
+    """How many Fisher files the features items that can run now (their model is trained) still need. A
+    Fisher takes ~29 GiB of GPU memory, features alone ~12 GiB: scripts/run_local.sh --drift-only lets
+    smaller GPUs extract features when none is left."""
+    return sum(not fisher_path(Node.from_path(run, i["node"]), t, i["weights"]).exists()
+               for i in load_plan(run) if i["kind"] == "features" and is_ready(run, i) for t in i.get("fisher", []))
+
+
 def require_complete(run: str, kinds: set[str] | None = None, ready_only: bool = False) -> None:
     """A successful exit must mean all required items, including failed ones, are done. Optional items
     that are not done are only reported. ready_only: only the items whose prerequisites are done (e.g.
@@ -277,7 +285,12 @@ def main():
                         help="check the plan (the items of --kinds) without starting work")
     parser.add_argument("--ready-only", action="store_true",
                         help="with --check-complete: only the items whose prerequisites are done, optional ones included")
+    parser.add_argument("--fisher-left", action="store_true",
+                        help="print how many Fisher files the ready features items still need, and exit")
     args = parser.parse_args()
+    if args.fisher_left:
+        print(fisher_left(args.run))
+        return
     kinds = set(args.kinds.split(","))
     if args.check_complete:
         require_complete(args.run, kinds, ready_only=args.ready_only)

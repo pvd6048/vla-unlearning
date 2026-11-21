@@ -81,6 +81,8 @@ Each difference is labelled:
 
 ## 2. Gradient ascent and gradient difference
 
+Dropped after the calibration (rounds 1-2): no learning rate forgot B while keeping A (`scripts/calibrate.py`). The implementation below stays, for the round-2 results and as the simplest op in the tests.
+
 - GA minimizes −L_FM(forget). TOFU's GA uses −(mean token cross-entropy) (`dataloader.py:141-147`).
   **Adapted:** the token loss becomes L_FM.
 - GradDiff minimizes L_FM(retain) − L_FM(forget), with both weights 1 as in TOFU

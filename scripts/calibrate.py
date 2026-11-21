@@ -32,26 +32,27 @@ from vlu.nodes import Node, check_op, run_seed  # noqa: E402
 from vlu.worker import item_key, load_plan, plan_path, write_plan  # noqa: E402
 
 # Each variant is <method>[@<recipe overrides>] (vlu/nodes.py). Grids around each paper's default.
-# Round 3: GA, GradDiff and NPO between the round-2 values where the retained task broke (GA 1e-7 kept
-# A but barely forgot B, 3e-7 forgot B and lost A; GradDiff 3e-7 was halfway; NPO 1e-6 lost A),
-# VLA-Forget again (it ran out of memory selecting its third stage's layers), and NPO-RT (new: NPO plus
-# GradDiff's retain term, the NPO authors' default) from 3e-7 up to the authors' lr 1e-5.
-# Round 2 (after the first calibration, see METHODS.md): GA and GradDiff collapsed the model at every lr of
-# round 1, so lower ones are added; NPO 1e-6 likewise. SSD's round-1 variants (ssd@ssd_alpha=5/10/20) used
-# the old reference (all tasks) and are dropped; the new ones name ssd_reference explicitly, so they never
-# reuse a round-1 node directory.
+# Round 3 (on the cluster, from scratch: LA, LA/LB and every variant), from rounds 1-2 on the guide's machine
+# (METHODS.md, CALIBRATION.md):
+# - GA and GradDiff are dropped: no rate both forgot B and kept A (GA: 1e-7 forgot nothing, 3e-7 lost A;
+#   GradDiff 3e-7 was halfway on both). Their code stays (vlu/ops.py), as do the round-2 results.
+# - NPO: every rate from 1e-6 up lost A. Its update starts as GA's (weight 1; Adam normalizes the scale) and
+#   then fades, so its range sits a little above GA's 1e-7..3e-7: 1e-7..1e-6 (1e-6, which lost A, is the
+#   upper bracket). NPO-RT (NPO plus GradDiff's retain term, the NPO authors' default) is new: 3e-7 up to the
+#   authors' lr 1e-5.
+# - SalUn: all three rates kept A and forgot B; repeated here to confirm 3e-5 on this hardware.
+# - SSD: alpha 5 and 10 (retain reference) forgot B and kept A, ASSD halfway; alpha 50 / lambda 0.1 forgot
+#   nothing and the paper's literal reference (all tasks) dampens nothing at our forget share (vlu/ops.py
+#   _plan_ssd), so both are dropped.
+# - VLA-Forget: the two paper values, again (round 2 ran out of memory in its third stage; fixed).
+# SSD variants name ssd_reference explicitly, so they never reuse a round-1 node directory (old reference).
 VARIANTS = [
     "purge",
-    *[f"ga@unlearn_lr={lr}" for lr in ("1e-7", "1.5e-7", "2e-7", "3e-7", "1e-6", "1e-5", "3e-5", "1e-4")],
-    *[f"graddiff@unlearn_lr={lr}" for lr in ("1e-7", "3e-7", "4e-7", "6e-7", "1e-6", "1e-5", "3e-5", "1e-4")],
-    *[f"npo@unlearn_lr={lr}" for lr in ("1e-7", "3e-7", "1e-6", "1e-5", "3e-5", "1e-4")],
-    "npo@unlearn_lr=3e-5+npo_beta=1",
+    *[f"npo@unlearn_lr={lr}" for lr in ("1e-7", "3e-7", "6e-7", "1e-6")],
     *[f"npo_rt@unlearn_lr={lr}" for lr in ("3e-7", "1e-6", "3e-6", "1e-5")],
     "ssd@ssd_reference=retain",  # the paper's ViT alpha = 5, lambda = 1
     "ssd@ssd_alpha=10+ssd_reference=retain",  # the paper's ResNet alpha
-    "ssd@ssd_alpha=50+ssd_lambda=0.1+ssd_reference=retain",  # the paper's setting for very similar classes
     "ssd@ssd_adaptive=1+ssd_reference=retain",  # ASSD's tuning-free alpha
-    "ssd@ssd_alpha=5+ssd_reference=all",  # the paper's literal D, for comparison
     *[f"salun@unlearn_lr={lr}" for lr in ("1e-5", "3e-5", "1e-4")],
     *[f"vlaforget@vlaforget.lr={lr}" for lr in ("5e-5", "2e-4")],  # the paper's two values
 ]

@@ -23,7 +23,7 @@ vlu/                 the experiment code (python package)
   eval/libero_client.py  CLI: LIBERO rollouts against the server (CPU, simulator env)
   drift/             drift metrics (PLAN §4): params.py (weights), extract.py (GPU: probe features,
                      Fisher), compare.py (representation + policy drift); see drift/__init__.py
-slurm/               env.sh (paths, environments), worker.sbatch, eval.sbatch, smoke.sbatch, check.sbatch, train_op.sbatch
+slurm/               env.sh (paths, environments), run.sbatch (a whole calibration / main run), worker.sbatch, eval.sbatch, smoke.sbatch, check.sbatch, train_op.sbatch
 tests/               base-level checks without GR00T (fake models with GR00T's layout); see tests/README.md
 scripts/             setup_cluster.sh, prepare_data.py, submit.py (plan + workers), results.py (tables),
                      metrics.py (stream metrics per method: NBT, collateral, relapse, oracle gap, ...)
@@ -124,6 +124,28 @@ PLAN §5.1's control branch `LA/LB/LC/LD(/LE)` and drift features), with PLAN §
 oracle) and everything reported by `scripts/main_report.py` into `main_<host>.tar.gz` (success rates,
 stream metrics, each op's cost in GPU-minutes from its `cost.json`). Adding a method to
 `main_run.METHODS` and rerunning adds its tail.
+
+## Calibration or main run on the cluster (one gpu_large job)
+
+`slurm/run.sbatch` is `scripts/run_local.sh` for the cluster: one job on a 4g.96gb slice that runs the whole
+calibration (run `cal`) or, with `--main`, the main run (`goal_s0`). On the login node, in the repo root:
+
+```bash
+git pull
+bash scripts/setup_cluster.sh        # once (safe to rerun: finished steps are skipped)
+sbatch slurm/run.sbatch              # the calibration;  sbatch slurm/run.sbatch --main  for the main run
+```
+
+Its first launch tests that flash-attn's kernels run on the GPU, runs the base tests and the LIBERO task
+check (`slurm/check.sbatch`), writes the plan and retries earlier failures; then one worker runs the plan
+(train, eval, features; rendering with Mesa, as MIG slices have no graphics API). 15 minutes before the
+48 h limit it queues its own successor (`squeue -u $USER` shows it pending), which resumes the
+interrupted training from its checkpoint and carries on. When the plan is done: drift metrics, the
+completeness check, and the report packed into `$VLU_STORE/<calibration|main>_cluster.tar.gz` (copy it
+off with scp; no weights). Progress meanwhile: `tail -f vlu-run-<job>.out`, or
+`source slurm/env.sh && $MAIN_PY scripts/submit.py --run cal --workers none`. A report of what exists
+now, without a GPU: `$MAIN_PY scripts/calibration_report.py --run cal --out <dir>`. Do not also start a
+`submit.py --workers large` worker on the same run: one GPU's worth is the cluster cap.
 
 ## Day 1: smoke test
 
@@ -246,8 +268,9 @@ How the methods map onto GR00T's flow-matching loss (PROVISIONAL values in `vlu/
 
 - A–E task mapping (`vlu/tasks.py`): currently LIBERO-Goal tasks 0–4.
 - Unlearning budget and lr (`vlu/config.py`): 1000 steps for every method. Learning rate per method
-  (`unlearn_lrs`): SalUn 3e-5 (calibration round 2); GA, GradDiff, NPO and NPO-RT after round 3, and
-  until then an op of theirs is refused unless it sets one (`@unlearn_lr=...`); VLA-Forget's
+  (`unlearn_lrs`): SalUn 3e-5 (calibration round 2); NPO and NPO-RT after round 3, and until then an op
+  of theirs is refused unless it sets one (`@unlearn_lr=...`). GA and GradDiff are dropped (no rate forgot B
+  and kept A; PLAN.md); their code stays. VLA-Forget's
   `vlaforget.lr` (2e-4, its paper's value) is PROVISIONAL too. SSD keeps its defaults (round 2).
-- GA stopping rule / loss ceiling; NPO's β (depends on the scale of L_FM, see the probe losses); SSD's α, λ.
+- NPO's β (depends on the scale of L_FM, see the probe losses); SSD's α, λ.
 - U ops draw retain data from all demos of the retained tasks, not from the 1000-frame replay buffer.

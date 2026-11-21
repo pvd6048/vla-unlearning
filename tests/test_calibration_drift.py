@@ -27,13 +27,13 @@ from vlu.nodes import Node  # noqa: E402
 
 torch.manual_seed(0)
 RUN = "cal"
-GA, NPO_RT = "ga@unlearn_lr=1e-7", "npo_rt@unlearn_lr=1e-6"  # two of the calibration's variants
-UB, UB2 = f"LA/LB/UB-{GA}", f"LA/LB/UB-{NPO_RT}"
+NPO, NPO_RT = "npo@unlearn_lr=1e-7", "npo_rt@unlearn_lr=1e-6"  # two of the calibration's variants
+UB, UB2 = f"LA/LB/UB-{NPO}", f"LA/LB/UB-{NPO_RT}"
 DIT = "action_head.model.transformer_blocks.0.attn1.to_q.weight"
 shapes = {DIT: (8, 8), "backbone.model.language_model.model.layers.12.mlp.down_proj.weight": (6, 8),
           "action_head.vlln.weight": (8,)}
 
-# Weights: tauA, tauB random; the GA variant removes 60% of tauB plus noise, the NPO-RT one only noise.
+# Weights: tauA, tauB random; the NPO variant removes 60% of tauB plus noise, the NPO-RT one only noise.
 base = {k: torch.randn(*s) for k, s in shapes.items()}
 save_file(base, str(stubs.TMP / "base" / "shard.safetensors"))
 (stubs.TMP / "base" / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {k: "shard.safetensors" for k in base}}))
@@ -52,7 +52,7 @@ for task, f in (("A", fisher_a), ("B", {k: 4 * v for k, v in fisher_a.items()}))
     path.parent.mkdir(parents=True, exist_ok=True)
     save_file(f, str(path))
 
-# Probe features (vlu.drift.extract's layout) of base, LA, LA/LB and the GA variant only.
+# Probe features (vlu.drift.extract's layout) of base, LA, LA/LB and the NPO variant only.
 TASKS, PER = "ABCDE", 12
 N = len(TASKS) * PER
 
@@ -83,8 +83,8 @@ script = [sys.executable, str(ROOT / "scripts" / "calibration_drift.py"), "--run
 assert subprocess.run(script, env=env).returncode == cd.LEFT_OUT == 3
 out = cd.report_dir(RUN)
 p, r = cd.read(out / "params.csv"), cd.read(out / "representation.csv")
-u, u2, o = cd.drift_name(GA), cd.drift_name(NPO_RT), cd.drift_name(GA, "O")
-assert "=" not in u and cd.label(u) == GA
+u, u2, o = cd.drift_name(NPO), cd.drift_name(NPO_RT), cd.drift_name(NPO, "O")
+assert "=" not in u and cd.label(u) == NPO
 assert cd.input_changes(RUN) == ([], []), "inputs.json records what the report was computed from"
 
 # Weights: the distance to the oracle, ||theta_U - theta_LA|| / ||theta_LA/LB - theta_LA||, from the tensors.
@@ -135,12 +135,12 @@ assert math.isclose(full[(*g, "norm", "V", "")], p[(*g, "norm", u2, "")], rel_to
 print("pairs: only those with tauA / tauB, with the values of an all-pairs run")
 
 summary = (out / "summary.md").read_text()
-assert "## Drift metrics" in summary and f"| {GA} |" in summary and f"| {NPO_RT} |" in summary and "| *random* |" in summary
+assert "## Drift metrics" in summary and f"| {NPO} |" in summary and f"| {NPO_RT} |" in summary and "| *random* |" in summary
 assert "| O:" not in summary and "Incomplete" not in summary
 left_out = summary.split("Left out", 1)[1].split("\n", 1)[0]
 weights_left, features_left = left_out.split("weights: ", 1)[1].split("; features: ")
-assert "ssd@ssd_reference=retain" in weights_left and NPO_RT not in weights_left and GA not in weights_left, weights_left
-assert NPO_RT in features_left and GA not in features_left, features_left
+assert "ssd@ssd_reference=retain" in weights_left and NPO_RT not in weights_left and NPO not in weights_left, weights_left
+assert NPO_RT in features_left and NPO not in features_left, features_left
 print("summary: every computed drift has a row; variants without weights / features are listed")
 
 # A diverged checkpoint (vlu.drift.compare): an inf DiT feature and an inf velocity on one of B's probe frames,
@@ -175,7 +175,7 @@ assert cd.fmt(float("inf")) == cd.fmt(float("-inf")) == cd.fmt(float("nan")) == 
 summary = (out / "summary.md").read_text()
 assert f": {UB} (3 of 7 features, policy among them)." in summary and "**Non-finite probe features** (" in summary, summary
 policy_table = summary.split("### Policy", 1)[1]
-row = next(line for line in policy_table.splitlines() if line.startswith(f"| {GA} |")).split(" | ")
+row = next(line for line in policy_table.splitlines() if line.startswith(f"| {NPO} |")).split(" | ")
 assert row[1] != "-" and row[2] == "-" and row[3] == "-" and "inf" not in policy_table, row  # fd A, fd B, B dist. to oracle
 assert "Incomplete" not in summary and cd.BF16_CAVEAT in summary
 print("diverged checkpoint: undefined only where its inf / NaN enters (also the DiT mean), shown as -, named once; "
