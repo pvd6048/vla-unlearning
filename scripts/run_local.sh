@@ -101,7 +101,7 @@ fi
 # 3. Base tests (tests/README.md); --drift-only: those of the drift code and of the worker machinery ----
 ALL_TESTS=(tests/test_stream_metrics.py tests/test_calibration.py tests/test_drift_params.py tests/test_drift_extract.py tests/test_ops.py
            tests/test_vlaforget.py tests/test_completion.py tests/test_resume.py tests/test_training_safety.py tests/test_rank_subspace.py
-           tests/test_calibration_drift.py tests/test_main_run.py tests/test_main_drift.py)
+           tests/test_calibration_drift.py tests/test_main_run.py tests/test_main_drift.py tests/test_cost.py)
 DRIFT_TESTS=(tests/test_drift_params.py tests/test_drift_extract.py tests/test_rank_subspace.py tests/test_calibration_drift.py
              tests/test_main_drift.py tests/test_calibration.py tests/test_completion.py)
 if [ "$DRIFT_ONLY" = 1 ]; then TESTS=("${DRIFT_TESTS[@]}"); else TESTS=("${ALL_TESTS[@]}"); fi

@@ -16,6 +16,7 @@ from typing import Callable
 
 import torch
 
+from vlu import cost
 from vlu.config import Recipe
 from vlu.data import OpBatches, ReplayBuffer, Slots
 from vlu.drift.weights import embodiment_index, live_part
@@ -99,9 +100,10 @@ def accumulate_grads(ctx: OpContext, slots: Slots, n: int, stream: int, square: 
     model.eval()
     for inputs in ctx.batches(slots, n, stream):
         model.zero_grad(set_to_none=True)
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            loss = fm_loss(model, inputs)
-        loss.backward()
+        with cost.flops("importance"):  # the op's compute (vlu/cost.py); nothing without an active meter
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                loss = fm_loss(model, inputs)
+            loss.backward()
         for name, p in params.items():
             if p.grad is not None:
                 total[name] += p.grad.float().square() if square else p.grad.float()

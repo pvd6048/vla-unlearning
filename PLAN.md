@@ -92,7 +92,13 @@ Every unlearning method gets the **same step budget per U op**. "Loss" here mean
 - **Forget SR:** on B and E, compared with the oracle
 - **Retain SR:** on the tasks that should still be known
 - **Relapse:** does B come back after `L_D L_E`?
-- **Cost:** GPU-minutes per unlearn op
+- **Cost:** per unlearn op, measured in every op by `vlu/cost.py`: the method's GPU time (its preparation plus
+  training, without our probes and saves) and per phase; training-step latency (median / p90) and the wait for
+  each batch (a CPU bottleneck); compute in FLOPs (torch's FLOP formulas: a lower bound, the same for every
+  method, comparable across GPUs) and achieved TFLOP/s; peak GPU memory (allocated / reserved); GPU energy
+  (ML.energy's Zeus on a full GPU; on a MIG slice the board's NVML counter x the slice's share, else a
+  power-limit pseudo-estimate; the source is recorded with each number), energy above the measured idle power,
+  mean power; flags for a shared GPU and implausible readings
 
 **If compute is short:** cut to 5k steps per task (after checking that SR has saturated) and 20 rollouts for intermediate evals.
 
@@ -204,7 +210,7 @@ Everything is computed from one **success matrix** `c[i,k]`: the success rate (S
 
 - Every SR comes with a 95% confidence interval: Wilson interval over the 50 rollouts per eval, and bootstrap over seeds once we have more than one seed.
 - At 50 rollouts the SR standard error is up to ~7 points, so smaller differences are not claimed as real.
-- Cost (GPU-minutes per U op) is reported next to every method.
+- Cost (GPU time, step latency, peak memory, energy per U op; `vlu/cost.py`) is reported next to every method.
 
 ## 1. Research agenda
 

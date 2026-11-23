@@ -16,6 +16,7 @@ import time
 
 import torch
 
+from vlu import cost
 from vlu.config import PROJECT_DIR, RECIPE
 from vlu.data import OpBatches, fixed_batch, load_demos
 from vlu.model import build_processor, describe, gr00t_config, load_model, modality_configs, save_weights
@@ -81,28 +82,40 @@ def main():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    config = gr00t_config()
-    processor = build_processor(config)
-    model = load_model(config, node.parent.weights_file())
-    mcfg = modality_configs(config)
-    demos = load_demos(mcfg)
-    probes = {t: fixed_batch(d, recipe.probe_size, processor, mcfg) for t, d in demos.items()}
-    # The op's cost (PLAN.md: GPU-minutes per op) counts its own work: the method's preparation (all of SSD,
-    # SalUn's mask, NPO's reference), training and probe losses; not loading the model and the demos. Every
-    # session (a rerun after a crash reuses what an earlier one made: a saved mask, resume.pt) adds its time.
-    sessions = node.dir / "cost_sessions.jsonl"
-    log_session({"start": time.time()}, sessions)
-    start = time.monotonic()  # durations from the monotonic clock: a wall-clock adjustment (NTP, WSL) cannot shift them
-    try:
-        _run(node, op, plan, recipe, model, demos, processor, mcfg, probes, seed, save_at)
-    finally:  # also when the session fails; only a killed process (SIGKILL, power loss) leaves no time
-        log_session({"seconds": time.monotonic() - start}, sessions)
+    # The op's cost (PLAN.md): latency, peak memory and energy of its phases (vlu/cost.py). "seconds" counts
+    # the op's own work: the method's preparation (all of SSD, SalUn's mask, NPO's reference), training and
+    # probe losses; not loading the model and the demos ("load", recorded apart). Every session (a rerun after
+    # a crash reuses what an earlier one made: a saved mask, resume.pt) adds its own.
+    meter = cost.Meter()
+    with meter.active():
+        with meter.phase("load"):
+            config = gr00t_config()
+            processor = build_processor(config)
+            model = load_model(config, node.parent.weights_file())
+            mcfg = modality_configs(config)
+            demos = load_demos(mcfg)
+            probes = {t: fixed_batch(d, recipe.probe_size, processor, mcfg) for t, d in demos.items()}
+        if meter.source.name in ("zeus", "nvml", "board"):  # a measured energy: the GPU's idle power, its baseline
+            meter.measure_idle()
+        sessions = node.dir / "cost_sessions.jsonl"
+        log_session({"start": time.time()}, sessions)
+        start = time.monotonic()  # durations from the monotonic clock: a wall-clock adjustment (NTP, WSL) cannot shift them
+        try:
+            _run(node, op, plan, recipe, model, demos, processor, mcfg, probes, seed, save_at)
+        finally:  # also when the session fails; only a killed process (SIGKILL, power loss) leaves no record
+            log_session({"seconds": time.monotonic() - start, **meter.summary()}, sessions)
     records = [json.loads(line) for line in sessions.read_text().splitlines()]
     starts = sum("start" in r for r in records)
     seconds = [r["seconds"] for r in records if "seconds" in r]
-    # complete: every session recorded its time (else the sum is a lower bound)
+    # complete: every session recorded its time (else the sums are lower bounds)
+    efficiency = cost.aggregate(records)
     node.write_json("cost.json", {"seconds": sum(seconds), "sessions": starts, "complete": len(seconds) == starts,
-                                  "gpu": torch.cuda.get_device_name()})
+                                  "gpu": torch.cuda.get_device_name(), "efficiency": efficiency})
+    method = efficiency["method"]
+    if method:
+        energy = "not measured" if method["energy_j"] is None else f"{method['energy_j'] / 3600:.1f} Wh ({efficiency['energy_source']})"
+        print(f"{node} cost: method {method['seconds'] / 60:.1f} min, peak {method['peak_allocated_gb']:.1f} GiB allocated, "
+              f"energy {energy}", flush=True)
     print(f"{node} done: {node.weights_path}")
 
 
@@ -115,7 +128,8 @@ def log_session(record: dict, path) -> None:
 def _run(node, op, plan, recipe, model, demos, processor, mcfg, probes, seed, save_at) -> None:
     """The op's own work, after loading: the method's preparation, op.json, training, the weights."""
     if plan.prepare is not None:  # method-specific setup on the parent model (see vlu/ops.py)
-        plan.prepare(OpContext(node, model, demos, processor, mcfg, seed))
+        with cost.phase("prepare"):
+            plan.prepare(OpContext(node, model, demos, processor, mcfg, seed))
 
     node.write_json(
         "op.json",
@@ -136,13 +150,15 @@ def _run(node, op, plan, recipe, model, demos, processor, mcfg, probes, seed, sa
     )
     # Batches depend on (run seed, depth, step): sibling branches at the same depth draw the same
     # random numbers, which makes them easier to compare.
-    if plan.custom_train is not None:  # a method with its own loop (VLA-Forget)
-        plan.custom_train(OpContext(node, model, demos, processor, mcfg, seed), probes)
-        save_weights(model, node.weights_path)
-    else:
-        batches = OpBatches(demos, plan.parts, processor, mcfg, seed=seed * 1000 + node.depth, num_steps=plan.steps,
-                            run_seed=seed)
-        train(node, model, plan, batches, probes, recipe, save_at)
+    with cost.phase("train"):
+        if plan.custom_train is not None:  # a method with its own loop (VLA-Forget)
+            plan.custom_train(OpContext(node, model, demos, processor, mcfg, seed), probes)
+            with cost.phase("save"):
+                save_weights(model, node.weights_path)
+        else:
+            batches = OpBatches(demos, plan.parts, processor, mcfg, seed=seed * 1000 + node.depth, num_steps=plan.steps,
+                                run_seed=seed)
+            train(node, model, plan, batches, probes, recipe, save_at)
 
 
 if __name__ == "__main__":

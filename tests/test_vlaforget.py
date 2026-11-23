@@ -198,8 +198,10 @@ def counting_forward(*args):
 
 
 vf.selection_scores, vf.paired_forward = counting_selection, counting_forward
+from vlu import cost  # noqa: E402
+vf_meter = cost.Meter(source=cost.NoEnergy())
 try:
-    with torch.autograd.graph.saved_tensors_hooks(Held, lambda h: h.t):
+    with torch.autograd.graph.saved_tensors_hooks(Held, lambda h: h.t), vf_meter.active():
         plan.custom_train(ctx, probes)
 finally:
     vf.selection_scores, vf.paired_forward = real_selection, real_forward
@@ -212,6 +214,15 @@ assert max(held_at["step"]) <= 7, held_at["step"]
 # The boundary pass (every third) builds a graph only where the feature loss has a gradient: vision and projector
 # stages (6 + 6 steps), not the reasoning stage (9), whose LLM / DiT adapters come after the features.
 assert with_graph[0::3] == with_graph[1::3] == [True] * 21 and with_graph[2::3] == [True] * 12 + [False] * 9, with_graph
+# The op's cost (vlu/cost.py): its own phases, each training step timed, the probes apart
+counts = {n: ph["count"] for n, ph in vf_meter.phases.items()}
+assert counts["boundary"] == 1 and counts["selection"] == 3 and counts["merge"] == 1 and counts["probe"] >= 3, counts
+# steps per stage (6, 6, 9), the FLOP-counted first one of each untimed; each stage's step and selection counted apart
+assert {g: len(e["seconds"]) for g, e in vf_meter.steps.items()} == {"train:vision": 5, "train:projector": 5, "train:reasoning": 8}
+assert {u: f["calls"] for u, f in vf_meter.flops.items()} == {
+    "boundary": 2, **{f"selection:{st}": 2 * recipe.vlaforget.selection_batches for st in vf.STAGES},
+    **{f"train:{st}": n for st, n in zip(vf.STAGES, (6, 6, 9))}}, vf_meter.flops
+assert all(f["per_call"] > 0 for f in vf_meter.flops.values()) and vf_meter.steps["train:vision"]["frames"] == 3 * recipe.batch_size
 report = json.loads((node.dir / "vlaforget.json").read_text())
 assert not any(isinstance(mod, lora.LoRALinear) for mod in model.modules()), "adapters left in the model"
 assert {n: p.requires_grad for n, p in model.named_parameters()} == flags_before, "requires_grad flags not restored"

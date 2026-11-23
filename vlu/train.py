@@ -16,6 +16,7 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import get_cosine_schedule_with_warmup
 
+from vlu import cost
 from vlu.config import Recipe
 from vlu.model import check_finite, save_weights, trainable_named_parameters
 from vlu.nodes import Node
@@ -66,15 +67,17 @@ def _check_optimizer_finite(optimizer):
 @torch.no_grad()
 def probe_losses(model, probes: dict[str, dict]) -> dict[str, float]:
     """L_FM of each task's fixed probe batch, with fixed noise and no dropout, so values are
-    comparable across steps, ops and branches."""
+    comparable across steps, ops and branches. No graph: it is a measurement (a "probe" phase of the op's
+    cost, vlu/cost.py, not the method's work)."""
     was_training = model.training
     model.eval()
     out = {}
-    for task, inputs in probes.items():
-        with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
-            torch.manual_seed(0)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                out[task] = fm_loss(model, inputs).item()
+    with cost.phase("probe"), torch.no_grad():
+        for task, inputs in probes.items():
+            with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
+                torch.manual_seed(0)
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    out[task] = fm_loss(model, inputs).item()
     model.train(was_training)
     return out
 
@@ -125,19 +128,23 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
 
     model.train()
     window_start, window_steps, window_metrics = time.time(), 0, {}
+    step_end = time.monotonic()  # when the loop last asked for a batch (vlu/cost.py: the wait for the next one)
     for step, batch in zip(range(start, plan.steps), loader):
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            loss, metrics = plan.loss_fn(model, batch)
-        check_finite({"loss": loss}, f"training step {step + 1}")
-        loss.backward()
-        for p, mask in masked:  # SalUn: only the selected weights get a gradient
-            if p.grad is not None:
-                p.grad.mul_(mask)
-        grad_norm = torch.nn.utils.clip_grad_norm_(params, recipe.max_grad_norm, error_if_nonfinite=True).item()
-        optimizer.step()
-        check_finite(named, f"updated weights at step {step + 1}")
-        scheduler.step()
-        optimizer.zero_grad(set_to_none=True)
+        step_start = time.monotonic()  # the step's own work, after its batch has arrived (vlu/cost.py)
+        with cost.flops("train"):
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                loss, metrics = plan.loss_fn(model, batch)
+            check_finite({"loss": loss}, f"training step {step + 1}")
+            loss.backward()
+            for p, mask in masked:  # SalUn: only the selected weights get a gradient
+                if p.grad is not None:
+                    p.grad.mul_(mask)
+            grad_norm = torch.nn.utils.clip_grad_norm_(params, recipe.max_grad_norm, error_if_nonfinite=True).item()
+            optimizer.step()
+            check_finite(named, f"updated weights at step {step + 1}")
+            scheduler.step()
+            optimizer.zero_grad(set_to_none=True)
+        cost.step_done(step_start, "train", cost.frames(batch), step_start - step_end)
 
         done = step + 1  # number of completed updates
         window_steps += 1
@@ -149,29 +156,33 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
             record = {"step": done, "lr": scheduler.get_last_lr()[0]}
             record.update({k: v / window_steps for k, v in window_metrics.items()})
             record["steps_per_s"] = window_steps / elapsed
-            record["peak_mem_gb"] = torch.cuda.max_memory_allocated() / 2**30
+            record["peak_mem_gb"] = cost.peak_allocated_gb()
             if done % (plan.probe_every or recipe.probe_every) == 0 or done == plan.steps:
                 record["probe"] = probe_losses(model, probes)
             log(record)
             window_start, window_steps, window_metrics = time.time(), 0, {}
 
         if done in save_at:
-            save_weights(model, node.dir / f"step_{done:06d}.safetensors")
+            with cost.phase("checkpoint"):
+                save_weights(model, node.dir / f"step_{done:06d}.safetensors")
         if done % save_every == 0 and done < plan.steps:
-            _check_optimizer_finite(optimizer)
-            state = {
-                "step": done,
-                "weights": {n: p.detach().cpu() for n, p in trainable_named_parameters(model).items()},
-                "optimizer": optimizer.state_dict(),
-                "scheduler": scheduler.state_dict(),
-                "cpu_rng": torch.get_rng_state(),
-                "cuda_rng": torch.cuda.get_rng_state(),
-                "python_rng": random.getstate(),
-                "numpy_rng": np.random.get_state(),
-            }
-            tmp = resume_path.with_name("resume.pt.tmp")
-            torch.save(state, tmp)
-            tmp.replace(resume_path)  # atomic: a crash leaves either the old or the new state
+            with cost.phase("checkpoint"):
+                _check_optimizer_finite(optimizer)
+                state = {
+                    "step": done,
+                    "weights": {n: p.detach().cpu() for n, p in trainable_named_parameters(model).items()},
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "cpu_rng": torch.get_rng_state(),
+                    "cuda_rng": torch.cuda.get_rng_state(),
+                    "python_rng": random.getstate(),
+                    "numpy_rng": np.random.get_state(),
+                }
+                tmp = resume_path.with_name("resume.pt.tmp")
+                torch.save(state, tmp)
+                tmp.replace(resume_path)  # atomic: a crash leaves either the old or the new state
+        step_end = time.monotonic()
 
-    save_weights(model, node.weights_path)
+    with cost.phase("save"):
+        save_weights(model, node.weights_path)
     resume_path.unlink(missing_ok=True)

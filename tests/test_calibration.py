@@ -396,9 +396,44 @@ bad = {"kind": "train", "node": "LA/LB/UB-vlaforget@vlaforget.lr=2e-4", "save_at
 Node.from_path("cal", bad["node"]).weights_path.unlink()
 (RUNS_DIR / "cal" / "_failed" / "train_LA~LB~UB-vlaforget@vlaforget.lr=2e-4.json").write_text(
     json.dumps({"item": bad, "exit_code": 1, "log": str(RUNS_DIR / "cal" / "_logs" / "x.log")}))
+# The efficiency of two ops, as vlu/run_op.py writes it (vlu/cost.py's aggregate): SSD all preparation, SalUn with
+# training steps, a killed session (a lower bound: *) and another process on its GPU (flagged).
+def phase(seconds, energy, peak):
+    return {"seconds": seconds, "energy_j": energy, "peak_allocated_gb": peak, "peak_reserved_gb": peak + 2, "count": 1}
+def efficiency(method, steps, source, flags, notes):
+    return {"phases": {"prepare": phase(*method["prepare"]), "train": phase(10, 1500, 20), "probe": phase(1, 200, 15)},
+            "method": {k: v for k, v in method.items() if k != "prepare"}, "units": {}, "steps": steps,
+            "step_ms": None, "wait_ms": None, "idle_watts": 55.0, "limit_watts": 600.0, "max_processes": 1,
+            "energy_source": source, "energy_notes": notes, "gpus": ["G"], "flags": flags, "unmeasured_sessions": 0}
+ssd_eff = efficiency({"prepare": (120, 17000, 31), "seconds": 126, "energy_j": 18000, "flops": 3e15, "energy_above_idle_j": 10800,
+                      "mean_power_w": 18000 / 126, "peak_allocated_gb": 31.0, "peak_reserved_gb": 33.0},
+                     {}, "board", [], ["MIG slice with 0.990 of the board's memory: share 1.000"])
+salun_eff = efficiency({"prepare": (60, 9000, 29), "seconds": 660, "energy_j": 99000, "flops": 1.2e16, "energy_above_idle_j": 72000,
+                        "mean_power_w": 150.0, "peak_allocated_gb": 35.0, "peak_reserved_gb": 37.5},
+                       {"train": {"step_ms": {"n": 994, "median": 412.4, "mean": 420.0, "p90": 455.6},
+                                  "wait_ms": {"n": 994, "median": 3.2, "mean": 4.0, "p90": 8.9}, "frames": 16,
+                                  "flops_per_step": 1.15e13, "achieved_tflops": 27.9}},
+                       "zeus", ["shared GPU: 2 processes on it, so the energy includes other work"], [])
+for path, eff, complete in (("LA/LB/UB-ssd@ssd_reference=retain", ssd_eff, True), ("LA/LB/UB-salun@unlearn_lr=3e-5", salun_eff, False)):
+    (Node.from_path("cal", path).dir / "cost.json").write_text(json.dumps({"seconds": 1, "complete": complete, "efficiency": eff}))
 out = Path(tempfile.mkdtemp()) / "report"
 subprocess.run([sys.executable, str(ROOT / "scripts" / "calibration_report.py"), "--run", "cal", "--out", str(out)], env=ENV, check=True)
 summary = (out / "summary.md").read_text()
+efficiency_md = summary.split("## Efficiency per op")[1].split("\n## ")[0]
+assert "| LA/LB/UB-ssd@ssd_reference=retain | G | 2.1 | 2.0 | 3.0 | 5.0 | 3.0 | 143 | 31.0 / 33.0 | board | - |" in efficiency_md, efficiency_md
+assert ("| LA/LB/UB-salun@unlearn_lr=3e-5 | G | 11.0* | 1.0 | 12.0* | 27.5* | 20.0* | 150 | 35.0 / 37.5 | zeus | "
+        "shared GPU: 2 processes on it, so the energy includes other work |") in efficiency_md, efficiency_md
+assert "| LA/LB/UB-salun@unlearn_lr=3e-5 | train | 994 | 16 | 412 / 456 | 3 / 9 | 11.50 | 27.9 |" in efficiency_md, efficiency_md
+assert "- G: MIG slice with 0.990 of the board's memory: share 1.000" in efficiency_md
+assert "| LA | - | - |" in efficiency_md and "UB-purge" not in efficiency_md, "no cost.json: '-'; purge trains nothing"
+import csv  # noqa: E402
+ops = {r["node"]: r for r in csv.DictReader(open(out / "efficiency.csv"))}
+assert set(ops) == {"LA/LB/UB-ssd@ssd_reference=retain", "LA/LB/UB-salun@unlearn_lr=3e-5"}
+assert float(ops["LA/LB/UB-salun@unlearn_lr=3e-5"]["flops"]) == 1.2e16 and ops["LA/LB/UB-salun@unlearn_lr=3e-5"]["complete"] == "False"
+phases_csv = list(csv.DictReader(open(out / "efficiency_phases.csv")))
+assert {(r["node"], r["phase"]) for r in phases_csv} >= {("LA/LB/UB-ssd@ssd_reference=retain", "prepare"),
+                                                          ("LA/LB/UB-salun@unlearn_lr=3e-5", "probe")}
+assert [r["achieved_tflops"] for r in csv.DictReader(open(out / "efficiency_steps.csv"))] == ["27.9"]
 for needed in ["## Learning", "## Speed and memory per op", "## Unlearning variants", "## Stream metrics", "oracle_gap",
                "npo_rt@unlearn_lr=3e-6", "dampened_fraction", "| failed |"]:
     assert needed in summary, needed

@@ -41,6 +41,21 @@ if [ ! -f "$GR00T_DIR/.venv/.vlu_ok" ]; then
     touch "$GR00T_DIR/.venv/.vlu_ok"
 fi
 
+# 2b. Energy measurement of the ops (vlu/cost.py): ML.energy's Zeus and NVML's Python bindings, added without
+#     changing any package of GR00T's lock (the installed versions are constraints; a separate step, so an
+#     existing environment gets them on a rerun). If that is impossible, the ops are still measured: energy
+#     from NVML directly, or a pseudo-estimate from the power limit (vlu/cost.py says which, per op).
+if ! "$MAIN_PY" -c "import zeus.monitor, pynvml" 2>/dev/null; then
+    mkdir -p "$VLU_STORE/envs"
+    LOCKED="$VLU_STORE/envs/main_locked.txt"
+    uv pip freeze --python "$MAIN_PY" | grep -v -e '^-e ' -e ' @ ' > "$LOCKED"  # editable / URL entries: not constraints
+    uv pip install --python "$MAIN_PY" --constraint "$LOCKED" zeus==0.17.0 || {
+        echo "WARNING: Zeus does not install next to GR00T's packages; energy from NVML directly"
+        uv pip install --python "$MAIN_PY" --constraint "$LOCKED" nvidia-ml-py ||
+            echo "WARNING: no NVML bindings either; energy is a pseudo-estimate from the GPU's TDP, if known"
+    }
+fi
+
 # 3. Simulator environment: the install steps of NVIDIA's gr00t/eval/sim/LIBERO/setup_libero.sh,
 #    run here instead of the script itself because the script deletes ~/.libero (which other LIBERO
 #    installs may use) and ends with a render test that cannot work on a login node.

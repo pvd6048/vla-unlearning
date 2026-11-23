@@ -123,7 +123,8 @@ round 2's models, which predate the drift code.
 PLAN §5.1's control branch `LA/LB/LC/LD(/LE)` and drift features), with PLAN §5's drifts computed by
 `scripts/main_drift.py` (unlearning U vs. incidental forgetting F_B vs. tauB, distances to the retrain
 oracle) and everything reported by `scripts/main_report.py` into `main_<host>.tar.gz` (success rates,
-stream metrics, each op's cost in GPU-minutes from its `cost.json`). Adding a method to
+stream metrics, each op's cost from its `cost.json`: GPU time, step latency, peak memory and energy,
+measured by `vlu/cost.py`). Adding a method to
 `main_run.METHODS` and rerunning adds its tail.
 
 ## Calibration or main run on the cluster (one gpu_large job)
@@ -133,7 +134,7 @@ calibration (run `cal`) or, with `--main`, the main run (`goal_s0`). On the logi
 
 ```bash
 git pull
-bash scripts/setup_cluster.sh        # once (safe to rerun: finished steps are skipped)
+bash scripts/setup_cluster.sh        # rerun once now: it adds Zeus (energy, vlu/cost.py); finished steps are skipped
 sbatch slurm/run.sbatch              # the calibration;  sbatch slurm/run.sbatch --main  for the main run
 ```
 

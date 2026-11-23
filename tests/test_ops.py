@@ -20,6 +20,7 @@ from vlu.model import save_weights, trainable_named_parameters
 from vlu.nodes import Node, run_seed
 import vlu.ops
 from vlu.ops import OpContext, plan_op
+import vlu.cost
 import vlu.run_op
 from vlu.train import train
 
@@ -447,6 +448,27 @@ try:
             assert (cost["sessions"], cost["complete"]) == (1, True), cost
         else:
             assert (cost["sessions"], cost["complete"]) == (3, False) and cost["seconds"] > failed_session >= 0.2, cost
+        # The efficiency (vlu/cost.py): every phase of the op, the method's own cost without our probes and saves
+        eff, ph = cost["efficiency"], cost["efficiency"]["phases"]
+        assert {"load", "prepare", "train", "probe", "save"} <= set(ph), sorted(ph)
+        assert ph["train"]["seconds"] >= ph["probe"]["seconds"] + ph["save"]["seconds"] and eff["method"]["seconds"] > 0
+        assert abs(eff["method"]["seconds"] - (ph["prepare"]["seconds"] + ph["train"]["seconds"] - ph["probe"]["seconds"]
+                                               - ph["save"]["seconds"] - ph.get("checkpoint", {"seconds": 0})["seconds"])) < 1e-9
+        assert eff["method"]["peak_allocated_gb"] > 0 and eff["gpus"] == [torch.cuda.get_device_name()]
+        units = eff["units"]
+        assert eff["method"]["flops"] == sum(u["flops"] for u in units.values()) > 0, units
+        if method == "ssd":  # all of SSD is its preparation: two importances (forget, retain), no training step
+            assert eff["step_ms"] is None and eff["unmeasured_sessions"] == 0 and set(units) == {"importance"}, eff
+            assert units["importance"]["calls"] == 2 * recipe.importance_batches and units["importance"]["per_call"] > 0
+        else:  # the crashed session computed the mask (counted); the second reused it; the killed one is flagged
+            assert ph["prepare"]["count"] == 2 and eff["unmeasured_sessions"] == 1, eff
+            assert units["importance"]["calls"] == recipe.importance_batches and units["train"]["calls"] == recipe.unlearn_steps, units
+            assert eff["steps"]["train"]["frames"] == recipe.batch_size and eff["steps"]["train"]["flops_per_step"] > 0, eff["steps"]
+            # the FLOP-counted first step is not timed: 6 - 1 steps, all within the warm-up
+            last = json.loads((node.dir / "cost_sessions.jsonl").read_text().splitlines()[-1])
+            assert len(last["steps"]["train"]["seconds"]) == recipe.unlearn_steps - 1 and eff["step_ms"] is None, last["steps"]
+            waits = last["steps"]["train"]["waits"]
+            assert len(waits) == recipe.unlearn_steps - 1 and all(w is not None and w >= 0 for w in waits), waits
 finally:
     vlu.run_op.train = train
     for name, value in real.items():

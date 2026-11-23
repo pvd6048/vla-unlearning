@@ -19,6 +19,7 @@ python tests/test_main_drift.py      # scripts/main_drift.py: forgetting vs. unl
 python tests/test_resume.py          # per-step preprocessing randomness, interrupted training continues identically
 python tests/test_training_safety.py # non-finite losses, gradients, weights and checkpoints are rejected
 python tests/test_rank_subspace.py   # drift subspaces of rank-deficient matrices (vlu/drift/metrics.py)
+python tests/test_cost.py            # op cost meter (vlu/cost.py): phases, peak memory, FLOPs, steps and waits, energy source per GPU kind, idle, flags, aggregate
 ```
 
 What they cannot check: anything that needs real GR00T weights, the dataset or the simulator. That is

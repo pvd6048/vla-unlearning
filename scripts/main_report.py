@@ -15,8 +15,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from calibration_drift import fmt, table  # noqa: E402
-from calibration_report import (copy_run_files, cost, drift_section, method_info, perf, plan_section, probes, sr,  # noqa: E402
-                                stream_metrics_section, train_log)
+from calibration_report import (copy_run_files, cost, drift_section, efficiency_tables, method_info, perf,  # noqa: E402
+                                plan_section, probes, sr, stream_metrics_section, train_log)
 from main_drift import input_changes  # noqa: E402
 from vlu.nodes import Node, oracle_path  # noqa: E402
 from vlu.tasks import TASKS  # noqa: E402
@@ -85,7 +85,8 @@ def main():
     # --- Speed and memory ----------------------------------------------------------------------
     md += ["## Speed and memory per op", "",
            *table(["node", "steps/s (median)", "peak GPU mem (GB)", "wall (min)", "cost (GPU-min)"],
-                  [[n.path, *perf(train_log(n)), cost(n)] for n in trained if not n.last_op.shares_parent_weights]), ""]
+                  [[n.path, *perf(train_log(n)), cost(n)] for n in trained if not n.last_op.shares_parent_weights]), "",
+           *efficiency_tables(trained, out)]
 
     # --- Drift metrics (scripts/main_drift.py, run by run_local.sh --main after the workers) -----------
     md += drift_section(run, out, input_changes(run), "scripts/main_drift.py")

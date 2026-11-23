@@ -53,7 +53,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from vlu import lora
+from vlu import cost, lora
 from vlu.config import Recipe
 from vlu.data import Frames, OpBatches, make_sample
 from vlu.drift.weights import LLM_LAYER, VISION_LAYER
@@ -173,7 +173,7 @@ def set_grads(params: list, flat: torch.Tensor) -> None:
 
 
 def selection_scores(ctx: OpContext, ref, taps, ref_taps, names: list[str], score: str, cfg, forget_slots, retain_slots,
-                     stream: int) -> dict[str, float]:
+                     stream: int, flops_unit: str = "selection") -> dict[str, float]:
     """Score candidate layers with the gradients of L_forget = L_FM(forget) and
     L_retain = L_FM(retain) + beta * KL (as the authors' code), averaged over cfg.selection_batches batches.
 
@@ -197,9 +197,10 @@ def selection_scores(ctx: OpContext, ref, taps, ref_taps, names: list[str], scor
     def mean_gradients(kind: str, slots) -> list[torch.Tensor]:
         low = {id(p): torch.zeros_like(p, dtype=torch.float32) for p in flat_params if p.dtype != torch.float32}
         for inputs in ctx.batches(slots, cfg.selection_batches, stream=stream + (kind == "retain")):
-            out, mine, theirs = paired_forward(model, ref, taps, ref_taps, inputs)
-            loss = out["loss"] if kind == "forget" else out["loss"] + cfg.beta_kl * velocity_kl(out, mine, theirs)
-            loss.backward()  # only the candidates require gradients (checked above)
+            with cost.flops(flops_unit):  # the op's compute (vlu/cost.py)
+                out, mine, theirs = paired_forward(model, ref, taps, ref_taps, inputs)
+                loss = out["loss"] if kind == "forget" else out["loss"] + cfg.beta_kl * velocity_kl(out, mine, theirs)
+                loss.backward()  # only the candidates require gradients (checked above)
             for p in flat_params:
                 if id(p) in low and p.grad is not None:
                     low[id(p)] += p.grad.float()
@@ -265,7 +266,7 @@ def boundary_set(ctx: OpContext, ref, ref_taps, forget_task: str, retain_tasks: 
             chunk = frames[start : start + 32]
             samples = [make_sample(ctx.processor, ctx.modality_configs, ctx.demos[l], e, s) for l, e, s in chunk]
             torch.manual_seed(0)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
+            with cost.flops("boundary"), torch.autocast("cuda", dtype=torch.bfloat16):
                 ref(dict(ctx.processor.collator(samples)["inputs"]))
             # SigLIP2 packs all images of the batch into one sequence, (1, patches, C), image by image
             # (Eagle's extract_feature), and a sample's images are contiguous
@@ -314,7 +315,8 @@ def run(ctx: OpContext, probes: dict, recipe: Recipe, forget_task: str, retain_t
 
     forget_slots = [(forget_task,)] * recipe.batch_size
     retain_slots = [retain_tasks] * recipe.batch_size
-    boundary, boundary_summary = boundary_set(ctx, ref, ref_taps, forget_task, retain_tasks, cfg)
+    with cost.phase("boundary"):  # phases of the op's cost (vlu/cost.py), inside its "train" phase
+        boundary, boundary_summary = boundary_set(ctx, ref, ref_taps, forget_task, retain_tasks, cfg)
     cands = candidates(model, trainable, cfg.vision_blocks)
     top_k = {"vision": cfg.top_k_vision, "projector": cfg.top_k_projector, "reasoning": cfg.top_k_reasoning}
     report = {"config": asdict(cfg), "boundary": boundary_summary, "stages": {}}
@@ -328,8 +330,9 @@ def run(ctx: OpContext, probes: dict, recipe: Recipe, forget_task: str, retain_t
         for a in adapters.values():
             a.lora_A.requires_grad_(False)
             a.lora_B.requires_grad_(False)
-        scores = selection_scores(ctx, ref, taps, ref_taps, cands[stage], "significance" if stage == "reasoning" else "ratio",
-                                  cfg, forget_slots, retain_slots, stream=10 * s_index)
+        with cost.phase("selection"):
+            scores = selection_scores(ctx, ref, taps, ref_taps, cands[stage], "significance" if stage == "reasoning" else "ratio",
+                                      cfg, forget_slots, retain_slots, stream=10 * s_index, flops_unit=f"selection:{stage}")
         chosen = sorted(scores, key=scores.get, reverse=True)[: top_k[stage]]
         new = lora.attach(model, chosen, cfg.lora_r, cfg.lora_alpha, dropout=0.0)
         adapters.update(new)
@@ -342,38 +345,42 @@ def run(ctx: OpContext, probes: dict, recipe: Recipe, forget_task: str, retain_t
         generator = torch.Generator().manual_seed(ctx.seed * 1000 + s_index)
         model.eval()  # no dropout (module docstring); gradients still flow
         window, window_steps, window_start = {}, 0, time.time()
+        step_end = time.monotonic()  # when the loop last asked for a batch (vlu/cost.py: the wait for the next one)
         for step, batch in zip(range(steps), loader):
-            out_f, mine_f, ref_f = paired_forward(model, ref, taps, ref_taps, batch["forget"])
-            forget_fm, mismatch = out_f["loss"], velocity_kl(out_f, mine_f, ref_f)
-            check_finite({"forget_fm": forget_fm, "mismatch": mismatch}, f"VLA-Forget {stage} step {step + 1}")
-            g2 = flat_grad(-cfg.lambda_forget * forget_fm, params, retain_graph=True)
-            g3 = flat_grad(-cfg.lambda_mismatch * mismatch, params)
-            out_r, mine_r, ref_r = paired_forward(model, ref, taps, ref_taps, batch["retain"])
-            retain_fm, retain_kl = out_r["loss"], velocity_kl(out_r, mine_r, ref_r)
-            feat_r = feature_loss(mine_r, ref_r, cfg.gamma)
-            check_finite({"retain_fm": retain_fm, "retain_kl": retain_kl, "feat_r": feat_r},
-                         f"VLA-Forget {stage} step {step + 1}")
-            # Memory: the last backward through a graph frees its saved activations. The feature loss reaches
-            # only the vision / projector part, so it goes first; the FM + KL backward then frees the whole
-            # graph (the other order kept the LLM + DiT activations alive into the next step and stage).
-            g4 = flat_grad(cfg.lambda_feat * feat_r, params, retain_graph=True)
-            g1 = flat_grad(retain_fm + cfg.beta_kl * retain_kl, params)
-            # The feature loss depends on this stage's adapters only if they sit in the vision tower or the projector:
-            # in the reasoning stage (LLM / DiT adapters, earlier ones frozen) its gradient is zero (feat_r has no
-            # graph), so the boundary pass, needed there only for the logged loss, builds no graph either. The
-            # same forward runs (same flow-matching noise drawn), so the weights are the same as with a graph.
-            with torch.set_grad_enabled(feat_r.requires_grad):
-                out_m, mine_m, ref_m = paired_forward(model, ref, taps, ref_taps, batch["boundary"])
-            feat_m = feature_loss(mine_m, ref_m, cfg.gamma)
-            del out_m, mine_m, ref_m  # only feat_m is needed: drop the forward's LLM + DiT graph now
-            check_finite({"feat_m": feat_m}, f"VLA-Forget {stage} step {step + 1}")
-            g4 = g4 + flat_grad(cfg.lambda_feat * feat_m, params)
-            g, conflicts = pcgrad([g1, g2, g3, g4], generator)
-            set_grads(params, g)
-            grad_norm = float(torch.nn.utils.clip_grad_norm_(params, cfg.max_grad_norm, error_if_nonfinite=True))
-            optimizer.step()
-            check_finite({str(i): p for i, p in enumerate(params)}, f"VLA-Forget {stage} updated adapters")
-            optimizer.zero_grad(set_to_none=True)
+            step_start = time.monotonic()  # the step's own work, after its batch has arrived (vlu/cost.py)
+            with cost.flops(f"train:{stage}"):
+                out_f, mine_f, ref_f = paired_forward(model, ref, taps, ref_taps, batch["forget"])
+                forget_fm, mismatch = out_f["loss"], velocity_kl(out_f, mine_f, ref_f)
+                check_finite({"forget_fm": forget_fm, "mismatch": mismatch}, f"VLA-Forget {stage} step {step + 1}")
+                g2 = flat_grad(-cfg.lambda_forget * forget_fm, params, retain_graph=True)
+                g3 = flat_grad(-cfg.lambda_mismatch * mismatch, params)
+                out_r, mine_r, ref_r = paired_forward(model, ref, taps, ref_taps, batch["retain"])
+                retain_fm, retain_kl = out_r["loss"], velocity_kl(out_r, mine_r, ref_r)
+                feat_r = feature_loss(mine_r, ref_r, cfg.gamma)
+                check_finite({"retain_fm": retain_fm, "retain_kl": retain_kl, "feat_r": feat_r},
+                             f"VLA-Forget {stage} step {step + 1}")
+                # Memory: the last backward through a graph frees its saved activations. The feature loss reaches
+                # only the vision / projector part, so it goes first; the FM + KL backward then frees the whole
+                # graph (the other order kept the LLM + DiT activations alive into the next step and stage).
+                g4 = flat_grad(cfg.lambda_feat * feat_r, params, retain_graph=True)
+                g1 = flat_grad(retain_fm + cfg.beta_kl * retain_kl, params)
+                # The feature loss depends on this stage's adapters only if they sit in the vision tower or the projector:
+                # in the reasoning stage (LLM / DiT adapters, earlier ones frozen) its gradient is zero (feat_r has no
+                # graph), so the boundary pass, needed there only for the logged loss, builds no graph either. The
+                # same forward runs (same flow-matching noise drawn), so the weights are the same as with a graph.
+                with torch.set_grad_enabled(feat_r.requires_grad):
+                    out_m, mine_m, ref_m = paired_forward(model, ref, taps, ref_taps, batch["boundary"])
+                feat_m = feature_loss(mine_m, ref_m, cfg.gamma)
+                del out_m, mine_m, ref_m  # only feat_m is needed: drop the forward's LLM + DiT graph now
+                check_finite({"feat_m": feat_m}, f"VLA-Forget {stage} step {step + 1}")
+                g4 = g4 + flat_grad(cfg.lambda_feat * feat_m, params)
+                g, conflicts = pcgrad([g1, g2, g3, g4], generator)
+                set_grads(params, g)
+                grad_norm = float(torch.nn.utils.clip_grad_norm_(params, cfg.max_grad_norm, error_if_nonfinite=True))
+                optimizer.step()
+                check_finite({str(i): p for i, p in enumerate(params)}, f"VLA-Forget {stage} updated adapters")
+                optimizer.zero_grad(set_to_none=True)
+            cost.step_done(step_start, f"train:{stage}", cost.frames(batch), step_start - step_end)
 
             metrics = {"forget_fm": forget_fm.item(), "mismatch": mismatch.item(), "retain_fm": retain_fm.item(),
                        "retain_kl": retain_kl.item(), "feat": (feat_r + feat_m).item(), "conflicts": conflicts, "grad_norm": grad_norm}
@@ -387,11 +394,12 @@ def run(ctx: OpContext, probes: dict, recipe: Recipe, forget_task: str, retain_t
             if done % recipe.log_every == 0 or step + 1 == steps:
                 record = {"step": done, "stage": stage, **{k: v / window_steps for k, v in window.items()},
                           "steps_per_s": window_steps / (time.time() - window_start),
-                          "peak_mem_gb": torch.cuda.max_memory_allocated() / 2**30}
+                          "peak_mem_gb": cost.peak_allocated_gb()}
                 if done % recipe.unlearn_probe_every == 0 or step + 1 == steps:
                     record["probe"] = probe_losses(model, probes)
                 log(record)
                 window, window_steps, window_start = {}, 0, time.time()
+            step_end = time.monotonic()
         top = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:10]
         report["stages"][stage] = {"steps": steps, "candidates": len(scores), "selected": chosen, "top_scores": top,
                                    "minutes": (time.time() - started) / 60}
@@ -401,7 +409,8 @@ def run(ctx: OpContext, probes: dict, recipe: Recipe, forget_task: str, retain_t
     # into frozen weights, which theta0 shares: theta0 is not used from here on, so drop it first.
     del ref, ref_taps
     before = probe_losses(model, probes)
-    retained = lora.merge(model, adapters)
+    with cost.phase("merge"):
+        retained = lora.merge(model, adapters)
     after = probe_losses(model, probes)
     for name, p in model.named_parameters():
         p.requires_grad_(flags[name])
