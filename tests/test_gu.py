@@ -52,6 +52,35 @@ class GUTests(unittest.TestCase):
         torch.testing.assert_close(retain_null(d, [torch.zeros(2)], p), d)
         self.assertIs(retain_null(d, [], p), d)
 
+    def test_extreme_adam_scaling_preserves_independent_constraints(self):
+        # The former normal-equation pseudoinverse discarded the second constraint and returned
+        # [0, 1, 2], because the two Gram eigenvalues differed by 1e12.
+        d = torch.tensor([1., 1., 2.], dtype=torch.float64)
+        u = list(torch.eye(3, dtype=torch.float64)[:2])
+        p = torch.tensor([1e8, 1e-4, 1.], dtype=torch.float64)
+        torch.testing.assert_close(retain_null(d, u, p), torch.tensor([0., 0., 2.], dtype=d.dtype),
+                                   atol=1e-12, rtol=0.)
+
+    def test_projection_matches_independent_kkt_solve(self):
+        generator = torch.Generator().manual_seed(2026)
+        for _ in range(8):
+            u = torch.randn(7, 3, generator=generator, dtype=torch.float64)
+            d = torch.randn(7, generator=generator, dtype=torch.float64)
+            p = torch.exp(torch.randn(7, generator=generator, dtype=torch.float64) * 3)
+            inverse_metric = torch.diag(p.reciprocal())
+            kkt = torch.cat([torch.cat([inverse_metric, u], dim=1),
+                             torch.cat([u.T, torch.zeros(3, 3, dtype=u.dtype)], dim=1)], dim=0)
+            rhs = torch.cat([inverse_metric @ d, torch.zeros(3, dtype=u.dtype)])
+            expected = torch.linalg.solve(kkt, rhs)[:7]
+            actual = retain_null(d, list(u.T), p)
+            torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-9)
+            torch.testing.assert_close(u.T @ actual, torch.zeros(3, dtype=u.dtype), atol=1e-10, rtol=0.)
+
+    def test_invalid_metric_is_rejected(self):
+        for value in (0., -1., float("nan"), float("inf")):
+            with self.assertRaisesRegex(ValueError, "preconditioner"):
+                retain_null(torch.ones(2), [torch.ones(2)], torch.tensor([1., value]))
+
     def test_actual_adam_displacement_is_retain_null_with_momentum_and_decay(self):
         model = Quadratic()
         optimizer = torch.optim.AdamW([model.weight], lr=.02, weight_decay=.1)

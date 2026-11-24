@@ -2,8 +2,9 @@
 
 For each parameter tensor, U holds recent normalized retain gradients and P is Adam's diagonal
 preconditioner. For candidate displacement d, use d - P U (U^T P U)^+ U^T d. Thus U^T d_new = 0
-up to roundoff, including the candidate's momentum and weight decay. This is the paper's constrained
-projection, applied to the actual proposal rather than projecting raw gradients before Adam.
+up to roundoff, including the candidate's momentum and weight decay. This strict FM adaptation
+solves a constrained displacement problem; the authors instead whiten/project raw gradients,
+with reference-KL anchors and optional tangential updates, before applying Adam.
 """
 import torch
 
@@ -12,15 +13,31 @@ from vlu.updates import gradients, set_gradients
 
 
 def retain_null(displacement, basis, preconditioner):
-    """Metric projection; a tiny rank-space pseudoinverse handles dependent retain directions."""
+    """Metric projection via a whitened SVD, without squaring the condition number.
+
+    Column equilibration prevents large Adam scaling in one direction from causing a smaller,
+    independent retain constraint to be discarded by a relative cutoff on U^T P U.
+    """
     if not basis:
         return displacement
     u = torch.stack([v.reshape(-1).double() for v in basis], dim=1)
     p = preconditioner.reshape(-1).double()
     d = displacement.reshape(-1).double()
-    gram = u.T @ (p[:, None] * u)
-    coefficients = torch.linalg.pinv(gram, hermitian=True, rtol=1e-10) @ (u.T @ d)
-    return (d - p * (u @ coefficients)).reshape_as(displacement).to(displacement.dtype)
+    if not torch.isfinite(p).all() or not (p > 0).all():
+        raise ValueError("GU preconditioner must be finite and strictly positive")
+    root = p.sqrt()
+    whitened = root[:, None] * u
+    lengths = torch.linalg.vector_norm(whitened, dim=0)
+    whitened = whitened[:, lengths > 0]
+    if whitened.shape[1] == 0:
+        return displacement
+    whitened = whitened / lengths[lengths > 0]
+    q, singular, _ = torch.linalg.svd(whitened, full_matrices=False)
+    tolerance = torch.finfo(whitened.dtype).eps * max(whitened.shape) * singular[0]
+    q = q[:, singular > tolerance]
+    scaled = d / root
+    projected = root * (scaled - q @ (q.T @ scaled))
+    return projected.reshape_as(displacement).to(displacement.dtype)
 
 
 class GeometricUpdate:
