@@ -28,6 +28,11 @@ class Quadratic(nn.Module):
         return {"loss": ((self.weight - inputs["target"]).square()).sum()}
 
 
+class NoisyQuadratic(Quadratic):
+    def forward(self, inputs):
+        return {"loss": ((self.weight - inputs["target"] - torch.randn_like(self.weight)).square()).sum()}
+
+
 def make_rule(rho=.1, adaptive=False):
     return SharpMinMaxUpdate({"weight": torch.tensor([False, True])}, .5, rho, 1., adaptive)
 
@@ -90,9 +95,12 @@ class SharpTests(unittest.TestCase):
                          rule.forget_optimizer.state[model.weight]["exp_avg"])
 
     def test_two_passes_replay_noise_and_preserve_rng(self):
+        draws = []
         class Noisy(Quadratic):
             def forward(self, inputs):
-                return {"loss": ((self.weight - torch.randn(2)).square()).sum()}
+                noise = torch.randn(2)
+                draws.append(noise.clone())
+                return {"loss": ((self.weight - noise).square()).sum()}
         model = Noisy()
         rule = make_rule()
         optimizer = torch.optim.AdamW([model.weight], lr=.01, weight_decay=0.)
@@ -103,6 +111,10 @@ class SharpTests(unittest.TestCase):
         torch.manual_seed(10)
         rule.step(model, batches(), optimizer, 1.)
         self.assertTrue(torch.equal(torch.get_rng_state(), expected))
+        self.assertEqual(len(draws), 4)
+        self.assertTrue(torch.equal(draws[0], draws[1]))
+        self.assertTrue(torch.equal(draws[2], draws[3]))
+        self.assertFalse(torch.equal(draws[0], draws[2]))
 
     def test_second_pass_restores_all_batchnorm_statistics(self):
         model = nn.BatchNorm1d(2, momentum=None).train()
@@ -155,15 +167,22 @@ class SharpTests(unittest.TestCase):
                     plan.prepare(OpContext(node, Quadratic(), {}, None, {}, 0))
 
     def test_resume_saves_both_optimizers_and_masks(self):
+        self.check_resume(Quadratic)
+
+    def test_resume_matches_with_stochastic_sharpness_evaluations(self):
+        self.check_resume(NoisyQuadratic)
+
+    def check_resume(self, model_type):
         with tempfile.TemporaryDirectory() as tmp:
             def run(name, interrupt=False):
+                torch.manual_seed(41)
                 directory = Path(tmp) / name
                 directory.mkdir(exist_ok=True)
                 node = SimpleNamespace(dir=directory, weights_path=directory / "weights.safetensors")
                 recipe = dataclasses.replace(RECIPE, unlearn_lr=.01, unlearn_steps=6, save_every=3, log_every=6)
                 plan = plan_op(Node.from_path("sharp", "LA/LB/UB-sharp_minmax"), recipe)
                 plan.update_rule = make_rule()
-                model = Quadratic()
+                model = model_type()
                 original = plan.update_rule.step
                 calls = []
                 def step(*args):

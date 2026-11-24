@@ -58,10 +58,14 @@ class GeometricUpdate:
         retain_grads = gradients(retain_loss, params)
         for (name, _), g in zip(named.items(), retain_grads):
             if g is not None:
-                norm = g.float().norm()
-                if norm > 0:
+                direction = g.float()
+                scale = direction.abs().max()
+                if scale > 0:
+                    # Scaling first avoids overflow/underflow when finite gradients are squared.
+                    direction = direction / scale
+                    direction = direction / direction.norm()
                     history = self.basis.setdefault(name, [])
-                    history.append((g.float() / norm).clone())
+                    history.append(direction.clone())
                     del history[:-self.rank]
         del retain_grads
         forget_loss = model(batch["forget"])["loss"]

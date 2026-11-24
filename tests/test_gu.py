@@ -27,6 +27,12 @@ class Quadratic(nn.Module):
         return {"loss": ((self.weight * inputs["x"]).sum() - inputs["y"]).square()}
 
 
+class NoisyQuadratic(Quadratic):
+    def forward(self, inputs):
+        x = inputs["x"] + .1 * torch.randn_like(inputs["x"])
+        return {"loss": ((self.weight * x).sum() - inputs["y"]).square()}
+
+
 def batch():
     return {"retain": {"x": torch.tensor([1., 2., 0.]), "y": torch.tensor(1.)},
             "forget": {"x": torch.tensor([0., 1., 1.]), "y": torch.tensor(-2.)}}
@@ -109,14 +115,38 @@ class GUTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no learning rate yet"):
             check_op(node)
 
+    def test_finite_extreme_retain_gradients_are_not_dropped(self):
+        class Linear(Quadratic):
+            def forward(self, inputs):
+                return {"loss": self.weight @ inputs["x"]}
+        for scale in (1e-30, 1e20):
+            model = Linear()
+            optimizer = torch.optim.AdamW([model.weight], lr=.02)
+            rule = GeometricUpdate(2)
+            rule.initialize(optimizer)
+            data = batch()
+            data["retain"]["x"] = torch.tensor([1., 2., 0.]) * scale
+            old = model.weight.detach().clone()
+            rule.step(model, data, optimizer, 1.)
+            direction = rule.basis["weight"][0]
+            torch.testing.assert_close(direction, torch.tensor([1., 2., 0.]) / 5**.5)
+            self.assertLess(abs(float(direction @ (model.weight.detach() - old))), 1e-6)
+
     def test_resume_matches_full_training(self):
+        self.check_resume(Quadratic)
+
+    def test_resume_matches_full_training_with_stochastic_retain_basis(self):
+        self.check_resume(NoisyQuadratic)
+
+    def check_resume(self, model_type):
         with tempfile.TemporaryDirectory() as tmp:
-            initial = Quadratic().state_dict()
+            initial = model_type().state_dict()
             def run(name, interrupt=False):
+                torch.manual_seed(41)
                 path = Path(tmp) / name
                 path.mkdir(exist_ok=True)
                 node = SimpleNamespace(dir=path, weights_path=path / "weights.safetensors")
-                model = Quadratic()
+                model = model_type()
                 model.load_state_dict(initial)
                 recipe = dataclasses.replace(RECIPE, unlearn_lr=.01, unlearn_steps=6, save_every=3, log_every=6)
                 plan = plan_op(Node.from_path("gu", "LA/LB/UB-gu"), recipe)

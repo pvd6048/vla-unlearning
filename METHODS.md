@@ -3,7 +3,8 @@
 This file lists, method by method, what the paper and the authors' code do, what our code does, and
 every place the two differ. We wrote it to be checked. Each claim names the reference file and line,
 and the place in our code, so it can be verified in a few minutes. All reference repositories were
-read at the commits below; the comparison was redone on 2026-11-02, file by file.
+read at the commits below; the earlier comparisons were redone on 2026-11-02, file by file.
+GU and Sharp MinMax were checked separately on 2026-11-24; see [GU_SHARP_AUDIT.md](GU_SHARP_AUDIT.md).
 
 Each difference is labelled:
 
@@ -122,28 +123,38 @@ or turn the flow-matching proxy into an action likelihood.
 
 ## GU: optimizer-aware retain-null updates
 
-Reference: [Geometric-disentanglement Unlearning](https://aclanthology.org/2026.emnlp-main.2517/),
-and the authors' `Lemutisme/geo-unlearning` dev commit `bbe4d50`, `src/trainer/unlearn/geometric.py`.
+Reference: [Geometric-disentanglement Unlearning](https://arxiv.org/abs/2511.17100),
+whose [official landing repository](https://github.com/Lemutisme/Geometric-Unlearning) points to
+`Lemutisme/geo-unlearning`'s dev branch. We checked commit `bbe4d50`, `src/trainer/unlearn/geometric.py`.
 
 `gu` maximizes forget-task L_FM, subject to a local retain constraint. `vlu/gu.py` keeps up to
 `gu_rank` recent normalized retain-batch gradients per trainable parameter tensor (default 2).
 For AdamW's proposed displacement d and diagonal preconditioner P, it applies
-`d_new = d - P U (U^T P U)^+ U^T d`. The small pseudoinverse handles dependent retain directions.
+`d_new = d - P U (U^T P U)^+ U^T d`. This minimizes
+`0.5 * (d_new-d)^T P^-1 (d_new-d)` subject to `U^T d_new = 0`.
+An equilibrated, whitened float64 SVD implements the projection without forming the Gram matrix,
+so unequal Adam scaling does not discard independent constraints as the earlier pseudoinverse did.
 The current sampled retain gradients are therefore orthogonal to the actual update, up to roundoff.
 This is first-order preservation of sampled losses, not a guarantee of robot task success.
+Older basis vectors were measured at older weights; they are not current full-dataset retain gradients.
 
-**Adapted:** retain/forget token losses become L_FM; the original optimizer-metric projection is
-applied to the actual AdamW proposal, including momentum and decay, rather than only to raw gradients.
+**Adapted:** retain/forget token losses become L_FM; a constrained projection is applied to the
+actual AdamW proposal, including momentum and decay, rather than only to raw gradients.
 The released reference code uses a whitened per-tensor basis, optional sign-selective tangential
 updates, a reference-model KL retain direction, and selected final layers. Here the strict retain-null
 variant uses supervised retain FM gradients, the existing full trainable scope and a rolling raw
-gradient basis. It does not reproduce those optional heuristics or claim bit-identical reference code.
+gradient basis. Its displacement metric P^-1 differs from the authors' raw-gradient whitening
+metric W^T W, W = 1/(sqrt(v)+epsilon). These are different algorithms under anisotropic Adam scaling.
+Use **GU-FM (strict proposal projection)** in benchmark reports: it is a GU-inspired baseline,
+not a reproduction of the authors' full algorithm. Experiment notes record this implementation variant
+and the exact reference commit.
 The rank is deliberately small for GR00T; each direction can cost one additional gradient-sized buffer.
 Projection linear algebra uses float64 per tensor. The shared training loop saves the basis along
 with AdamW, the scheduler and RNG states, so interrupted runs resume the same algorithm.
 
-`tests/test_gu.py` checks the closed-form projection, singular/full-rank cases, actual displacements
-with Adam momentum/decay, planning validation and identical interrupted/resumed weights on CPU.
+`tests/test_gu.py` checks closed-form and independent KKT solutions, extreme optimizer/gradient
+scaling, singular/full-rank cases, actual displacements with Adam momentum/decay, planning validation
+and identical deterministic/stochastic interrupted/resumed weights on CPU.
 GR00T/LIBERO effectiveness and GPU memory use remain unverified; set an explicit calibrated learning rate.
 
 ## Sharp MinMax: opposite sharpness updates on a saliency split
@@ -157,6 +168,9 @@ assigns the top `sharp_forget_fraction` of the live trainable entries to the for
 As in SalUn, the threshold uses the shared bounded-memory quantile estimate for very large scopes;
 ties can change the actual fraction, which is recorded. Empty partitions fail. The mask is saved
 atomically in `sharp_minmax_mask.pt` and reused on restart (including a recipe check).
+The paper is internally inconsistent: section 3.2 and Algorithm 1 describe the smallest/bottom
+gradients, while Appendix E.2 explicitly describes the highest gradients. We follow E.2's
+saliency interpretation and disclose that choice rather than claiming unambiguous agreement.
 
 Each step does retain first, forget second, using independent AdamW states:
 
@@ -179,6 +193,8 @@ blend also includes the original gradient. Here the original gradient, perturbat
 update are all masked, preventing cross-partition updates. Both optimizer states, the mask and
 method settings are checkpointed. Temporary weights are restored even when a perturbed pass fails;
 BatchNorm statistics are updated only on the first evaluation.
+Use **Sharp MinMax-FM (partition-safe AdamW)** in reports; experiment notes include the variant
+and pinned author commit. It preserves the opposite-sharpness update kernels, with the adaptations above.
 
 `tests/test_sharp_minmax.py` checks analytic quadratic updates/signs, ASAM perturbations, partition
 isolation, noise replay, saliency-mask persistence, planning errors and exact resume. It also runs

@@ -80,6 +80,9 @@ Two further methods are available: `gu` (optimizer-aware retain-null updates) an
 (saliency-split retain SAM / forget sharpness maximization). Both require a retained task besides
 the one being unlearned. Their implementations are in `vlu/gu.py` and `vlu/sharp_minmax.py`; see
 [METHODS.md](METHODS.md) for the paper mappings and explicit GR00T adaptations.
+The [source and numerical audit](GU_SHARP_AUDIT.md) distinguishes verified computations from
+paper-reproduction claims. Report these as GU-FM (strict proposal projection) and Sharp MinMax-FM
+(partition-safe AdamW); in particular, `gu` does not reproduce the authors' full GU optimizer.
 
 After training `LA/LB`, example calibration commands are:
 

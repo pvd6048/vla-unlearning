@@ -182,7 +182,9 @@ def _plan_gu(node: Node, recipe: Recipe) -> OpPlan:
 
     forget, retain = _forget_retain(node, recipe)
     return OpPlan({"forget": forget, "retain": retain}, None, recipe.unlearn_steps, recipe.unlearn_lr,
-                  {"gu_rank": recipe.gu_rank, "objective": "forget FM ascent; retain-null AdamW proposal"},
+                  {"gu_rank": recipe.gu_rank, "objective": "forget FM ascent; retain-null AdamW proposal",
+                   "implementation_variant": "strict_fm_proposal_projection",
+                   "reference_commit": "Lemutisme/geo-unlearning@bbe4d5077b21f6ded0ddbff8bf49b0336260626a"},
                   update_rule=GeometricUpdate(recipe.gu_rank))
 
 
@@ -193,7 +195,9 @@ def _plan_sharp_minmax(node: Node, recipe: Recipe) -> OpPlan:
     plan = OpPlan({"forget": forget, "retain": retain}, None, recipe.unlearn_steps, recipe.unlearn_lr,
                   {"sharp_forget_fraction": recipe.sharp_forget_fraction, "sharp_alpha": recipe.sharp_alpha,
                    "sharp_rho": recipe.sharp_rho, "sharp_strength": recipe.sharp_strength,
-                   "sharp_adaptive": recipe.sharp_adaptive, "importance_batches": recipe.importance_batches})
+                   "sharp_adaptive": recipe.sharp_adaptive, "importance_batches": recipe.importance_batches,
+                   "implementation_variant": "partition_safe_fm_adamw",
+                   "reference_commit": "HaoranTang/sharp-unlearn@98c41d9e344bd0942421bdcdeee85878d6a657b1"})
 
     def prepare(ctx: OpContext):
         path = ctx.node.dir / "sharp_minmax_mask.pt"
