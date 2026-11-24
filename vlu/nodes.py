@@ -24,6 +24,7 @@ Files inside a node directory:
 
 from dataclasses import asdict, dataclass, fields, replace
 import json
+import math
 from pathlib import Path
 
 from vlu.config import RECIPE, RUNS_DIR, Recipe, VLAForgetConfig
@@ -250,6 +251,10 @@ def check_op(node: Node, recipe: Recipe = RECIPE) -> None:
         raise ValueError(f"{node}: cannot unlearn {op.task}, it is not retained by the parent")
     if op.method in NEEDS_RETAINED_TASK and kept == [op.task]:
         raise ValueError(f"{node}: {op.method} needs a retained task besides {op.task}")
+    if op.method in ("npo", "npo_rt"):
+        beta = recipe_for(op, recipe).npo_beta
+        if beta is None or not math.isfinite(beta) or beta <= 0:
+            raise ValueError(f"{node}: npo_beta must be finite and strictly positive, got {beta!r}")
     if "unlearn_lr" in _KEYS_USED.get(op.method, ()) and recipe_for(op, recipe).unlearn_lr is None:
         raise ValueError(f"{node}: {op.method} has no learning rate yet: set it from the calibration "
                          "(unlearn_lrs in vlu/config.py), or give the op one (@unlearn_lr=...)")

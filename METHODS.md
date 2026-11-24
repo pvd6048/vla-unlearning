@@ -111,6 +111,15 @@ Its limits:
 - **Scale is coupled to β:** the "variance ½" sets the scale of the log-ratio. Any other variance is
   equivalent to rescaling β. This is why β is calibrated rather than copied from the paper.
 
+**Implementation checks:** `npo_beta` must be finite and strictly positive, including per-op overrides;
+invalid values are rejected when planning, before loading the model. The reference replays the CPU
+generator and the generators of the model's CUDA devices inside an isolated RNG scope. After it
+finishes (or raises), the learner's post-forward random state is restored. This also lets the loss
+itself be tested on CPU; the full GR00T training pipeline still requires CUDA. `tests/test_npo.py`
+checks the official formula and its gradients, the fixed reference, NPO-RT's retain descent, and
+interrupted/resumed training for both variants. It does not establish GR00T forgetting performance
+or turn the flow-matching proxy into an action likelihood.
+
 ## 4. SSD (Selective Synaptic Dampening)
 
 | | Official code | Ours | |
