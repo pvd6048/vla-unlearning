@@ -218,7 +218,9 @@ assert with_graph[0::3] == with_graph[1::3] == [True] * 21 and with_graph[2::3] 
 counts = {n: ph["count"] for n, ph in vf_meter.phases.items()}
 assert counts["boundary"] == 1 and counts["selection"] == 3 and counts["merge"] == 1 and counts["probe"] >= 3, counts
 # steps per stage (6, 6, 9), the FLOP-counted first one of each untimed; each stage's step and selection counted apart
-assert {g: len(e["seconds"]) for g, e in vf_meter.steps.items()} == {"train:vision": 5, "train:projector": 5, "train:reasoning": 8}
+selection = {f"selection:{st}": 2 * recipe.vlaforget.selection_batches - 1 for st in vf.STAGES}  # forget + retain batches
+assert {g: len(e["seconds"]) for g, e in vf_meter.steps.items()} == {"train:vision": 5, "train:projector": 5, "train:reasoning": 8,
+                                                                      **selection}, {g: len(e["seconds"]) for g, e in vf_meter.steps.items()}
 assert {u: f["calls"] for u, f in vf_meter.flops.items()} == {
     "boundary": 2, **{f"selection:{st}": 2 * recipe.vlaforget.selection_batches for st in vf.STAGES},
     **{f"train:{st}": n for st, n in zip(vf.STAGES, (6, 6, 9))}}, vf_meter.flops

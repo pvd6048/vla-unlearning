@@ -67,12 +67,12 @@ def _check_optimizer_finite(optimizer):
 @torch.no_grad()
 def probe_losses(model, probes: dict[str, dict]) -> dict[str, float]:
     """L_FM of each task's fixed probe batch, with fixed noise and no dropout, so values are
-    comparable across steps, ops and branches. No graph: it is a measurement (a "probe" phase of the op's
-    cost, vlu/cost.py, not the method's work)."""
+    comparable across steps, ops and branches. A "probe" phase of the op's cost (vlu/cost.py): our
+    measurement, not the method's work."""
     was_training = model.training
     model.eval()
     out = {}
-    with cost.phase("probe"), torch.no_grad():
+    with cost.phase("probe"):
         for task, inputs in probes.items():
             with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
                 torch.manual_seed(0)

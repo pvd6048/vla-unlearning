@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import random
+import socket
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -307,6 +309,62 @@ assert "no longer planned (kept on disk, not run again): train:LA/LB/UB-ssd@ssd_
 assert stale not in written and len(written) == len(cal), (len(written), len(cal))
 print("calibrate: items of an earlier round no longer planned are dropped from the plan")
 
+# Round 3 on the guide's machine: a variant trained before the cost meter (no "efficiency" in its cost.json) is
+# archived outside the run and trained again; a measured one, purge, LA and LA/LB are kept. --prune-weights then
+# deletes only the weights of nodes no longer planned (round 2's GA) and of archived ones.
+guide_env = {**ENV, "VLU_RUNS_DIR": tempfile.mkdtemp(prefix="vlu_guide_")}
+guide = Path(guide_env["VLU_RUNS_DIR"])
+def fake_node(path, cost=None, extra=()):
+    d = guide / "cal" / path
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "op.json").write_text("{}")
+    (d / "weights.safetensors").write_bytes(b"w" * 1000)
+    for name in extra:
+        (d / name).write_bytes(b"s" * 1000)
+    if cost is not None:
+        (d / "cost.json").write_text(json.dumps(cost))
+    (d / "eval" / "final_seed0").mkdir(parents=True, exist_ok=True)
+    (d / "eval" / "final_seed0" / "A.json").write_text("{}")
+    return d
+fake_node("LA", {"seconds": 1}, extra=("step_002000.safetensors",))
+fake_node("LA/LB", {"seconds": 1})
+old_salun = fake_node("LA/LB/UB-salun@unlearn_lr=3e-5", {"seconds": 1200, "complete": True})   # round 2: no efficiency
+measured = fake_node("LA/LB/UB-ssd@ssd_reference=retain", {"seconds": 60, "efficiency": {"method": None}})
+ga = fake_node("LA/LB/UB-ga@unlearn_lr=1e-5", {"seconds": 600})  # round 2, no longer planned
+purge = guide / "cal" / "LA/LB/UB-purge"
+purge.mkdir()
+os.link(guide / "cal" / "LA/LB" / "weights.safetensors", purge / "weights.safetensors")
+calibrate = lambda *a: subprocess.run([sys.executable, str(ROOT / "scripts" / "calibrate.py"), *a], env=guide_env, text=True,  # noqa: E731
+                                      capture_output=True)
+first = calibrate()
+assert first.returncode == 0, first.stdout + first.stderr
+archived = guide / "_archive" / "cal" / "before_cost_meter" / "LA/LB/UB-salun@unlearn_lr=3e-5"
+assert not old_salun.exists() and (archived / "weights.safetensors").exists() and (archived / "eval" / "final_seed0" / "A.json").exists()
+assert measured.exists() and purge.exists() and (guide / "cal" / "LA/LB" / "weights.safetensors").exists() and ga.exists()
+assert "archived (trained before the cost meter; trained again now): LA/LB/UB-salun@unlearn_lr=3e-5" in first.stdout, first.stdout
+plan_items = json.loads((guide / "cal" / "plan.json").read_text())
+assert {"kind": "train", "node": "LA/LB/UB-salun@unlearn_lr=3e-5", "save_at": []} in plan_items
+again = calibrate()
+assert again.returncode == 0 and "archived" not in again.stdout, again.stdout  # nothing new to archive
+pruned = calibrate("--prune-weights")
+assert pruned.returncode == 0, pruned.stdout + pruned.stderr
+assert not (ga / "weights.safetensors").exists() and not (archived / "weights.safetensors").exists(), pruned.stdout
+assert (ga / "op.json").exists() and (ga / "eval" / "final_seed0" / "A.json").exists() and (archived / "op.json").exists()
+for kept in ("LA/weights.safetensors", "LA/step_002000.safetensors", "LA/LB/weights.safetensors",
+             "LA/LB/UB-ssd@ssd_reference=retain/weights.safetensors", "LA/LB/UB-purge/weights.safetensors"):
+    assert (guide / "cal" / kept).exists(), kept  # planned nodes (and those below an unplanned one) keep theirs
+assert pruned.stdout.count("deleted ") == 2, pruned.stdout  # GA's and the archived SalUn's weights, nothing else
+# Neither archives nor prunes while a worker is on the run (its claim is live: this process)
+claim = guide / "cal" / "_claims" / "train_LA~LB~UB-npo@unlearn_lr=1e-7"
+claim.mkdir(parents=True)
+(claim / "owner.json").write_text(json.dumps({"job": f"local{os.getpid()}@{socket.gethostname()}"}))
+for args in ((), ("--prune-weights",)):
+    busy = calibrate(*args)
+    assert busy.returncode != 0 and "a worker is running" in busy.stderr, busy.stdout + busy.stderr
+shutil.rmtree(claim)
+print("calibrate: variants trained before the cost meter are archived (outside the run) and retrained; --prune-weights "
+      "frees only unplanned and archived nodes' weights; neither while a worker runs")
+
 # --- run_local.sh --drift-only: features-only workers on the calibration plan -------------------------
 # Of the models trained so far (here base, LA, LA/LB and two variants) the features and LA/LB's Fisher are
 # extracted; untrained variants are left waiting; no training or eval runs; the workers exit 0 (features
@@ -405,7 +463,7 @@ def efficiency(method, steps, source, flags, notes):
             "method": {k: v for k, v in method.items() if k != "prepare"}, "units": {}, "steps": steps,
             "step_ms": None, "wait_ms": None, "idle_watts": 55.0, "limit_watts": 600.0, "max_processes": 1,
             "energy_source": source, "energy_notes": notes, "gpus": ["G"], "flags": flags, "unmeasured_sessions": 0}
-ssd_eff = efficiency({"prepare": (120, 17000, 31), "seconds": 126, "energy_j": 18000, "flops": 3e15, "energy_above_idle_j": 10800,
+ssd_eff = efficiency({"prepare": (120, 17000, 31), "seconds": 126, "data_wait_s": 48, "energy_j": 18000, "flops": 3e15, "energy_above_idle_j": 10800,
                       "mean_power_w": 18000 / 126, "peak_allocated_gb": 31.0, "peak_reserved_gb": 33.0},
                      {}, "board", [], ["MIG slice with 0.990 of the board's memory: share 1.000"])
 salun_eff = efficiency({"prepare": (60, 9000, 29), "seconds": 660, "energy_j": 99000, "flops": 1.2e16, "energy_above_idle_j": 72000,
@@ -420,8 +478,8 @@ out = Path(tempfile.mkdtemp()) / "report"
 subprocess.run([sys.executable, str(ROOT / "scripts" / "calibration_report.py"), "--run", "cal", "--out", str(out)], env=ENV, check=True)
 summary = (out / "summary.md").read_text()
 efficiency_md = summary.split("## Efficiency per op")[1].split("\n## ")[0]
-assert "| LA/LB/UB-ssd@ssd_reference=retain | G | 2.1 | 2.0 | 3.0 | 5.0 | 3.0 | 143 | 31.0 / 33.0 | board | - |" in efficiency_md, efficiency_md
-assert ("| LA/LB/UB-salun@unlearn_lr=3e-5 | G | 11.0* | 1.0 | 12.0* | 27.5* | 20.0* | 150 | 35.0 / 37.5 | zeus | "
+assert "| LA/LB/UB-ssd@ssd_reference=retain | G | 2.1 | 2.0 | 0.8 | 3.0 | 5.0 | 3.0 | 143 | 31.0 / 33.0 | board | - |" in efficiency_md, efficiency_md
+assert ("| LA/LB/UB-salun@unlearn_lr=3e-5 | G | 11.0* | 1.0 | - | 12.0* | 27.5* | 20.0* | 150 | 35.0 / 37.5 | zeus | "
         "shared GPU: 2 processes on it, so the energy includes other work |") in efficiency_md, efficiency_md
 assert "| LA/LB/UB-salun@unlearn_lr=3e-5 | train | 994 | 16 | 412 / 456 | 3 / 9 | 11.50 | 27.9 |" in efficiency_md, efficiency_md
 assert "- G: MIG slice with 0.990 of the board's memory: share 1.000" in efficiency_md
@@ -434,6 +492,11 @@ phases_csv = list(csv.DictReader(open(out / "efficiency_phases.csv")))
 assert {(r["node"], r["phase"]) for r in phases_csv} >= {("LA/LB/UB-ssd@ssd_reference=retain", "prepare"),
                                                           ("LA/LB/UB-salun@unlearn_lr=3e-5", "probe")}
 assert [r["achieved_tflops"] for r in csv.DictReader(open(out / "efficiency_steps.csv"))] == ["27.9"]
+# A later pack without any measured op leaves no CSV of the earlier one
+for path in ("LA/LB/UB-ssd@ssd_reference=retain", "LA/LB/UB-salun@unlearn_lr=3e-5"):
+    (Node.from_path("cal", path).dir / "cost.json").unlink()
+subprocess.run([sys.executable, str(ROOT / "scripts" / "calibration_report.py"), "--run", "cal", "--out", str(out)], env=ENV, check=True)
+assert not list(out.glob("efficiency*.csv")), "an earlier pack's numbers must not stay"
 for needed in ["## Learning", "## Speed and memory per op", "## Unlearning variants", "## Stream metrics", "oracle_gap",
                "npo_rt@unlearn_lr=3e-6", "dampened_fraction", "| failed |"]:
     assert needed in summary, needed

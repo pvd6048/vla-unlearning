@@ -2,6 +2,7 @@
 Normally called by scripts/run_local.sh (see CALIBRATION.md).
 
     python scripts/calibrate.py [--run cal]
+    python scripts/calibrate.py --prune-weights      only free disk (below), when no worker is running
 
 Run `cal` (seed 0), tasks A and B of LIBERO-Goal:
     base        zero-shot eval of A and B                         -> the floor
@@ -16,24 +17,35 @@ Run `cal` (seed 0), tasks A and B of LIBERO-Goal:
                 Fisher of A and B at LA/LB; scripts/calibration_drift.py turns them and the weights into
                 drift metrics after the runs (PLAN.md section 4).
 
+Every variant's cost is measured (vlu/cost.py: time, compute, memory, energy). A variant trained before
+that measurement existed (rounds 1-2 on the guide's machine) is moved to
+RUNS_DIR/_archive/<run>/before_cost_meter/ (outside the run, so no report or tool sees it; nothing is
+deleted) and trained, evaluated and measured again, so every variant of a round is measured by the same
+code on the same machine. LA and LA/LB are kept.
+
 Disk: a node's weights are ~6.5 GB (1.62B trainable parameters in fp32), so only weights that are
-evaluated are saved: LA's 2k/5k snapshots and every node's final weights (about 265 GB in all), plus
-the two Fisher files (6.5 GB each) and the probe features (~100 MB per node, float32).
+evaluated are saved: LA's 2k/5k snapshots and every node's final weights (about 130 GB in all), plus
+the two Fisher files (6.5 GB each) and the probe features (~100 MB per node, float32). --prune-weights
+deletes the weights (and resume checkpoints) of nodes the plan no longer has (earlier rounds' variants,
+e.g. GA and GradDiff) and of archived ones; their op.json, logs, eval results and drift features stay.
 """
 
 import argparse
+import json
 from pathlib import Path
+import shutil
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from submit import merge, warn_recipe_changes  # noqa: E402
+from vlu.config import RUNS_DIR  # noqa: E402
 from vlu.nodes import Node, check_op, run_seed  # noqa: E402
-from vlu.worker import item_key, load_plan, plan_path, write_plan  # noqa: E402
+from vlu.worker import item_key, load_plan, plan_path, someone_working, write_plan  # noqa: E402
 
 # Each variant is <method>[@<recipe overrides>] (vlu/nodes.py). Grids around each paper's default.
-# Round 3 (on the cluster, from scratch: LA, LA/LB and every variant), from rounds 1-2 on the guide's machine
-# (METHODS.md, CALIBRATION.md):
+# Round 3 (on the guide's machine, reusing LA and LA/LB and retraining every variant with the cost meter; or on
+# the cluster from scratch), from rounds 1-2 on the guide's machine (METHODS.md, CALIBRATION.md):
 # - GA and GradDiff are dropped: no rate both forgot B and kept A (GA: 1e-7 forgot nothing, 3e-7 lost A;
 #   GradDiff 3e-7 was halfway on both). Their code stays (vlu/ops.py), as do the round-2 results.
 # - NPO: every rate from 1e-6 up lost A. Its update starts as GA's (weight 1; Adam normalizes the scale) and
@@ -88,11 +100,73 @@ def items() -> list[dict]:
     return out
 
 
+ARCHIVE = "before_cost_meter"
+
+
+def archive_dir(run: str) -> Path:
+    return RUNS_DIR / "_archive" / run / ARCHIVE
+
+
+def archive_unmeasured(run: str) -> list[str]:
+    """Move every trained variant whose cost.json has no "efficiency" (trained before vlu/cost.py) to
+    archive_dir(run), so that it is trained and measured again. A variant trained with the meter is kept, so a
+    rerun archives nothing new. Purge trains nothing (no cost to measure)."""
+    moved = []
+    for variant in VARIANTS:
+        node = Node.from_path(run, f"LA/LB/UB-{variant}")
+        if node.last_op.shares_parent_weights or not node.done:
+            continue
+        cost = node.dir / "cost.json"
+        if cost.exists() and "efficiency" in json.loads(cost.read_text()):
+            continue
+        dest = archive_dir(run) / node.path
+        if dest.exists():
+            raise SystemExit(f"cannot archive {node}: {dest} exists already (move it away and rerun)")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(node.dir), str(dest))
+        moved.append(node.path)
+        print(f"archived (trained before the cost meter; trained again now): {node.path} -> {dest}")
+    return moved
+
+
+def prune_weights(run: str, plan: list[dict]) -> int:
+    """Delete the weights and resume checkpoints of nodes the plan does not train (earlier rounds' variants)
+    and of archived nodes. Only files directly in such a node's folder: a planned node below it (every
+    variant is below LA/LB's folder) keeps its own. Returns the bytes freed."""
+    planned = {Node.from_path(run, i["node"]).dir.resolve() for i in plan if i["kind"] == "train"}
+    planned.add((RUNS_DIR / run).resolve())  # the base: nothing of its own to delete
+    candidates = [d.parent for d in (RUNS_DIR / run).rglob("op.json") if d.parent.resolve() not in planned]
+    if archive_dir(run).exists():
+        candidates += [d.parent for d in archive_dir(run).rglob("op.json")]
+    freed = 0
+    for node_dir in sorted(set(candidates)):
+        for f in [*node_dir.glob("*.safetensors"), *node_dir.glob("resume.pt")]:
+            size = f.stat().st_size if f.stat().st_nlink == 1 else 0  # a hard link (purge) frees nothing
+            f.unlink()
+            freed += size
+            print(f"deleted {f} ({size / 1e9:.1f} GB)")
+    print(f"freed {freed / 1e9:.1f} GB")
+    return freed
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", default="cal")
+    parser.add_argument("--prune-weights", action="store_true",
+                        help="only delete the weights of nodes no longer planned and of archived ones (frees disk)")
     args = parser.parse_args()
+    # Only claims known to be live block (a claim whose job cannot be checked, e.g. squeue failing, does not stop
+    # a cluster successor job from planning); run_local.sh and run.sbatch plan before their workers start.
+    if someone_working(args.run, verified=True):
+        raise SystemExit(f"a worker is running on run {args.run}: stop it first (the plan and its nodes must not change under it)")
+    if args.prune_weights:
+        plan = load_plan(args.run)
+        if not plan:
+            raise SystemExit(f"run {args.run} has no plan yet: nothing to compare with")
+        prune_weights(args.run, plan)
+        return
     run_seed(args.run, 0)
+    archive_unmeasured(args.run)
     # The plan is exactly the current calibration: items of earlier rounds that are no longer planned
     # (e.g. round 1's SSD variants, computed with the old reference) are dropped, so no worker can run
     # them again under the current code. Their node directories are left as they are.

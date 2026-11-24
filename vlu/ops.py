@@ -11,6 +11,7 @@ loaded and before training (NPO: frozen reference copy; SSD: the whole method; S
 
 import copy
 import math
+import time
 from dataclasses import asdict, dataclass, field
 from typing import Callable
 
@@ -98,15 +99,21 @@ def accumulate_grads(ctx: OpContext, slots: Slots, n: int, stream: int, square: 
     total = {name: torch.zeros_like(p, dtype=torch.float32) for name, p in params.items()}
     was_training = model.training
     model.eval()
+    # The op's cost (vlu/cost.py; nothing without an active meter): each batch's compute and FLOPs, and its wait
+    # for the batch, which is built here on the main process (no DataLoader workers, unlike training)
+    batch_end = time.monotonic()
     for inputs in ctx.batches(slots, n, stream):
+        batch_start = time.monotonic()
         model.zero_grad(set_to_none=True)
-        with cost.flops("importance"):  # the op's compute (vlu/cost.py); nothing without an active meter
+        with cost.flops("importance"):
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 loss = fm_loss(model, inputs)
             loss.backward()
-        for name, p in params.items():
-            if p.grad is not None:
-                total[name] += p.grad.float().square() if square else p.grad.float()
+            for name, p in params.items():
+                if p.grad is not None:
+                    total[name] += p.grad.float().square() if square else p.grad.float()
+        cost.step_done(batch_start, "importance", len(inputs["action"]), batch_start - batch_end)
+        batch_end = time.monotonic()
     model.zero_grad(set_to_none=True)
     model.train(was_training)
     return total

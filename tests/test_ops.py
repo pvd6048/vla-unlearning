@@ -458,15 +458,20 @@ try:
         units = eff["units"]
         assert eff["method"]["flops"] == sum(u["flops"] for u in units.values()) > 0, units
         if method == "ssd":  # all of SSD is its preparation: two importances (forget, retain), no training step
-            assert eff["step_ms"] is None and eff["unmeasured_sessions"] == 0 and set(units) == {"importance"}, eff
+            assert set(eff["steps"]) == set(units) == {"importance"} and eff["unmeasured_sessions"] == 0, eff
             assert units["importance"]["calls"] == 2 * recipe.importance_batches and units["importance"]["per_call"] > 0
+            # importance batches are timed like steps, with their wait for data (built on the main process)
+            last = json.loads((node.dir / "cost_sessions.jsonl").read_text().splitlines()[-1])
+            batches = last["steps"]["importance"]
+            assert len(batches["seconds"]) == 2 * recipe.importance_batches - 1 and batches["frames"] == recipe.batch_size, batches
+            assert all(w is not None and w >= 0 for w in batches["waits"]) and eff["method"]["data_wait_s"] > 0, eff["method"]
         else:  # the crashed session computed the mask (counted); the second reused it; the killed one is flagged
             assert ph["prepare"]["count"] == 2 and eff["unmeasured_sessions"] == 1, eff
             assert units["importance"]["calls"] == recipe.importance_batches and units["train"]["calls"] == recipe.unlearn_steps, units
             assert eff["steps"]["train"]["frames"] == recipe.batch_size and eff["steps"]["train"]["flops_per_step"] > 0, eff["steps"]
             # the FLOP-counted first step is not timed: 6 - 1 steps, all within the warm-up
             last = json.loads((node.dir / "cost_sessions.jsonl").read_text().splitlines()[-1])
-            assert len(last["steps"]["train"]["seconds"]) == recipe.unlearn_steps - 1 and eff["step_ms"] is None, last["steps"]
+            assert len(last["steps"]["train"]["seconds"]) == recipe.unlearn_steps - 1 and eff["steps"]["train"]["step_ms"] is None, last["steps"]
             waits = last["steps"]["train"]["waits"]
             assert len(waits) == recipe.unlearn_steps - 1 and all(w is not None and w >= 0 for w in waits), waits
 finally:

@@ -196,15 +196,20 @@ def selection_scores(ctx: OpContext, ref, taps, ref_taps, names: list[str], scor
 
     def mean_gradients(kind: str, slots) -> list[torch.Tensor]:
         low = {id(p): torch.zeros_like(p, dtype=torch.float32) for p in flat_params if p.dtype != torch.float32}
+        batch_end = time.monotonic()  # the op's cost (vlu/cost.py): each batch's compute, FLOPs and wait for data
         for inputs in ctx.batches(slots, cfg.selection_batches, stream=stream + (kind == "retain")):
-            with cost.flops(flops_unit):  # the op's compute (vlu/cost.py)
+            batch_start = time.monotonic()
+            with cost.flops(flops_unit):
                 out, mine, theirs = paired_forward(model, ref, taps, ref_taps, inputs)
                 loss = out["loss"] if kind == "forget" else out["loss"] + cfg.beta_kl * velocity_kl(out, mine, theirs)
                 loss.backward()  # only the candidates require gradients (checked above)
-            for p in flat_params:
-                if id(p) in low and p.grad is not None:
-                    low[id(p)] += p.grad.float()
-                    p.grad = None
+                for p in flat_params:
+                    if id(p) in low and p.grad is not None:
+                        low[id(p)] += p.grad.float()
+                        p.grad = None
+            del out, mine, theirs, loss
+            cost.step_done(batch_start, flops_unit, len(inputs["action"]), batch_start - batch_end)
+            batch_end = time.monotonic()
         sums = [low[id(p)] if id(p) in low else p.grad if p.grad is not None else torch.zeros_like(p, dtype=torch.float32)
                 for p in flat_params]
         for p in flat_params:

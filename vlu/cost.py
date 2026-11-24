@@ -18,7 +18,8 @@ the reference copy), train (VLA-Forget: also its boundary set, layer selection a
 these probe, checkpoint and save: our instrumentation, not the method. The method's cost = prepare +
 train - probe - checkpoint - save.
 
-Steps (per group: "train", or VLA-Forget's "train:<stage>"): each step's time once its batch has arrived
+Steps (per group: "train", VLA-Forget's "train:<stage>", and the batches of a preparation: SSD's / SalUn's
+"importance", VLA-Forget's "selection:<stage>"): each step's time once its batch has arrived
 (CUDA synchronized at its end), the time it waited for its batch (the DataLoader: a CPU bottleneck shows
 here, not in the step), and its frames. The first WARMUP_STEPS of each group and session are left out
 (first kernel launches, a fresh DataLoader), and so is the step whose FLOPs were counted (the counter's
@@ -29,7 +30,10 @@ training step; an SSD / SalUn importance batch; a VLA-Forget selection batch or 
 number of calls. It counts matrix multiplications, convolutions and PyTorch's own attention, forward and
 backward; not elementwise work (optimizer, norms, activations) and not flash-attn's kernels (GR00T's LLM
 attention). So it is a lower bound of the true FLOPs, the same model's for every method: comparable across
-methods and GPUs. Achieved TFLOP/s = a step's FLOPs / its median time.
+methods and GPUs. Achieved TFLOP/s = a step's FLOPs / its median time. Before any of the op's work the
+meter checks that counting runs the model's kinds of ops (flop_counting_works: a matmul, PyTorch attention,
+flash-attn if installed); if not, or if a formula fails later, it counts nothing more (a note says why) and
+the op runs on: a measurement never fails an op.
 
 Idle: after loading, before the op's work, IDLE_SECONDS with nothing running give the GPU's idle power
 (a board just used for loading may not have reached its lowest power state: the idle power is then too
@@ -147,16 +151,37 @@ def _find_board(nvml, uuid: str):
     for candidate in candidates:
         try:
             handle = nvml.nvmlDeviceGetHandleByUUID(candidate)
+            if candidate.startswith("MIG-"):
+                return nvml.nvmlDeviceGetDeviceHandleFromMigDeviceHandle(handle), True
+            return handle, False
         except nvml.NVMLError:
             continue
-        if candidate.startswith("MIG-"):
-            return nvml.nvmlDeviceGetDeviceHandleFromMigDeviceHandle(handle), True
-        return handle, False
     return None, False
 
 
 def energy_source(index: int) -> NoEnergy:
-    """The best energy source for CUDA device `index` (module docstring), with the board and its power limit."""
+    """The best energy source for CUDA device `index` (module docstring), with the board and its power limit.
+    Never raises: a measurement must not fail the op (an unexpected NVML error gives no energy, with a note)."""
+    try:
+        return _energy_source(index)
+    except Exception as e:
+        source = NoEnergy(f"energy measurement unavailable ({type(e).__name__}: {e})")
+        return source
+
+
+def _zeus_board_index(index: int) -> int:
+    """The NVML index Zeus measures for CUDA device `index`: it maps the device through CUDA_VISIBLE_DEVICES
+    (integers only) and assumes NVML's order (PCI bus) is CUDA's, which holds only with CUDA_DEVICE_ORDER=PCI_BUS_ID."""
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    return int(visible.split(",")[index]) if visible else index
+
+
+def _uuid(nvml, handle) -> str:
+    uuid = nvml.nvmlDeviceGetUUID(handle)
+    return uuid.decode() if isinstance(uuid, bytes) else uuid
+
+
+def _energy_source(index: int) -> NoEnergy:
     props = torch.cuda.get_device_properties(index)
     try:
         import pynvml as nvml
@@ -182,6 +207,11 @@ def energy_source(index: int) -> NoEnergy:
     source = None
     if not mig:
         try:
+            # Zeus finds its GPU by index; ours is known by UUID: use Zeus only if both are the same board
+            zeus_board = _uuid(nvml, nvml.nvmlDeviceGetHandleByIndex(_zeus_board_index(index)))
+            if zeus_board != _uuid(nvml, board):
+                raise RuntimeError(f"Zeus would measure {zeus_board}, not this GPU {_uuid(nvml, board)} (set "
+                                   "CUDA_DEVICE_ORDER=PCI_BUS_ID, as slurm/env.sh does)")
             source = ZeusEnergy(index)
         except Exception as e:
             notes.append(f"Zeus not used ({type(e).__name__}: {e})")
@@ -217,21 +247,52 @@ class FlopCount(TorchDispatchMode):
     (torch.utils.flop_counter.flop_registry: matrix multiplications, convolutions, PyTorch attention). Not
     torch's FlopCounterMode: its per-module tracking puts gradient hooks on every module's inputs and
     outputs, and a hook that a backward never reaches (VLA-Forget's torch.autograd.grad on its adapters
-    only) keeps that forward's whole graph alive."""
+    only) keeps that forward's whole graph alive. A formula that fails makes the count unknown (`failed`),
+    never the op: the op's own result is already computed."""
 
     def __init__(self):
         super().__init__()
         from torch.utils.flop_counter import flop_registry
 
-        self.registry, self.total = flop_registry, 0
+        self.registry, self.total, self.failed = flop_registry, 0, None
 
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
         kwargs = kwargs or {}
         out = func(*args, **kwargs)
         formula = self.registry.get(func._overloadpacket)
-        if formula is not None:
-            self.total += formula(*args, **kwargs, out_val=out)
+        if formula is not None and self.failed is None:
+            try:
+                self.total += formula(*args, **kwargs, out_val=out)
+            except Exception as e:
+                self.failed = f"{func}: {type(e).__name__}: {e}"
         return out
+
+
+def flop_counting_works() -> str | None:
+    """None if counting runs the model's kinds of ops correctly (a matmul, PyTorch attention and, if installed,
+    flash-attn's kernels, forward and backward); else why not: the meter then counts nothing rather than risk the
+    op. Checked once per session, before any of the op's work."""
+    try:
+        x = torch.randn(2, 16, 4, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        w = torch.randn(32, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        expected = None
+        with FlopCount() as counter:
+            y = torch.nn.functional.scaled_dot_product_attention(x @ w, x, x)
+            try:
+                from flash_attn import flash_attn_func
+            except ImportError:
+                flash_attn_func = None
+            if flash_attn_func is not None:
+                y = y + flash_attn_func(x, x, x)
+            y.float().sum().backward()
+        if counter.failed:
+            return counter.failed
+        expected = 2 * 2 * 16 * 4 * 32 * 32 * 3  # the matmul: forward, and both gradients (x and w need them)
+        if counter.total < expected:
+            return f"counted {counter.total} FLOPs, at least {expected} expected"
+        return None
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
 
 
 # --- The meter -------------------------------------------------------------------------------------------
@@ -252,6 +313,7 @@ class Meter:
         self._open: list[dict] = []
         self._windows = 0
         self._counted: str | None = None  # the unit whose FLOPs were just counted (its step is not timed)
+        self.flops_note = flop_counting_works()  # None = counting is safe here
 
     @contextlib.contextmanager
     def active(self):
@@ -327,14 +389,17 @@ class Meter:
     def count_flops(self, unit: str):
         entry = self.flops.setdefault(unit, {"per_call": None, "calls": 0})
         entry["calls"] += 1
-        if entry["calls"] > 1:
+        if entry["calls"] > 1 or self.flops_note is not None:  # counted already, or counting is not safe here
             yield
             return
         self._counted = unit
         counter = FlopCount()
         with counter:
             yield
-        entry["per_call"] = float(counter.total)
+        if counter.failed:
+            self.flops_note = f"unit {unit}: {counter.failed}"
+        else:
+            entry["per_call"] = float(counter.total)
 
     def step_done(self, start: float, group: str = "train", frames: int | None = None, waited: float | None = None) -> None:
         torch.cuda.synchronize(self.device)
@@ -359,7 +424,7 @@ class Meter:
         steps = {g: {"seconds": [round(x, 5) for x in e["seconds"]],
                      "waits": [None if w is None else round(w, 5) for w in e["waits"]], "frames": e["frames"]}
                  for g, e in self.steps.items()}
-        return {"phases": self.phases, "steps": steps, "flops": self.flops, "idle_watts": self.idle_watts,
+        return {"phases": self.phases, "steps": steps, "flops": self.flops, "flops_note": self.flops_note, "idle_watts": self.idle_watts,
                 "max_processes": self.max_processes, "limit_watts": self.source.limit_watts,
                 "energy_source": self.source.name, "energy_share": self.source.share, "energy_note": self.source.note,
                 "gpu": torch.cuda.get_device_name(self.device)}
@@ -433,16 +498,22 @@ def aggregate(sessions: list[dict]) -> dict:
     seconds = sum(p["seconds"] for p in work) - sum(p["seconds"] for p in inside)
     energy = None if any(e is None for e in energies) else sum(energies[:2]) - sum(energies[2:])
     # FLOPs: every counted unit of every session (a resumed session counts what it computed itself)
+    # FLOPs: a unit's calls over every session, times its count per call (the same shapes in every session; a
+    # session that could not count, e.g. one that failed in its first step, takes another session's count)
     units: dict[str, dict] = {}
     for s in measured:
         for unit, f in s.get("flops", {}).items():
-            u = units.setdefault(unit, {"per_call": f["per_call"], "calls": 0, "flops": 0.0})
+            u = units.setdefault(unit, {"per_call": None, "calls": 0})
             u["calls"] += f["calls"]
-            u["flops"] = None if f["per_call"] is None or u["flops"] is None else u["flops"] + f["per_call"] * f["calls"]
+            u["per_call"] = u["per_call"] if u["per_call"] is not None else f["per_call"]
+    for u in units.values():
+        u["flops"] = None if u["per_call"] is None else u["per_call"] * u["calls"]
     total_flops = None if any(u["flops"] is None for u in units.values()) else sum(u["flops"] for u in units.values())
     idle = [s["idle_watts"] for s in measured if s.get("idle_watts") is not None]
     idle_watts = statistics.median(idle) if idle and len(idle) == len(measured) else None
-    method = {"seconds": seconds, "energy_j": energy, "flops": total_flops,
+    # Time spent waiting for data in the steps and batches that were timed (every one: warm-up included)
+    data_wait = sum(w or 0.0 for s in measured for e in s.get("steps", {}).values() for w in e["waits"])
+    method = {"seconds": seconds, "energy_j": energy, "flops": total_flops, "data_wait_s": data_wait,
               "energy_above_idle_j": None if energy is None or idle_watts is None else energy - idle_watts * seconds,
               "mean_power_w": None if energy is None or seconds <= 0 else energy / seconds,
               "peak_allocated_gb": max(p["peak_allocated_gb"] for p in work),
@@ -467,6 +538,8 @@ def aggregate(sessions: list[dict]) -> dict:
     processes = [s["max_processes"] for s in measured if s.get("max_processes") is not None]
     limits = [s["limit_watts"] for s in measured if s.get("limit_watts")]
     flags = []
+    if total_flops is None and units:
+        flags.append("FLOPs not counted (see the FLOP notes)")
     if processes and max(processes) > 1:
         flags.append(f"shared GPU: {max(processes)} processes on it, so the energy includes other work")
     if "power_limit" in sources:
@@ -481,4 +554,5 @@ def aggregate(sessions: list[dict]) -> dict:
             "step_ms": _stats_ms(all_steps), "wait_ms": _stats_ms(all_waits), "idle_watts": idle_watts,
             "limit_watts": max(limits) if limits else None, "max_processes": max(processes) if processes else None,
             "energy_source": "+".join(sources), "energy_notes": sorted({s["energy_note"] for s in measured if s.get("energy_note")}),
+            "flops_notes": sorted({s["flops_note"] for s in measured if s.get("flops_note")}),
             "gpus": sorted({s["gpu"] for s in measured}), "flags": flags, "unmeasured_sessions": unmeasured}

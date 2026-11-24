@@ -99,7 +99,9 @@ EFFICIENCY_NOTE = (
     "The cost of each op, measured by vlu/cost.py in every session of the op (its docstring has the details). "
     "**Method** = its preparation (all of SSD; SalUn's mask; NPO's reference copy) plus its training (VLA-Forget: "
     "also its boundary set, layer selection and merge), without our probe losses, checkpoints and final save, and "
-    "without loading the model. **Compute** = FLOPs counted by torch's FLOP counter (matrix multiplications, "
+    "without loading the model; **data wait** = the part of it spent waiting for batches (SSD's and SalUn's "
+    "importance batches and VLA-Forget's selection batches are built on the main process; training batches by "
+    "DataLoader workers), a cost of the CPUs rather than of the method. **Compute** = FLOPs counted by torch's FLOP counter (matrix multiplications, "
     "convolutions, PyTorch attention; forward and backward) on the first call of each repeated unit (a step, an "
     "importance or selection batch) times its calls: a lower bound (flash-attn's LLM attention and elementwise "
     "work are not counted), the same for every method, so comparable across methods and GPUs. **Energy** = the "
@@ -111,10 +113,11 @@ EFFICIENCY_NOTE = (
     "reserved GPU memory in preparation and training (the CUDA context, ~0.5 GiB, comes on top). * = a lower "
     "bound (a session was killed before it recorded). Times and energies compare across methods on the same GPU only.")
 STEPS_NOTE = (
-    "Training steps per op (VLA-Forget: per stage). Step = one optimizer step once its batch has arrived (CUDA "
-    "synchronized), batch wait = how long it waited for that batch (the DataLoader; a wait near the step time "
-    "means the CPUs limit the op, not the method); both over the steps after the first 5 of each stage and "
-    "session, without the step whose FLOPs were counted. TFLOP / step: as Compute above; achieved = TFLOP per step "
+    "Steps and batches per op: train = training steps (VLA-Forget: train:<stage>), importance = SSD's / SalUn's "
+    "importance batches, selection:<stage> = VLA-Forget's layer-selection batches. Step = its compute once its "
+    "batch has arrived (CUDA synchronized), batch wait = how long it waited for that batch (a wait near the step "
+    "time means the CPUs limit the op, not the method); both over the steps after the first 5 of each kind and "
+    "session, without the one whose FLOPs were counted. TFLOP / step: as Compute above; achieved = TFLOP per step "
     "/ median step time.")
 
 
@@ -142,19 +145,21 @@ def efficiency_tables(nodes: list[Node], out: Path) -> list[str]:
             continue
         found = efficiency_of(node)
         if found is None:
-            rows.append([node.path, *["-"] * 10])
+            rows.append([node.path, *["-"] * 11])
             continue
         e, complete = found
         m, mark = e["method"], "" if complete else "*"
         prepare = e["phases"].get("prepare", {}).get("seconds", 0.0)
         rows.append([node.path, ", ".join(e["gpus"]), num(m["seconds"], ".1f", 60, mark), num(prepare, ".1f", 60),
+                     num(m.get("data_wait_s"), ".1f", 60),
                      num(m["flops"], ".1f", 1e15, mark), num(m["energy_j"], ".1f", 3600, mark),
                      num(m["energy_above_idle_j"], ".1f", 3600, mark), num(m["mean_power_w"], ".0f"),
                      f"{m['peak_allocated_gb']:.1f} / {m['peak_reserved_gb']:.1f}", e["energy_source"],
                      "; ".join(e["flags"]) or "-"])
         notes.update(f"{', '.join(e['gpus'])}: {n}" for n in e["energy_notes"])
+        notes.update(f"{node.path}: FLOPs not counted: {n}" for n in e.get("flops_notes", []))
         csv_ops.append({"node": node.path, "gpus": " + ".join(e["gpus"]), "complete": complete, "method_s": m["seconds"],
-                        "prepare_s": prepare, "flops": m["flops"], "energy_j": m["energy_j"],
+                        "prepare_s": prepare, "data_wait_s": m.get("data_wait_s"), "flops": m["flops"], "energy_j": m["energy_j"],
                         "energy_above_idle_j": m["energy_above_idle_j"], "mean_power_w": m["mean_power_w"],
                         "idle_power_w": e["idle_watts"], "power_limit_w": e["limit_watts"],
                         "peak_allocated_gib": m["peak_allocated_gb"], "peak_reserved_gib": m["peak_reserved_gb"],
@@ -174,17 +179,18 @@ def efficiency_tables(nodes: list[Node], out: Path) -> list[str]:
                                "energy_j": ph["energy_j"], "peak_allocated_gib": ph["peak_allocated_gb"],
                                "peak_reserved_gib": ph["peak_reserved_gb"]})
     for name, records in (("efficiency.csv", csv_ops), ("efficiency_steps.csv", csv_steps), ("efficiency_phases.csv", csv_phases)):
+        (out / name).unlink(missing_ok=True)  # not an earlier pack's numbers
         if records:
             with open(out / name, "w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=list(records[0]))
                 writer.writeheader()
                 writer.writerows(records)
     md = ["## Efficiency per op", "", EFFICIENCY_NOTE, "",
-          *table(["node", "GPU", "method (min)", "of which prepare (min)", "compute (PFLOP)", "energy (Wh)",
+          *table(["node", "GPU", "method (min)", "of which prepare (min)", "of which data wait (min)", "compute (PFLOP)", "energy (Wh)",
                   "above idle (Wh)", "mean power (W)", "peak alloc / reserved (GiB)", "energy source", "flags"], rows), ""]
     if notes:
-        md += ["Energy measurement notes:", "", *[f"- {n}" for n in sorted(notes)], ""]
-    md += ["### Training steps", "", STEPS_NOTE, "",
+        md += ["Measurement notes:", "", *[f"- {n}" for n in sorted(notes)], ""]
+    md += ["### Steps and batches", "", STEPS_NOTE, "",
            *table(["node", "steps", "timed", "frames / step", "step median / p90 (ms)", "batch wait median / p90 (ms)",
                    "TFLOP / step", "achieved TFLOP/s"], step_rows),
            "", "Every number, and the time, energy and peak memory of every phase: `efficiency.csv`, "

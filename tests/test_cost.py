@@ -115,6 +115,26 @@ with FlopCounterMode(display=False) as reference:
 with cost.FlopCount() as ours:
     work()
 assert ours.total == reference.get_total_flops() > 0, (ours.total, reference.get_total_flops())
+# A FLOP formula that fails leaves the count unknown, never the op; the meter then counts nothing more
+class BadFormula(dict):
+    def get(self, key, default=None):
+        return lambda *a, **k: 1 / 0  # every op's formula fails
+
+
+m = cost.Meter(source=Ticks())
+assert m.flops_note is None, m.flops_note  # counting is safe here (torch's attention; flash-attn if installed)
+real_init = cost.FlopCount.__init__
+cost.FlopCount.__init__ = lambda self: (real_init(self), setattr(self, "registry", BadFormula()))[0]
+try:
+    with m.active():
+        with cost.flops("u"):
+            out = lin(x)
+        with cost.flops("v"):
+            pass
+finally:
+    cost.FlopCount.__init__ = real_init
+assert out.shape == (8, 32) and m.flops["u"]["per_call"] is None and "ZeroDivisionError" in m.flops_note, (m.flops, m.flops_note)
+assert m.flops["v"] == {"per_call": None, "calls": 1}, "not counted once counting failed"
 print("   FLOPs counted exactly on a unit's first call, times its calls (= torch's FLOP counter, conv / linear / attention, "
       "forward and backward); that step untimed; waits and frames kept")
 
@@ -124,10 +144,19 @@ class FakeNVML(types.ModuleType):
     class NVMLError(Exception):
         pass
 
-    def __init__(self, uuids, board_memory=None, counter=True, limit_mw=600_000, processes=1):
+    def __init__(self, uuids, board_memory=None, counter=True, limit_mw=600_000, processes=1, by_index=None, mig_parent=True):
         super().__init__("pynvml")
         self.uuids, self.board_memory, self.counter, self.limit_mw, self.mj = uuids, board_memory, counter, limit_mw, 0
-        self.processes = processes
+        self.processes, self.mig_parent = processes, mig_parent
+        self.by_index = {dev: uuids[0]} if by_index is None and uuids else (by_index or {})  # NVML index -> GPU
+
+    def nvmlDeviceGetHandleByIndex(self, i):
+        if i not in self.by_index:
+            raise self.NVMLError("Invalid Argument")
+        return self.by_index[i]
+
+    def nvmlDeviceGetUUID(self, handle):
+        return handle.encode()  # older bindings return bytes
 
     def nvmlDeviceGetComputeRunningProcesses(self, handle):
         if self.processes is None:
@@ -143,6 +172,8 @@ class FakeNVML(types.ModuleType):
         return uuid
 
     def nvmlDeviceGetDeviceHandleFromMigDeviceHandle(self, handle):
+        if not self.mig_parent:
+            raise self.NVMLError("Not Supported")
         return "board-of-" + handle
 
     def nvmlDeviceGetMemoryInfo(self, handle):
@@ -247,6 +278,21 @@ src, p, mtr = source_with(None, tdp=())
 assert src.name is None and p["energy_j"] is None
 src, p, mtr = source_with(FakeNVML([]), tdp=())
 assert src.name is None and "not found" in src.note
+# Zeus finds its GPU by index: if that is another board (CUDA's order is not NVML's), the counter of ours is read
+src, p, mtr = source_with(FakeNVML(full, by_index={dev: "GPU-someone-else"}), zeus=True)
+assert src.name == "nvml" and "Zeus would measure GPU-someone-else" in src.note, src.note
+# Never a failed op: NVML refusing the MIG parent, or failing unexpectedly
+src, p, mtr = source_with(FakeNVML(mig, board_memory=props.total_memory, mig_parent=False), tdp=(("NVIDIA", 50.0),))
+assert src.name == "power_limit" and "not found" in src.note
+
+
+class Exploding(FakeNVML):
+    def nvmlDeviceGetEnforcedPowerLimit(self, handle):
+        raise ValueError("driver says no")
+
+
+src, p, mtr = source_with(Exploding(full))
+assert src.name is None and "driver says no" in src.note and p["energy_j"] is None
 print("2. energy: Zeus on a full GPU, else NVML's counter; MIG: the board's counter x the slice's share (1 when it "
       "is the whole board), else power limit / TDP x time x share; none without NVML or a known GPU")
 
@@ -307,6 +353,7 @@ agg = cost.aggregate([s1, s1_end, {"start": 1.0}, s2_end])
 m = agg["method"]
 assert m["seconds"] == 20 + 120 - 7 - 4 - 3 and m["energy_j"] == 2000 + 12000 - 700 - 100 - 300, m  # load not counted
 assert m["flops"] == 13 * 1e12 + 4 * 5e11 and agg["units"]["train"]["calls"] == 13, (m["flops"], agg["units"])
+assert abs(m["data_wait_s"] - (10 * 1.0 + 0.1 + 0.3 + 0.2)) < 1e-9, m["data_wait_s"]  # every wait, warm-up included
 assert agg["idle_watts"] == 55.0 and abs(m["energy_above_idle_j"] - (12900 - 55.0 * 126)) < 1e-9 and abs(m["mean_power_w"] - 12900 / 126) < 1e-9
 assert (m["peak_allocated_gb"], m["peak_reserved_gb"]) == (30, 31) and agg["phases"]["probe"]["count"] == 4
 train = agg["steps"]["train"]
@@ -318,7 +365,14 @@ s3 = {"start": 2.0}  # killed: no record
 s2_none = {**s2_end, "phases": {**s2_end["phases"], "train": phase_record(50, None, 25)}, "energy_source": None,
            "flops": {"train": {"per_call": None, "calls": 6}}}
 agg = cost.aggregate([s1, s1_end, {"start": 1.0}, s2_none, s3])
-assert agg["method"]["energy_j"] is None and agg["method"]["energy_above_idle_j"] is None and agg["method"]["flops"] is None
+assert agg["method"]["energy_j"] is None and agg["method"]["energy_above_idle_j"] is None
+assert agg["method"]["flops"] == 13 * 1e12 + 4 * 5e11, "a session that could not count takes another session's count"
+agg = cost.aggregate([s1, s2_none, {"start": 1.0}, s1_end])  # also when the session that could not count came first
+assert agg["method"]["flops"] == 13 * 1e12 + 4 * 5e11, agg["units"]
+only_unknown = {**s1_end, "flops": {"train": {"per_call": None, "calls": 7}}, "flops_note": "unit train: boom"}
+agg = cost.aggregate([{"start": 0.0}, only_unknown])
+assert agg["method"]["flops"] is None and "FLOPs not counted (see the FLOP notes)" in agg["flags"] and agg["flops_notes"] == ["unit train: boom"]
+agg = cost.aggregate([s1, s1_end, {"start": 1.0}, s2_none, s3])
 assert agg["energy_source"] == "board+none" and agg["unmeasured_sessions"] == 1, agg
 assert cost.aggregate([{"start": 0.0}, {"seconds": 5.0}])["method"] is None, "sessions killed before recording"
 # Flags: a shared GPU, a pseudo-estimate, a slice smaller than the board, a mean power above the limit or below idle

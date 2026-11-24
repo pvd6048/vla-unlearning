@@ -106,8 +106,10 @@ Slurm resources for training and eval jobs are in `RESOURCES` at the top of `scr
 
 `CALIBRATION.md` is the one-page instruction for someone running our hyperparameter calibration on
 their own GPU machine: `scripts/setup_cluster.sh`, then `scripts/run_local.sh`, which runs the base
-tests, the calibration plan (`scripts/calibrate.py`: LA with 2k/5k/10k snapshots, LA/LB, 38 unlearning
-variants of B, and drift features of every model) with one local worker per GPU, computes drift
+tests, the calibration plan (`scripts/calibrate.py`: LA with 2k/5k/10k snapshots, LA/LB, 17 unlearning
+variants of B, and drift features of every model; a variant trained before the cost meter is archived to
+`$VLU_RUNS_DIR/_archive/` and trained again, so every variant is measured; `--prune-weights` frees the
+weights of nodes no longer planned) with one local worker per GPU, computes drift
 metrics between the models (`scripts/calibration_drift.py`: weights, Fisher-weighted, representations,
 policy, distance to the retrain oracle LA), and packs `summary.md` plus all logs and drift CSVs into one
 `.tar.gz` (`scripts/calibration_report.py`). Hyperparameter variants are ordinary nodes with recipe overrides in

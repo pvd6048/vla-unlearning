@@ -1,7 +1,8 @@
 # Calibration run (on a machine without Slurm)
 
-Thank you for running this. It fine-tunes the GR00T N1.6 robot policy on two LIBERO tasks, tries 38
-settings of 8 unlearning methods, and evaluates everything in the LIBERO simulator. The results tell
+Thank you for running this. It fine-tunes the GR00T N1.6 robot policy on two LIBERO tasks, tries 17
+settings of 6 unlearning methods, and evaluates everything in the LIBERO simulator. It also measures what
+each method costs: time, memory, compute and the GPU's energy. The results tell
 us how to set our hyperparameters. You don't need to interpret anything: run it and send back one file.
 
 ## What the machine needs
@@ -12,15 +13,16 @@ us how to set our hyperparameters. You don't need to interpret anything: run it 
   same time. The run checks the free memory at the start, warns about GPUs already in use, and stops
   if no GPU has 44 GB free.
 - NVIDIA driver 570 or newer (CUDA 12.8); 525 or newer usually works too.
-- About 350 GB of free disk (it fills to about 307 GB: 25 GB of software, model and data, 265 GB of
-  trained model weights, 17 GB of drift data), 64 GB of RAM or more, internet access during setup (about 15 GB is downloaded).
+- About 250 GB of free disk (it fills to about 175 GB: 25 GB of software, model and data, 130 GB of
+  trained model weights, 17 GB of drift data; up to 40 GB more for checkpoints while training), 64 GB of
+  RAM or more, internet access during setup (about 15 GB is downloaded).
 - `git`, `curl`, `cmake` and a C compiler (`build-essential` on Ubuntu). No root access or Slurm is needed.
 
 ## Steps
 
 Everything is installed and written inside the folder you clone into: Python environments, dataset,
 model, results. Nothing goes elsewhere (except `uv`, installed to `~/.local/bin` if missing). So first
-`cd` to any disk with about 350 GB free (`df -h .` shows the free space), then:
+`cd` to any disk with about 250 GB free (`df -h .` shows the free space), then:
 
 ```bash
 git clone https://github.com/pvd6048/vla-unlearning.git
@@ -38,6 +40,30 @@ When it finishes, it prints the file to send back, `calibration_<hostname>.tar.g
 If the disk with space is not where you want the code, you can instead put the large files elsewhere:
 `echo 'export VLU_STORE=/big/disk/vla-unlearning' > slurm/env.local.sh` before the setup step. The
 `.tar.gz` is then written to that directory.
+
+## Round 3 (on the machine that ran rounds 1 and 2)
+
+This round keeps the training of tasks A and B from before and trains 16 unlearning variants: 9 new ones
+and 7 from round 2 again, now with the measurement of their time, memory, compute and energy. The 7
+earlier ones are moved to a separate folder first (`$VLU_RUNS_DIR/_archive/`; nothing is deleted). In the
+`vla-unlearning` folder:
+
+```bash
+git pull
+tmux new -s cal3
+bash scripts/setup_cluster.sh 2>&1 | tee -a setup.log   # adds the energy-measurement package (a few minutes)
+df -h .                                                   # needs about 150 GB free
+bash scripts/run_local.sh                                 # about 5-8 hours
+```
+
+- **Not enough disk?** Before `run_local.sh`, this deletes the model weights of the earlier rounds'
+  variants that are no longer used (and of the 7 moved ones), up to about 180 GB; their results stay:
+  `source slurm/env.sh && $MAIN_PY scripts/calibrate.py --prune-weights`
+- **Please keep other programs off the GPUs** during this round: a GPU's energy reading includes
+  everything running on it. (If something else runs there, the report flags that GPU's numbers.)
+- **What to send back:** as before, `calibration_<hostname>.tar.gz` (the same name as round 2's file;
+  this one replaces it).
+- Everything in "If something goes wrong" below applies.
 
 ## If something goes wrong
 
@@ -63,8 +89,9 @@ always enough for us to see what happened.
 1. Records the machine (GPUs, driver, library versions) and picks GPU rendering for the simulator if a
    test render works on every GPU, else software rendering.
 2. Runs the code's self-tests (a few minutes). If one fails it stops here and packs the logs.
-3. Trains task A (with checkpoints at 2k, 5k, 10k steps), then task B, then 38 unlearning variants of
-   task B, and evaluates each in the simulator. One worker runs per GPU. After each training it also
+3. Trains task A (with checkpoints at 2k, 5k, 10k steps), then task B, then 17 unlearning variants of
+   task B, and evaluates each in the simulator. Each variant's time, memory, compute and GPU energy are
+   measured as it runs. One worker runs per GPU. After each training it also
    records how the model's internals respond to a fixed set of test frames (a few minutes per model).
 4. Compares the trained models with each other (drift metrics, `scripts/calibration_drift.py`). These
    are extra data: if a recording or the comparison fails, the run says so (WARNING) but still counts
