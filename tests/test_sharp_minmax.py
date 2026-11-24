@@ -1,5 +1,4 @@
 """Sharp MinMax known-answer signs, partitions, temporary perturbations and resume on CPU."""
-import copy
 import dataclasses
 from pathlib import Path
 import tempfile
@@ -14,7 +13,7 @@ from torch import nn
 from vlu.config import RECIPE
 from vlu.nodes import Node, check_op
 from vlu.ops import OpContext, plan_op
-from vlu.sharp_minmax import SharpMinMaxUpdate, perturbed
+from vlu.sharp_minmax import SharpMinMaxUpdate, perturbed, replay_randomness
 from vlu.train import train
 from test_training_safety import cpu_runtime
 
@@ -105,6 +104,17 @@ class SharpTests(unittest.TestCase):
         rule.step(model, batches(), optimizer, 1.)
         self.assertTrue(torch.equal(torch.get_rng_state(), expected))
 
+    def test_second_pass_restores_all_batchnorm_statistics(self):
+        model = nn.BatchNorm1d(2, momentum=None).train()
+        x = torch.tensor([[1., 3.], [5., 7.]])
+        model(x)
+        before = {n: b.clone() for n, b in model.named_buffers()}
+        with replay_randomness(model, torch.get_rng_state(), {}):
+            model(x * 2)
+        self.assertIsNone(model.momentum)
+        for name, buffer in model.named_buffers():
+            self.assertTrue(torch.equal(buffer, before[name]), name)
+
     def test_planning_rejects_invalid_settings_and_missing_retain(self):
         recipe = dataclasses.replace(RECIPE, unlearn_lr=.01)
         for key, values in {"sharp_alpha": (0., 1., float("nan")), "sharp_forget_fraction": (0., 1., None),
@@ -177,13 +187,13 @@ class SharpTests(unittest.TestCase):
             self.assertTrue(torch.equal(full.weight, resumed.weight))
 
     def test_both_methods_integrate_with_groot_shaped_fake(self):
-        from fakes import Fake, Demos, Proc, collate, install, make_sample
+        from fakes import Fake, Demos, Proc, collate, make_sample
         from vlu.data import OpBatches
-        install()
         for method in ("gu", "sharp_minmax"):
             with self.subTest(method=method), tempfile.TemporaryDirectory() as tmp, cpu_runtime():
                 directory = Path(tmp)
-                with patch.object(Node, "dir", new_callable=lambda: property(lambda self: directory)):
+                with patch.object(Node, "dir", new_callable=lambda: property(lambda self: directory)), \
+                     patch("vlu.data.make_sample", make_sample):
                     node = Node.from_path("smoke", f"LA/LB/UB-{method}")
                     model, processor = Fake(), Proc()
                     frozen = {n: p.detach().clone() for n, p in model.named_parameters() if not p.requires_grad}

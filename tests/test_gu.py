@@ -1,5 +1,4 @@
 """Known-answer GU projections and actual shared-loop checkpoint continuation on CPU."""
-import copy
 import dataclasses
 from pathlib import Path
 import tempfile

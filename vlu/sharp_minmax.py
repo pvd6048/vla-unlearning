@@ -34,9 +34,10 @@ def perturbed(params, grads, rho, adaptive):
 @contextmanager
 def replay_randomness(model, cpu_rng, cuda_rng):
     """Use the same FM noise/dropout for both evaluations; count BN statistics only once."""
-    norms = [(m, m.momentum) for m in model.modules() if isinstance(m, _BatchNorm)]
+    norms = [(m, m.momentum, {n: b.clone() for n, b in m.named_buffers()})
+             for m in model.modules() if isinstance(m, _BatchNorm)]
     try:
-        for m, _ in norms:
+        for m, _, _ in norms:
             m.momentum = 0.
         with torch.random.fork_rng(devices=list(cuda_rng)):
             torch.set_rng_state(cpu_rng)
@@ -44,8 +45,11 @@ def replay_randomness(model, cpu_rng, cuda_rng):
                 torch.cuda.set_rng_state(state, device)
             yield
     finally:
-        for m, momentum in norms:
+        for m, momentum, buffers in norms:
             m.momentum = momentum
+            with torch.no_grad():
+                for name, buffer in m.named_buffers():
+                    buffer.copy_(buffers[name])
 
 
 class SharpMinMaxUpdate:
