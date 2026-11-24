@@ -57,7 +57,7 @@ class OpContext:
 @dataclass
 class OpPlan:
     parts: dict[str, Slots]
-    loss_fn: LossFn
+    loss_fn: LossFn | None  # None when update_rule or custom_train owns differentiation
     steps: int
     lr: float
     notes: dict = field(default_factory=dict)  # method hyperparameters, recorded in op.json
@@ -184,6 +184,47 @@ def _plan_gu(node: Node, recipe: Recipe) -> OpPlan:
     return OpPlan({"forget": forget, "retain": retain}, None, recipe.unlearn_steps, recipe.unlearn_lr,
                   {"gu_rank": recipe.gu_rank, "objective": "forget FM ascent; retain-null AdamW proposal"},
                   update_rule=GeometricUpdate(recipe.gu_rank))
+
+
+def _plan_sharp_minmax(node: Node, recipe: Recipe) -> OpPlan:
+    from vlu.sharp_minmax import SharpMinMaxUpdate
+
+    forget, retain = _forget_retain(node, recipe)
+    plan = OpPlan({"forget": forget, "retain": retain}, None, recipe.unlearn_steps, recipe.unlearn_lr,
+                  {"sharp_forget_fraction": recipe.sharp_forget_fraction, "sharp_alpha": recipe.sharp_alpha,
+                   "sharp_rho": recipe.sharp_rho, "sharp_strength": recipe.sharp_strength,
+                   "sharp_adaptive": recipe.sharp_adaptive, "importance_batches": recipe.importance_batches})
+
+    def prepare(ctx: OpContext):
+        path = ctx.node.dir / "sharp_minmax_mask.pt"
+        params = trainable_named_parameters(ctx.model)
+        embodiment = embodiment_index()
+        if path.exists():
+            saved = torch.load(path, map_location="cpu", weights_only=True)
+            if saved["fraction"] != recipe.sharp_forget_fraction or saved["batches"] != recipe.importance_batches:
+                raise ValueError("Sharp MinMax mask was prepared with a different recipe")
+            masks = {n: m.to(params[n].device) for n, m in saved["masks"].items()}
+        else:
+            grads = accumulate_grads(ctx, forget, recipe.importance_batches, stream=0, square=False)
+            saliency = {name: g.abs() for name, g in grads.items()}
+            threshold = top_fraction_threshold({n: live_part(n, s, embodiment) for n, s in saliency.items()},
+                                               recipe.sharp_forget_fraction)
+            masks = {n: (s >= threshold) & (s > 0) for n, s in saliency.items()}
+            ctx.node.dir.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            torch.save({"fraction": recipe.sharp_forget_fraction, "batches": recipe.importance_batches,
+                        "masks": masks}, tmp)
+            tmp.replace(path)
+        selected = sum(int(live_part(n, m, embodiment).sum()) for n, m in masks.items())
+        total = sum(live_part(n, m, embodiment).numel() for n, m in masks.items())
+        if not 0 < selected < total:
+            raise ValueError("Sharp MinMax saliency produced an empty partition; check fraction/data")
+        plan.notes["actual_forget_fraction"] = selected / total
+        plan.update_rule = SharpMinMaxUpdate(masks, recipe.sharp_alpha, recipe.sharp_rho,
+                                             recipe.sharp_strength, recipe.sharp_adaptive)
+
+    plan.prepare = prepare
+    return plan
 
 
 def _plan_npo(node: Node, recipe: Recipe) -> OpPlan:
@@ -419,6 +460,7 @@ UNLEARN_METHODS: dict[str, Callable[[Node, Recipe], OpPlan]] = {
     "ga": _plan_ga,
     "graddiff": _plan_graddiff,
     "gu": _plan_gu,
+    "sharp_minmax": _plan_sharp_minmax,
     "npo": _plan_npo,
     "npo_rt": _plan_npo_rt,
     "ssd": _plan_ssd,

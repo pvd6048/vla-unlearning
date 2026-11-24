@@ -7,7 +7,7 @@ projection, applied to the actual proposal rather than projecting raw gradients 
 """
 import torch
 
-from vlu.model import trainable_named_parameters
+from vlu.model import check_finite, trainable_named_parameters
 from vlu.updates import gradients, set_gradients
 
 
@@ -51,6 +51,7 @@ class GeometricUpdate:
         grad_norm = set_gradients(params, gradients(-forget_loss, params), max_grad_norm)
         before = [p.detach().clone() for p in params]
         optimizer.step()
+        check_finite(named, "GU AdamW proposal")
         group_of = {id(p): group for group in optimizer.param_groups for p in group["params"]}
         with torch.no_grad():
             for (name, p), old in zip(named.items(), before):

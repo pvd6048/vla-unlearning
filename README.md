@@ -74,6 +74,27 @@ The rate here is illustrative, not a validated setting. `npo_beta` defaults to 0
 and positive; it can be overridden in the node token, e.g. `@unlearn_lr=1e-6+npo_beta=1`.
 Run `python tests/test_npo.py` for CPU formula, gradient, reference, RNG and resume regression checks.
 
+## GU and Sharp MinMax
+
+Two further methods are available: `gu` (optimizer-aware retain-null updates) and `sharp_minmax`
+(saliency-split retain SAM / forget sharpness maximization). Both require a retained task besides
+the one being unlearned. Their implementations are in `vlu/gu.py` and `vlu/sharp_minmax.py`; see
+[METHODS.md](METHODS.md) for the paper mappings and explicit GR00T adaptations.
+
+After training `LA/LB`, example calibration commands are:
+
+```bash
+python -m vlu.run_op --run goal_s0 --node 'LA/LB/UB-gu@unlearn_lr=1e-6+gu_rank=2'
+python -m vlu.run_op --run goal_s0 --node 'LA/LB/UB-sharp_minmax@unlearn_lr=1e-6+sharp_forget_fraction=0.3+sharp_alpha=0.99+sharp_rho=0.1'
+```
+
+These rates and strengths are illustrative. Neither method is added to the calibrated main-run list
+or given a calibrated learning rate. The usual node overrides and `scripts/submit.py --nodes` work;
+calibrate them before adding them to the main benchmark. GU checkpoints its retain basis; Sharp MinMax
+saves its mask and both optimizers. Both support the shared loop's probes, snapshots and resume.
+Compare measured compute as well as step counts: Sharp MinMax performs two optimizer updates and four
+forward/gradient evaluations per step; GU stores up to `gu_rank` retain-gradient buffers.
+
 ## One-time setup (login node)
 
 ```bash

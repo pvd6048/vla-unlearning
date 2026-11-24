@@ -146,6 +146,45 @@ with AdamW, the scheduler and RNG states, so interrupted runs resume the same al
 with Adam momentum/decay, planning validation and identical interrupted/resumed weights on CPU.
 GR00T/LIBERO effectiveness and GPU memory use remain unverified; set an explicit calibrated learning rate.
 
+## Sharp MinMax: opposite sharpness updates on a saliency split
+
+Reference: Tang & Khanna, [Sharpness-Aware Machine Unlearning](https://arxiv.org/abs/2506.13715),
+Algorithm 2 and Appendix E.2; `HaoranTang/sharp-unlearn` commit `98c41d9`, `unlearn/neggrad.py`
+and `sam/sam.py`. This is the split method, not a SAM wrapper around GradDiff.
+
+`sharp_minmax` estimates absolute accumulated forget-FM gradients with `importance_batches`, then
+assigns the top `sharp_forget_fraction` of the live trainable entries to the forget partition.
+As in SalUn, the threshold uses the shared bounded-memory quantile estimate for very large scopes;
+ties can change the actual fraction, which is recorded. Empty partitions fail. The mask is saved
+atomically in `sharp_minmax_mask.pt` and reused on restart (including a recipe check).
+
+Each step does retain first, forget second, using independent AdamW states:
+
+- Retain loss `alpha * L_FM(retain)`, sharpness minimization.
+- Forget loss `-(1-alpha) * L_FM(forget)`, sharpness maximization.
+- On each partition, perturb along its gradient by rho (optionally ASAM's parameter-scaled
+  perturbation), re-evaluate, restore weights exactly, and update with
+  `g0 + sign * strength * (g_perturbed - g0)`; sign is +1 for retain, -1 for forget.
+
+**Adapted:** cross-entropy becomes FM; both evaluations use the same FM noise, timestep and dropout
+draws to isolate curvature. Trainable scope remains the baseline GR00T scope. AdamW and the shared
+warmup/cosine schedule replace the reference's SGD setup; decay is disabled so it cannot change the
+inactive partition. One operation step is a retain update plus a forget update (four forward/gradient
+evaluations), not the cost of one ordinary baseline update. Preparation uses sampled batches rather
+than a full epoch, as for SalUn. Default alpha=.99, rho=.1, fraction=.3, strength=1 and vanilla SAM
+are provisional starting values, not calibrated robot settings.
+
+**Partition correction:** the reference masks only the second gradient, but its sharpness-max
+blend also includes the original gradient. Here the original gradient, perturbation and blended
+update are all masked, preventing cross-partition updates. Both optimizer states, the mask and
+method settings are checkpointed. Temporary weights are restored even when a perturbed pass fails;
+BatchNorm statistics are updated only on the first evaluation.
+
+`tests/test_sharp_minmax.py` checks analytic quadratic updates/signs, ASAM perturbations, partition
+isolation, noise replay, saliency-mask persistence, planning errors and exact resume. It also runs
+both new methods through preparation, shared-loop training, probes and snapshots on the small
+GR00T-shaped fake. Real model forgetting, runtime, memory and rollout quality remain unverified.
+
 ## 4. SSD (Selective Synaptic Dampening)
 
 | | Official code | Ours | |
