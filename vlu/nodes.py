@@ -236,7 +236,7 @@ def recipe_for(op: Op, recipe: Recipe) -> Recipe:
 
 # Unlearning methods that train on, or compare against, the retained tasks: they cannot unlearn a
 # parent's only task (vlu/ops.py's plans rely on this check, see plan_op).
-NEEDS_RETAINED_TASK = frozenset({"graddiff", "npo_rt", "ssd", "salun", "vlaforget"})
+NEEDS_RETAINED_TASK = frozenset({"graddiff", "npo_rt", "gu", "sharp_minmax", "ssd", "salun", "vlaforget"})
 
 
 def check_op(node: Node, recipe: Recipe = RECIPE) -> None:
@@ -255,6 +255,22 @@ def check_op(node: Node, recipe: Recipe = RECIPE) -> None:
         beta = recipe_for(op, recipe).npo_beta
         if beta is None or not math.isfinite(beta) or beta <= 0:
             raise ValueError(f"{node}: npo_beta must be finite and strictly positive, got {beta!r}")
+    if op.method == "gu":
+        rank = recipe_for(op, recipe).gu_rank
+        if not isinstance(rank, int) or rank < 1:
+            raise ValueError(f"{node}: gu_rank must be a positive integer")
+    if op.method == "sharp_minmax":
+        effective = recipe_for(op, recipe)
+        for key in ("sharp_forget_fraction", "sharp_alpha"):
+            value = getattr(effective, key)
+            if value is None or not math.isfinite(value) or not 0 < value < 1:
+                raise ValueError(f"{node}: {key} must lie strictly between 0 and 1")
+        for key in ("sharp_rho", "sharp_strength"):
+            value = getattr(effective, key)
+            if value is None or not math.isfinite(value) or value < 0:
+                raise ValueError(f"{node}: {key} must be finite and nonnegative")
+        if not isinstance(effective.importance_batches, int) or effective.importance_batches < 1:
+            raise ValueError(f"{node}: importance_batches must be positive")
     if "unlearn_lr" in _KEYS_USED.get(op.method, ()) and recipe_for(op, recipe).unlearn_lr is None:
         raise ValueError(f"{node}: {op.method} has no learning rate yet: set it from the calibration "
                          "(unlearn_lrs in vlu/config.py), or give the op one (@unlearn_lr=...)")
@@ -268,6 +284,9 @@ _KEYS_USED = {
     "L": ("learn_steps", "lr", "replay_per_task") + _TRAIN_KEYS,
     "ga": _UNLEARN_KEYS,
     "graddiff": _UNLEARN_KEYS,
+    "gu": _UNLEARN_KEYS + ("gu_rank",),
+    "sharp_minmax": _UNLEARN_KEYS + ("importance_batches", "sharp_forget_fraction", "sharp_alpha",
+                                    "sharp_rho", "sharp_strength", "sharp_adaptive"),
     "npo": _UNLEARN_KEYS + ("npo_beta",),
     "npo_rt": _UNLEARN_KEYS + ("npo_beta",),
     "ssd": ("batch_size", "importance_batches", "ssd_alpha", "ssd_lambda", "ssd_reference", "ssd_adaptive"),

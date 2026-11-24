@@ -29,3 +29,9 @@ what the cluster smoke test is for.
 rejection, fixed reference, isolated random-state replay, and interrupted/resumed updates. Its optional
 non-current-device RNG check is skipped unless two CUDA devices are available. These tests use the
 actual operation plans; only GR00T imports and the training loop's CUDA/worker plumbing are stubbed.
+
+`python tests/test_gu.py` checks metric projections, actual AdamW displacements and exact resume.
+`python tests/test_sharp_minmax.py` checks sharp min/max signs, partition isolation, ASAM perturbations,
+temporary-weight restoration, paired randomness, saved saliency masks and both-optimizer resume.
+It also trains both new plans with probes/snapshots on the GR00T-shaped fake under CPU plumbing.
+These run on CPU and are included in the local runner (Slurm's check already discovers all tests).
