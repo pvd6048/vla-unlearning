@@ -57,6 +57,23 @@ scripts/             setup_cluster.sh, prepare_data.py, submit.py (plan + worker
 Every job is safe to rerun: done nodes and finished evals are skipped, interrupted training resumes
 from `resume.pt` (saved every 2500 steps), interrupted evals redo only unfinished tasks.
 
+## NPO and NPO-RT
+
+Both methods are implemented: `UB-npo` uses the forget objective only; `UB-npo_rt` adds the retained
+tasks' ordinary flow-matching loss with weight 1. See [METHODS.md](METHODS.md#3-npo) for the likelihood
+proxy and its limits. NPO-RT requires at least one task other than B still retained by the parent.
+Neither method currently has a calibrated default learning rate in `vlu/config.py`, so specify one
+for a calibration experiment, for example after training `LA/LB`:
+
+```bash
+python -m vlu.run_op --run goal_s0 --node 'LA/LB/UB-npo@unlearn_lr=1e-6'
+python -m vlu.run_op --run goal_s0 --node 'LA/LB/UB-npo_rt@unlearn_lr=1e-6'
+```
+
+The rate here is illustrative, not a validated setting. `npo_beta` defaults to 0.1 and must be finite
+and positive; it can be overridden in the node token, e.g. `@unlearn_lr=1e-6+npo_beta=1`.
+Run `python tests/test_npo.py` for CPU formula, gradient, reference, RNG and resume regression checks.
+
 ## One-time setup (login node)
 
 ```bash

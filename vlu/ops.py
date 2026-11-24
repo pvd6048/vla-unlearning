@@ -203,12 +203,18 @@ def _npo(node: Node, recipe: Recipe, with_retain: bool) -> OpPlan:
 
     def loss_fn(model, batch):
         inputs, ref = batch["forget"], state["ref"]
-        rng = torch.get_rng_state(), torch.cuda.get_rng_state()
+        # Only the model's devices participate: a CPU objective must not initialize CUDA, and a
+        # model on cuda:1 must not replay cuda:0's generator. The reference must not change the
+        # learner's post-forward RNG stream, even if it draws extra numbers or raises an error.
+        devices = sorted({p.device.index for p in (*model.parameters(), *model.buffers()) if p.is_cuda})
+        cpu_rng = torch.get_rng_state()
+        cuda_rng = {device: torch.cuda.get_rng_state(device) for device in devices}
         out = model(inputs)
-        torch.set_rng_state(rng[0])
-        torch.cuda.set_rng_state(rng[1])
-        ref.train(model.training)
-        with torch.no_grad():
+        with torch.random.fork_rng(devices=devices), torch.no_grad():
+            torch.set_rng_state(cpu_rng)
+            for device, rng in cuda_rng.items():
+                torch.cuda.set_rng_state(rng, device)
+            ref.train(model.training)
             ref_out = ref(inputs)
         log_ratio = fm_sse_per_sample(ref_out) - fm_sse_per_sample(out)  # log p_theta - log p_ref
         loss = (2 / beta) * torch.nn.functional.softplus(beta * log_ratio).mean()

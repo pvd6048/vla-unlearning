@@ -24,3 +24,8 @@ python tests/test_cost.py            # op cost meter (vlu/cost.py): phases, peak
 
 What they cannot check: anything that needs real GR00T weights, the dataset or the simulator. That is
 what the cluster smoke test is for.
+
+`python tests/test_npo.py` runs on CPU: NPO/NPO-RT formula and gradient checks, invalid-temperature
+rejection, fixed reference, isolated random-state replay, and interrupted/resumed updates. Its optional
+non-current-device RNG check is skipped unless two CUDA devices are available. These tests use the
+actual operation plans; only GR00T imports and the training loop's CUDA/worker plumbing are stubbed.
