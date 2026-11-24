@@ -80,6 +80,7 @@ class Recipe:
     # Method hyperparameters (each paper's default, mapped to the flow-matching loss). SSD's are kept by
     # calibration round 2 (alpha 5, lambda 1, retain reference: A 1.00, B 0.00); NPO's beta is PROVISIONAL.
     npo_beta: float = 0.1  # NPO paper default; log-likelihood stand-in = -sum of squared FM errors of a chunk
+    gu_rank: int = 2  # recent retain directions per tensor; memory = up to rank gradient buffers
     ssd_alpha: float = 5.0  # SSD official code: 10 for ResNet, 5 for ViT (transformers); dampen weights with I_forget > alpha * I_ref ...
     ssd_lambda: float = 1.0  # ... by the factor min(lambda * I_ref / I_forget, 1)
     # I_ref, the reference importance: "retain" = the retained tasks (default; METHODS.md section 4: the paper's

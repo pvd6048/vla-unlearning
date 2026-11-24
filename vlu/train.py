@@ -85,9 +85,13 @@ def probe_losses(model, probes: dict[str, dict]) -> dict[str, float]:
 def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], recipe: Recipe, save_at: set[int]):
     named = trainable_named_parameters(model)
     params = list(named.values())
+    rule = getattr(plan, "update_rule", None)
     # With a gradient mask (SalUn) only the selected weights may change, so no weight decay either
     # (AdamW's decay would shrink the masked-out weights).
-    optimizer = _optimizer(model, plan.lr, 0.0 if plan.grad_mask is not None else recipe.weight_decay)
+    no_decay = plan.grad_mask is not None or (rule is not None and rule.disable_weight_decay)
+    optimizer = _optimizer(model, plan.lr, 0.0 if no_decay else recipe.weight_decay)
+    if rule is not None:
+        rule.initialize(optimizer)
     masked = [(named[n], m) for n, m in plan.grad_mask.items()] if plan.grad_mask is not None else []
     scheduler = get_cosine_schedule_with_warmup(optimizer, math.ceil(recipe.warmup_ratio * plan.steps), plan.steps)
 
@@ -104,6 +108,12 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
         optimizer.load_state_dict(state["optimizer"])
         _check_optimizer_finite(optimizer)
         scheduler.load_state_dict(state["scheduler"])
+        if rule is not None:
+            if "update_rule" not in state:
+                raise ValueError("checkpoint is missing method-specific update state")
+            rule.load_state_dict(state["update_rule"])
+            if hasattr(rule, "to"):
+                rule.to(named)
         torch.set_rng_state(state["cpu_rng"])
         torch.cuda.set_rng_state(state["cuda_rng"])
         if "python_rng" in state:  # accept checkpoints written before these RNGs were recorded
@@ -132,15 +142,20 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
     for step, batch in zip(range(start, plan.steps), loader):
         step_start = time.monotonic()  # the step's own work, after its batch has arrived (vlu/cost.py)
         with cost.flops("train"):
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                loss, metrics = plan.loss_fn(model, batch)
-            check_finite({"loss": loss}, f"training step {step + 1}")
-            loss.backward()
-            for p, mask in masked:  # SalUn: only the selected weights get a gradient
-                if p.grad is not None:
-                    p.grad.mul_(mask)
-            grad_norm = torch.nn.utils.clip_grad_norm_(params, recipe.max_grad_norm, error_if_nonfinite=True).item()
-            optimizer.step()
+            if rule is not None:
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    loss, metrics = rule.step(model, batch, optimizer, recipe.max_grad_norm)
+                grad_norm = metrics.pop("grad_norm")
+            else:
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    loss, metrics = plan.loss_fn(model, batch)
+                check_finite({"loss": loss}, f"training step {step + 1}")
+                loss.backward()
+                for p, mask in masked:  # SalUn: only the selected weights get a gradient
+                    if p.grad is not None:
+                        p.grad.mul_(mask)
+                grad_norm = torch.nn.utils.clip_grad_norm_(params, recipe.max_grad_norm, error_if_nonfinite=True).item()
+                optimizer.step()
             check_finite(named, f"updated weights at step {step + 1}")
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
@@ -178,6 +193,8 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
                     "python_rng": random.getstate(),
                     "numpy_rng": np.random.get_state(),
                 }
+                if rule is not None:
+                    state["update_rule"] = rule.state_dict()
                 tmp = resume_path.with_name("resume.pt.tmp")
                 torch.save(state, tmp)
                 tmp.replace(resume_path)  # atomic: a crash leaves either the old or the new state

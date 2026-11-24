@@ -23,6 +23,7 @@ from vlu.data import OpBatches, ReplayBuffer, Slots
 from vlu.drift.weights import embodiment_index, live_part
 from vlu.model import trainable_named_parameters
 from vlu.nodes import ZERO_STEP_METHODS, Node, check_op, recipe_for  # noqa: F401  (used by vlu.run_op and the tests)
+from vlu.updates import UpdateRule
 
 # loss_fn(model, batch) -> (loss to minimize, {metric name: float}); batch = {part name: inputs}
 LossFn = Callable[[torch.nn.Module, dict], tuple[torch.Tensor, dict[str, float]]]
@@ -67,6 +68,7 @@ class OpPlan:
     # custom_train(ctx, probes); it must leave ctx.model ready to be saved.
     custom_train: Callable[[OpContext, dict], None] | None = None
     probe_every: int | None = None  # steps between probe losses; None = recipe.probe_every
+    update_rule: UpdateRule | None = None  # owns the update, while train.py owns logging/resume
 
 
 def fm_loss(model, inputs: dict) -> torch.Tensor:
@@ -173,6 +175,15 @@ def _plan_graddiff(node: Node, recipe: Recipe) -> OpPlan:
         return retain_loss - forget_loss, {"forget_fm": forget_loss.item(), "retain_fm": retain_loss.item()}
 
     return OpPlan({"forget": forget, "retain": retain}, loss_fn, recipe.unlearn_steps, recipe.unlearn_lr)
+
+
+def _plan_gu(node: Node, recipe: Recipe) -> OpPlan:
+    from vlu.gu import GeometricUpdate
+
+    forget, retain = _forget_retain(node, recipe)
+    return OpPlan({"forget": forget, "retain": retain}, None, recipe.unlearn_steps, recipe.unlearn_lr,
+                  {"gu_rank": recipe.gu_rank, "objective": "forget FM ascent; retain-null AdamW proposal"},
+                  update_rule=GeometricUpdate(recipe.gu_rank))
 
 
 def _plan_npo(node: Node, recipe: Recipe) -> OpPlan:
@@ -407,6 +418,7 @@ def _plan_vlaforget(node: Node, recipe: Recipe) -> OpPlan:
 UNLEARN_METHODS: dict[str, Callable[[Node, Recipe], OpPlan]] = {
     "ga": _plan_ga,
     "graddiff": _plan_graddiff,
+    "gu": _plan_gu,
     "npo": _plan_npo,
     "npo_rt": _plan_npo_rt,
     "ssd": _plan_ssd,

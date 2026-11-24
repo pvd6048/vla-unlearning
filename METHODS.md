@@ -120,6 +120,32 @@ checks the official formula and its gradients, the fixed reference, NPO-RT's ret
 interrupted/resumed training for both variants. It does not establish GR00T forgetting performance
 or turn the flow-matching proxy into an action likelihood.
 
+## GU: optimizer-aware retain-null updates
+
+Reference: [Geometric-disentanglement Unlearning](https://aclanthology.org/2026.emnlp-main.2517/),
+and the authors' `Lemutisme/geo-unlearning` dev commit `bbe4d50`, `src/trainer/unlearn/geometric.py`.
+
+`gu` maximizes forget-task L_FM, subject to a local retain constraint. `vlu/gu.py` keeps up to
+`gu_rank` recent normalized retain-batch gradients per trainable parameter tensor (default 2).
+For AdamW's proposed displacement d and diagonal preconditioner P, it applies
+`d_new = d - P U (U^T P U)^+ U^T d`. The small pseudoinverse handles dependent retain directions.
+The current sampled retain gradients are therefore orthogonal to the actual update, up to roundoff.
+This is first-order preservation of sampled losses, not a guarantee of robot task success.
+
+**Adapted:** retain/forget token losses become L_FM; the original optimizer-metric projection is
+applied to the actual AdamW proposal, including momentum and decay, rather than only to raw gradients.
+The released reference code uses a whitened per-tensor basis, optional sign-selective tangential
+updates, a reference-model KL retain direction, and selected final layers. Here the strict retain-null
+variant uses supervised retain FM gradients, the existing full trainable scope and a rolling raw
+gradient basis. It does not reproduce those optional heuristics or claim bit-identical reference code.
+The rank is deliberately small for GR00T; each direction can cost one additional gradient-sized buffer.
+Projection linear algebra uses float64 per tensor. The shared training loop saves the basis along
+with AdamW, the scheduler and RNG states, so interrupted runs resume the same algorithm.
+
+`tests/test_gu.py` checks the closed-form projection, singular/full-rank cases, actual displacements
+with Adam momentum/decay, planning validation and identical interrupted/resumed weights on CPU.
+GR00T/LIBERO effectiveness and GPU memory use remain unverified; set an explicit calibrated learning rate.
+
 ## 4. SSD (Selective Synaptic Dampening)
 
 | | Official code | Ours | |
