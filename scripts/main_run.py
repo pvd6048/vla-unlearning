@@ -2,6 +2,8 @@
 machine without Slurm. Normally called by scripts/run_local.sh --main (see CALIBRATION.md).
 
     python scripts/main_run.py [--run goal_s0]
+    python scripts/main_run.py --run ta_rmu_s0 --seed 0 \
+        --methods 'purge,task_arithmetic@unlearn_lr=1e-5,rmu@unlearn_lr=1e-5'
 
 Run `goal_s0` (seed 0), LIBERO-Goal tasks A-E (vlu/tasks.py), every op with the recipe of vlu/config.py
 (10k steps per learned task with ER, 1000 steps per unlearning op):
@@ -40,14 +42,15 @@ FISHER = "LA/LB/LC:A,B"  # at theta0 of every U_B: the curvature of B and of a r
 VIDEOS = 2  # per task per eval, to see how the models fail (PLAN.md section 5.3, question 4)
 
 
-def items(run: str) -> list[dict]:
+def items(run: str, methods: list[str] | None = None) -> list[dict]:
     """The plan items, in run order (scripts/submit.py's, from its own options), with probe features only of
     the nodes the drift metrics use (each extraction loads the model on a training GPU)."""
     from main_drift import endpoints  # here: main_drift imports this module
 
-    args = make_parser().parse_args(["--run", run, "--stream", "S1", "--methods", ",".join(METHODS), "--nodes", ",".join(CONTROL),
+    methods = METHODS if methods is None else methods
+    args = make_parser().parse_args(["--run", run, "--stream", "S1", "--methods", ",".join(methods), "--nodes", ",".join(CONTROL),
                                      "--videos", str(VIDEOS), "--features", "--fisher", FISHER])
-    used = set(endpoints(METHODS))
+    used = set(endpoints(methods))
     out = [i for i in build_items(args) if i["kind"] != "features" or i["node"] in used]
     for item in out:
         if item["kind"] == "features":  # drift metrics are extra data: a failure is reported, not fatal
@@ -58,15 +61,20 @@ def items(run: str) -> list[dict]:
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", default="goal_s0")
+    parser.add_argument("--seed", type=int, default=SEED)
+    parser.add_argument("--methods", help="comma-separated methods, optionally with @recipe overrides; defaults to calibrated methods")
     args = parser.parse_args()
-    run_seed(args.run, SEED)  # creates the run, or checks its seed
+    methods = METHODS if args.methods is None else [m for m in args.methods.split(",") if m]
+    if not methods:
+        parser.error("--methods must not be empty")
+    run_seed(args.run, args.seed)  # creates the run, or checks its seed
     try:
-        plan = merge(load_plan(args.run), items(args.run))
+        plan = merge(load_plan(args.run), items(args.run, methods))
     except ValueError as error:
         sys.exit(f"cannot plan: {error}")
     write_plan(args.run, plan)
     warn_recipe_changes(args.run, plan)
-    print(f"main run plan {plan_path(args.run)}: {len(plan)} items; methods {', '.join(METHODS)}")
+    print(f"main run plan {plan_path(args.run)}: {len(plan)} items; methods {', '.join(methods)}")
 
 
 if __name__ == "__main__":

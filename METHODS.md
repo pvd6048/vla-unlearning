@@ -201,6 +201,14 @@ isolation, noise replay, saliency-mask persistence, planning errors and exact re
 both new methods through preparation, shared-loop training, probes and snapshots on the small
 GR00T-shaped fake. Real model forgetting, runtime, memory and rollout quality remain unverified.
 
+## Task arithmetic and RMU-DiT
+
+The implementation/source mapping, checkpoint semantics, cost accounting and benchmark status
+for these additions are in [TASK_ARITHMETIC_RMU.md](TASK_ARITHMETIC_RMU.md).
+`task_arithmetic` uses a fresh forget-task FM fine-tune followed by exact weight-vector negation.
+`rmu` keeps the reference activation objective and positive-uniform target, adapted to valid
+action tokens of one trainable GR00T DiT block. Their operation notes pin the original author commits.
+
 ## 4. SSD (Selective Synaptic Dampening)
 
 | | Official code | Ours | |

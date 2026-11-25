@@ -35,3 +35,11 @@ actual operation plans; only GR00T imports and the training loop's CUDA/worker p
 temporary-weight restoration, paired randomness, saved saliency masks and both-optimizer resume.
 It also trains both new plans with probes/snapshots on the GR00T-shaped fake under CPU plumbing.
 These run on CPU and are included in the local runner (Slurm's check already discovers all tests).
+
+`python tests/test_task_arithmetic_rmu.py` checks task-vector negation against an independent
+forget-task fit, RMU's two-step reference objective, action masks, restricted update scope, reference
+inputs, hook cleanup and deterministic stochastic-resume behavior, including interrupted finalization.
+`python tests/test_method_benchmarks.py` checks benchmark variants, S1/oracle/drift planning, every
+stream metric, report generation and efficiency exports on synthetic fixtures. On Windows its
+fcntl import stand-in is only for pure planner/report helpers; worker locking is not tested.
+Both run on CPU; set `USE_TF=0` if optional TensorFlow imports slow down transformers startup.

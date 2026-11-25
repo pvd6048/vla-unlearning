@@ -35,6 +35,7 @@ import calibration_drift as cd  # noqa: E402
 import main_run  # noqa: E402
 from vlu.drift.paths import fisher_path  # noqa: E402
 from vlu.nodes import Node, Op, oracle_path  # noqa: E402
+from vlu.worker import load_plan  # noqa: E402
 
 THETA0 = "LA/LB/LC"
 C = main_run.CONTROL[-1]  # LA/LB/LC/LD/LE
@@ -42,6 +43,13 @@ F = f"{THETA0}/UB-purge/LD/LE"
 ORACLE = oracle_path("", f"{THETA0}/UB-purge")  # LA/LC
 FISHER = [(THETA0, t) for t in ("A", "B")]  # scripts/main_run.py extracts these
 ANCHORS = ("tauB", "F_B")  # the pairwise numbers are for the pairs with these
+
+
+def planned_methods(run: str) -> list[str]:
+    """Read the actual run, including per-method overrides, rather than a hard-coded default."""
+    nodes = [Node.from_path(run, i["node"]) for i in load_plan(run) if i["kind"] == "train"]
+    methods = list(dict.fromkeys(n.last_op.method_spec for n in nodes if n.last_op.kind == "U"))
+    return methods or main_run.METHODS
 
 
 def unlearned(methods: list[str]) -> list[str]:
@@ -61,7 +69,7 @@ def wanted(methods: list[str] | None = None) -> list[tuple[str, str, str]]:
 def drifts(run: str, has) -> tuple[list[tuple[str, str, str]], list[str]]:
     """[(name, X, Y)] whose ends both have has(node) true, and the names of the others."""
     kept, missing = [], []
-    for name, x, y in wanted():
+    for name, x, y in wanted(planned_methods(run)):
         (kept if has(Node.from_path(run, x)) and has(Node.from_path(run, y)) else missing).append((name, x, y))
     return kept, [name for name, _, _ in missing]
 
@@ -73,7 +81,7 @@ def endpoints(methods: list[str] | None = None) -> list[str]:
 
 def inputs(run: str) -> dict[str, list[int]]:
     """{path in the run: [size, mtime_ns]} of the weights, features and Fisher files the metrics use."""
-    return cd.existing(run, [Node.from_path(run, p) for p in endpoints()],
+    return cd.existing(run, [Node.from_path(run, p) for p in endpoints(planned_methods(run))],
                        [fisher_path(Node.from_path(run, path), t) for path, t in FISHER])
 
 

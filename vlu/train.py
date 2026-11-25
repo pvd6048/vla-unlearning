@@ -205,7 +205,7 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
     # mark an auxiliary fit as a completed unlearning operation.
     finalize = getattr(rule, "finalize", None)
     if finalize is not None:
-        with cost.flops("finalize"):
+        with cost.phase("finalize"), cost.flops("finalize"):
             final_metrics = finalize(model)
         check_finite(named, "finalized weights")
         log({"step": plan.steps, "stage": "finalize", **final_metrics, "probe": probe_losses(model, probes)})

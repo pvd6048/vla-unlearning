@@ -22,16 +22,16 @@ def hidden_tensor(output):
 
 def action_mse(hidden, target, action_mask):
     """Mean squared hidden error over valid action tokens; exclude state/padding tokens."""
-    valid = action_mask.bool().any(dim=-1)
+    valid = action_mask.to(hidden.device).bool().any(dim=-1)
     if valid.ndim != 2 or hidden.shape[0] != valid.shape[0] or hidden.shape[1] < valid.shape[1]:
         raise ValueError("RMU activation and action-mask shapes do not match")
     if not valid.any():
         raise ValueError("RMU needs at least one valid action token")
-    hidden = hidden[:, -valid.shape[1]:].float()
+    hidden = hidden[:, -valid.shape[1]:].float()[valid]
     if target.ndim == 3:
-        target = target[:, -valid.shape[1]:]
+        target = target[:, -valid.shape[1]:][valid]
     error = hidden - target.float()
-    return error.square()[valid].mean()
+    return error.square().mean()
 
 
 class RMUUpdate:
@@ -88,6 +88,9 @@ class RMUUpdate:
         model.zero_grad(set_to_none=True)
         try:
             forget, f = self.forward(model, batch["forget"])
+            check_finite({"forget_fm": forget["loss"]}, "RMU model output")
+            forget_fm = forget["loss"].item()
+            del forget  # release the unused downstream FM graph before the retain forward
             if self.control is None:
                 generator = torch.Generator().manual_seed(self.seed)
                 vector = torch.rand(f["hidden"].shape[-1], generator=generator)
@@ -96,6 +99,9 @@ class RMUUpdate:
                 raise ValueError("RMU control-vector width does not match the target block")
             forget_loss = action_mse(f["hidden"], self.control, batch["forget"]["action_mask"])
             retain, r = self.forward(model, batch["retain"], with_reference=True)
+            check_finite({"retain_fm": retain["loss"]}, "RMU model output")
+            retain_fm = retain["loss"].item()
+            del retain
             retain_loss = action_mse(r["hidden"], r["reference"], batch["retain"]["action_mask"])
             loss = forget_loss + self.alpha * retain_loss
             norm = set_gradients(params, gradients(loss, params), max_grad_norm)
@@ -104,7 +110,7 @@ class RMUUpdate:
             for module, training in modes.items():
                 module.training = training
         return loss.detach(), {"forget_rmu": forget_loss.item(), "retain_rmu": retain_loss.item(),
-                               "forget_fm": forget["loss"].item(), "retain_fm": retain["loss"].item(),
+                               "forget_fm": forget_fm, "retain_fm": retain_fm,
                                "grad_norm": norm}
 
     def state_dict(self):

@@ -3,6 +3,7 @@ import copy
 import dataclasses
 from pathlib import Path
 import tempfile
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -103,6 +104,11 @@ class RMUTests(unittest.TestCase):
         hidden = torch.tensor([[[1e6, 1e6], [1., 3.], [1e6, 1e6]]])
         mask = torch.tensor([[[1.], [0.]]])
         self.assertEqual(action_mse(hidden, torch.zeros(2), mask).item(), 5.)
+        hidden = hidden.requires_grad_()
+        with torch.no_grad():
+            hidden[:, -1] = float("nan")
+        action_mse(hidden, torch.zeros(2), mask).backward()
+        torch.testing.assert_close(hidden.grad, torch.tensor([[[0., 0.], [1., 3.], [0., 0.]]]))
         with self.assertRaisesRegex(ValueError, "valid action"):
             action_mse(hidden, torch.zeros(2), torch.zeros_like(mask))
 
@@ -142,6 +148,15 @@ class RMUTests(unittest.TestCase):
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_auxiliary_fit_cannot_be_requested_as_a_finished_snapshot(self):
+        from vlu.run_op import main
+        args = ["run_op.py", "--run", "test", "--node", "LA/LB/UB-task_arithmetic@unlearn_lr=1e-5",
+                "--save-at", "1"]
+        with patch.object(sys, "argv", args), patch("vlu.run_op.run_seed", return_value=0), \
+             patch.object(Node, "done", new=property(lambda n: n.last_op.kind == "L")):
+            with self.assertRaisesRegex(ValueError, "not possible"):
+                main()  # rejects before loading a model or accessing CUDA
+
     def test_configuration_validation(self):
         recipe = dataclasses.replace(RECIPE, unlearn_lr=.01)
         for method, keys in {"task_arithmetic": ["task_arithmetic_scale"],

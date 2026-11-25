@@ -98,6 +98,16 @@ saves its mask and both optimizers. Both support the shared loop's probes, snaps
 Compare measured compute as well as step counts: Sharp MinMax performs two optimizer updates and four
 forward/gradient evaluations per step; GU stores up to `gu_rank` retain-gradient buffers.
 
+## Task arithmetic and RMU
+
+`task_arithmetic` fits the forget task and negates the resulting vector from the pre-unlearning
+checkpoint. `rmu` steers valid action-token activations in one trainable DiT block toward a fixed
+random target while preserving retain activations. Both use the shared training/resume and
+evaluation/cost pipelines; explicit learning rates are required until calibration.
+
+See [TASK_ARITHMETIC_RMU.md](TASK_ARITHMETIC_RMU.md) for the author mappings, adaptations, tests,
+benchmark status and a full S1 benchmark command using `scripts/main_run.py --methods`.
+
 ## One-time setup (login node)
 
 ```bash
