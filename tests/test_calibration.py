@@ -450,9 +450,9 @@ for i in cal:
 (RUNS_DIR / "cal" / "_failed").mkdir(parents=True)  # one failed item, with its log
 (RUNS_DIR / "cal" / "_logs").mkdir(parents=True)
 (RUNS_DIR / "cal" / "_logs" / "x.log").write_text("Traceback ... CUDA out of memory\n")
-bad = {"kind": "train", "node": "LA/LB/UB-vlaforget@vlaforget.lr=2e-4", "save_at": []}
+bad = {"kind": "train", "node": "LA/LB/UB-vlaforget@vlaforget.lr=5e-5", "save_at": []}
 Node.from_path("cal", bad["node"]).weights_path.unlink()
-(RUNS_DIR / "cal" / "_failed" / "train_LA~LB~UB-vlaforget@vlaforget.lr=2e-4.json").write_text(
+(RUNS_DIR / "cal" / "_failed" / "train_LA~LB~UB-vlaforget@vlaforget.lr=5e-5.json").write_text(
     json.dumps({"item": bad, "exit_code": 1, "log": str(RUNS_DIR / "cal" / "_logs" / "x.log")}))
 # The efficiency of two ops, as vlu/run_op.py writes it (vlu/cost.py's aggregate): SSD all preparation, SalUn with
 # training steps, a killed session (a lower bound: *) and another process on its GPU (flagged).

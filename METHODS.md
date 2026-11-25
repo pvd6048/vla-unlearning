@@ -284,7 +284,7 @@ and they could behave differently. This is an assumption to state in the paper.
 | Candidate layers | vision blocks, projector, reasoning blocks and action head of the authors' small model | linear layers of the last 4 SigLIP2 blocks, of `mlp1`, and of the trainable LLM layers and the DiT | Adapted (the paper does not say how many vision blocks are "late") |
 | top-k | 2 / 2 / 3 (`main.py:602-604`) | 2 / 2 / 3 | Same |
 | λ_f, λ_m, λ_feat, β_kl, α | code: 1.2, 0.8, 0.7, 0.5, 1 (`main.py:609-613`); paper (OpenVLA): λ_f = 0.7 | 0.7, 0.8, 0.7, 0.5, 1 | Same as the paper (the code's 1.2 is for its small model) |
-| lr, optimizer | 2e-4, Adam, no schedule (`main.py:608, 631`); appendix also mentions 5e-5 | 2e-4 (5e-5 also calibrated), Adam, no schedule, clipping at 1.0 (paper) | Same |
+| lr, optimizer | 2e-4, Adam, no schedule (`main.py:608, 631`); appendix also mentions 5e-5 | 2e-4 for now (PROVISIONAL); in the calibration both paper values forgot B but hurt A (5e-5: SR A 0.66, 2e-4: 0.00), so round 3 tries 1e-5, 2e-5, 5e-5. Adam, no schedule, clipping at 1.0 (paper) | Same |
 | LoRA | r 16, α 16, dropout 0.05, `init_lora_weights="gaussian"` (`OpenVLA.py:419-425`) | r 16, α 16, Gaussian init (A ~ N(0, 1/r²), B = 0), no dropout | Same, except dropout (below) |
 | Train/eval mode | `model.train()` | eval mode for both models (no dropout) | **Choice** (below) |
 | Stage lengths | 60 / 60 / 90 steps | the op's step budget split 60 : 60 : 90 | Choice (same proportions, our budget) |

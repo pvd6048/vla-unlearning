@@ -18,7 +18,7 @@ Run `cal` (seed 0), tasks A and B of LIBERO-Goal:
                 drift metrics after the runs (PLAN.md section 4).
 
 Every variant's cost is measured (vlu/cost.py: time, compute, memory, energy). A variant trained before
-that measurement existed (rounds 1-2 on the guide's machine) is moved to
+that measurement existed (rounds 1-2 and the 24 November run on the guide's machine) is moved to
 RUNS_DIR/_archive/<run>/before_cost_meter/ (outside the run, so no report or tool sees it; nothing is
 deleted) and trained, evaluated and measured again, so every variant of a round is measured by the same
 code on the same machine. LA and LA/LB are kept.
@@ -48,25 +48,31 @@ from vlu.worker import item_key, load_plan, plan_path, someone_working, write_pl
 # the cluster from scratch), from rounds 1-2 on the guide's machine (METHODS.md, CALIBRATION.md):
 # - GA and GradDiff are dropped: no rate both forgot B and kept A (GA: 1e-7 forgot nothing, 3e-7 lost A;
 #   GradDiff 3e-7 was halfway on both). Their code stays (vlu/ops.py), as do the round-2 results.
-# - NPO: every rate from 1e-6 up lost A. Its update starts as GA's (weight 1; Adam normalizes the scale) and
-#   then fades, so its range sits a little above GA's 1e-7..3e-7: 1e-7..1e-6 (1e-6, which lost A, is the
-#   upper bracket). NPO-RT (NPO plus GradDiff's retain term, the NPO authors' default) is new: 3e-7 up to the
-#   authors' lr 1e-5.
+# - NPO: no rate both forgot B and kept A. 1e-7 kept B (SR 1.00) and lowered A to 0.70; 3e-7 lost A (0.00)
+#   with B still at 0.66; 1e-6 and up lost A. Plain NPO has nothing that holds A, so only the gap below 3e-7
+#   can still hold a trade-off: 1e-7, 2e-7, 3e-7 (6e-7 and 1e-6 lie in the range that lost A).
+# - NPO-RT (NPO plus GradDiff's retain term, the NPO authors' default; first run 24 November on the old plan):
+#   3e-6 and 1e-5 forgot B and kept A (1e-5: B's probe loss at the oracle's), 1e-6 halfway (B 0.50). 3e-7
+#   behaved as plain NPO 3e-7 (A 0.38): NPO's loss (~14 at the start) outweighs the retain loss (~0.02) until
+#   it saturates, which at 3e-7 the cosine schedule ends first, so 3e-7 is dropped. 3e-5 is added as the
+#   upper bracket above the authors' 1e-5: 1e-6, 3e-6, 1e-5, 3e-5.
 # - SalUn: all three rates kept A and forgot B; repeated here to confirm 3e-5 on this hardware.
 # - SSD: alpha 5 and 10 (retain reference) forgot B and kept A, ASSD halfway; alpha 50 / lambda 0.1 forgot
 #   nothing and the paper's literal reference (all tasks) dampens nothing at our forget share (vlu/ops.py
 #   _plan_ssd), so both are dropped.
-# - VLA-Forget: the two paper values, again (round 2 ran out of memory in its third stage; fixed).
+# - VLA-Forget (first run 24 November, no OOM): both paper values forgot B (SR 0.00) but hurt A: 5e-5 to
+#   0.66, 2e-4 to 0.00, most of it in the projector stage. 2e-4 is dropped and two lower rates added:
+#   1e-5, 2e-5, 5e-5. (A's probe loss ended at 0.08 for both paper values: it does not show this damage.)
 # SSD variants name ssd_reference explicitly, so they never reuse a round-1 node directory (old reference).
 VARIANTS = [
     "purge",
-    *[f"npo@unlearn_lr={lr}" for lr in ("1e-7", "3e-7", "6e-7", "1e-6")],
-    *[f"npo_rt@unlearn_lr={lr}" for lr in ("3e-7", "1e-6", "3e-6", "1e-5")],
+    *[f"npo@unlearn_lr={lr}" for lr in ("1e-7", "2e-7", "3e-7")],
+    *[f"npo_rt@unlearn_lr={lr}" for lr in ("1e-6", "3e-6", "1e-5", "3e-5")],
     "ssd@ssd_reference=retain",  # the paper's ViT alpha = 5, lambda = 1
     "ssd@ssd_alpha=10+ssd_reference=retain",  # the paper's ResNet alpha
     "ssd@ssd_adaptive=1+ssd_reference=retain",  # ASSD's tuning-free alpha
     *[f"salun@unlearn_lr={lr}" for lr in ("1e-5", "3e-5", "1e-4")],
-    *[f"vlaforget@vlaforget.lr={lr}" for lr in ("5e-5", "2e-4")],  # the paper's two values
+    *[f"vlaforget@vlaforget.lr={lr}" for lr in ("1e-5", "2e-5", "5e-5")],  # 5e-5: the paper's lower value
 ]
 
 

@@ -43,21 +43,27 @@ If the disk with space is not where you want the code, you can instead put the l
 
 ## Round 3 (on the machine that ran rounds 1 and 2)
 
-This round keeps the training of tasks A and B from before and trains 16 unlearning variants: 9 new ones
-and 7 from round 2 again, now with the measurement of their time, memory, compute and energy. The 7
-earlier ones are moved to a separate folder first (`$VLU_RUNS_DIR/_archive/`; nothing is deleted). In the
-`vla-unlearning` folder:
+This round keeps the training of tasks A and B from before and trains 16 unlearning variants: 4 new ones
+and 12 trained before (in round 2 or on 24 November) again, now with the measurement of their time, memory,
+compute and energy. The 12 earlier ones are moved to a separate folder first (`$VLU_RUNS_DIR/_archive/`;
+nothing is deleted). In the `vla-unlearning` folder:
 
 ```bash
+mv calibration_test.tar.gz calibration_test_before_round3.tar.gz   # keep the last file; round 3 writes this name again
 git pull
+git log -1 --format='%h %ad' --date=short               # must be dated 2026-11-25 or later (see below)
 tmux new -s cal3
 bash scripts/setup_cluster.sh 2>&1 | tee -a setup.log   # adds the energy-measurement package (a few minutes)
 df -h .                                                   # needs about 150 GB free
 bash scripts/run_local.sh                                 # about 5-8 hours
 ```
 
+- **Is it the new code?** If `git pull` prints an error, or the `git log` line shows an earlier date,
+  please stop and send us `git pull`'s message and the output of `git status`. Once it runs, the self-tests
+  include `tests/test_cost.py`, the plan line says `17 unlearning variants` (the run of 24 November said 38),
+  and it prints `archived (trained before the cost meter; ...)` for 12 variants.
 - **Not enough disk?** Before `run_local.sh`, this deletes the model weights of the earlier rounds'
-  variants that are no longer used (and of the 7 moved ones), up to about 180 GB; their results stay:
+  variants that are no longer used (and of the 12 moved ones), up to about 180 GB; their results stay:
   `source slurm/env.sh && $MAIN_PY scripts/calibrate.py --prune-weights`
 - **Please keep other programs off the GPUs** during this round: a GPU's energy reading includes
   everything running on it. (If something else runs there, the report flags that GPU's numbers.)
