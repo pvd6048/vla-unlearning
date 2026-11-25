@@ -43,3 +43,9 @@ inputs, hook cleanup and deterministic stochastic-resume behavior, including int
 stream metric, report generation and efficiency exports on synthetic fixtures. On Windows its
 fcntl import stand-in is only for pure planner/report helpers; worker locking is not tested.
 Both run on CPU; set `USE_TF=0` if optional TensorFlow imports slow down transformers startup.
+
+Optional original-source checks: `check_task_vectors.py` compares against the authors' arithmetic,
+and `check_groot_rmu.py` compares RMU with a full frozen reference using GR00T's actual DiT blocks
+on CPU (diffusers 0.35.1 required). Source downloads, commit pins, hashes and audit scope are
+documented in [TASK_ARITHMETIC_RMU.md](../TASK_ARITHMETIC_RMU.md). These checks need no model weights
+or LIBERO data and are not rollout or GPU-cost benchmarks.

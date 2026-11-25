@@ -72,7 +72,7 @@ retain FM losses are logged as diagnostics alongside `forget_rmu`, `retain_rmu` 
 
 `scripts/main_run.py --methods` accepts explicit method variants without adding uncalibrated
 methods to the default main experiment. It plans the full S1 stream, including later learning,
-the second unlearning request, retrain oracles, the purge/control branches when purge is selected,
+the second unlearning request, retrain oracles, the purge/control branches (automatically included),
 and the existing feature/Fisher extraction. Reports and drift selection read the actual plan and
 preserve override values rather than collapsing different rates/scales into one method name.
 
@@ -117,7 +117,7 @@ hook/mode restoration, checkpointed targets/references, stochastic resume and fa
 checkpoint publication. Benchmark tests verify S1/oracle/feature planning, distinct variant paths,
 all stream-metric calculations, report generation and all three efficiency CSV exports using
 explicitly synthetic fixtures. These fixtures are not measurements of robot effectiveness or GPU cost.
-Executed checks: 56 passing tests across these checks and the existing GU/Sharp/NPO/resume/safety
+Executed audit rerun: 60 passing tests across these checks and the existing GU/Sharp/NPO/resume/safety
 regressions, one skipped two-GPU RNG test, plus the hand-computed stream-metric script and Python
 compilation checks. The new method tests used CPU torch 2.9.1 and the repository's GR00T-shaped fake.
 
@@ -129,3 +129,70 @@ and real-checkpoint drift benchmarks are **deferred**. No numbers for these are 
 USE_TF=0 python tests/test_task_arithmetic_rmu.py
 USE_TF=0 python tests/test_method_benchmarks.py
 ```
+
+## Correctness audit — 2026-11-25
+
+Static review covered the objectives, optimizer scopes, masks, reference construction, method
+state, snapshot/finalization paths and benchmark coverage. Executed checks below are distinct
+from robot/GPU benchmarks, which remain deferred. No additional mathematical discrepancy was
+found in the two stated adaptations under the tested conditions.
+
+### Reproduced issues and fixes
+
+- **Missing benchmark control (P2):** selecting only TA/RMU omitted the purge branch while the
+  drift report still requested its incidental-forgetting comparison. `main_run.with_controls`
+  now always includes vanilla purge. A regression checks that its learned endpoint and features
+  are planned even when purge was not in the user's method list.
+- **Auxiliary-fit snapshots through direct calls (P2):** the CLI rejected TA snapshots, but calling
+  `train(..., save_at=...)` directly could write fitted, unnegated weights under a snapshot name.
+  The shared loop now rejects these calls before fitting, so the invariant holds below the CLI.
+- **Zero/negative smoke-step override (P2):** `run_op --steps` was applied after recipe validation,
+  allowing the positive-budget guard to be bypassed. The override is now checked before loading.
+- **Changed resume budget (P2):** changing the budget between attempts could continue a different
+  auxiliary fit/schedule or finalize a checkpoint already beyond the requested budget. New resume
+  files record `planned_steps`; incompatible budgets are rejected before copying checkpoint weights.
+  Older files without that field still get the step-range check, but their original total budget
+  cannot be recovered retrospectively.
+
+The first three issues were demonstrated by failing targeted tests before the corrections. The
+resume-budget test interrupts a fit, then verifies that both shorter and longer changed budgets
+are rejected without modifying the fresh model. Full method/report regressions subsequently pass.
+
+### Source-based numerical checks
+
+The optional checks execute inspected, hash-verified reference code rather than substitutes:
+
+- **Task arithmetic:** the original `TaskVector` constructor, negation and `apply_to` methods at
+  the pinned commit above match our finalization exactly over 8 seeds and scales 0/0.25/1/2.
+  Maximum parameter difference: **0**. Only checkpoint deserialization is replaced with in-memory
+  models to isolate arithmetic from the old repository's pickle/PyTorch compatibility.
+- **RMU:** the actual
+  [GR00T DiT source at ead52833afbbf4243f8cd5e7664f48a94de03b19](https://github.com/NVIDIA/Isaac-GR00T/blob/ead52833afbbf4243f8cd5e7664f48a94de03b19/gr00t/model/modules/dit.py),
+  with its pinned diffusers 0.35.1, was instantiated in a small two-block CPU model. Its real
+  self/cross attention, adaptive normalization, positional embeddings, masks and keyword inputs
+  were exercised. Our block-reference update matched an independent full-frozen-model objective
+  over 4 configurations x 4 AdamW steps, maximum parameter difference **0**; model RNG states
+  also matched. This verifies the reference shortcut in that setting, not real GR00T effectiveness.
+
+| Claim | Audit disposition | Evidence / boundary |
+|---|---|---|
+| TA negates the freshly fitted vector from the operation's original anchor | Verified for tested cases | Independent AdamW fit and actual author arithmetic checks |
+| TA checkpoints preserve the anchor and publish negated weights | Verified on CPU fixtures | Stochastic resume, failed-finalization recovery and direct-snapshot rejection |
+| RMU implements the stated masked activation objective | Verified for tested cases | Independent two-step objective and actual DiT/full-reference trajectories |
+| Only the selected RMU block changes | Verified on tested models | Full parameter comparisons with upstream/downstream weights held fixed |
+| Targets, references, masks and RNG continuation survive resume | Verified on CPU fixtures | Checkpoint round trips and exact stochastic continuation |
+| Benchmark variants have the required controls and reporting paths | Verified on synthetic fixtures | S1/oracle/features planning, all stream metrics and cost CSV exports |
+| Author experimental setups are reproduced verbatim | Contradicted | Both are documented GR00T adaptations, especially RMU's DiT scope |
+| Real policy quality and GPU/mixed-precision behavior are established | Unsupported | Full weights/data/CUDA/rollout checks remain deferred |
+
+Reproduce the optional numerical checks after downloading the pinned sources outside the repo:
+
+```bash
+curl -L https://raw.githubusercontent.com/mlfoundations/task_vectors/826a64c67082fab0f40628233287948f0f8d7fa3/src/task_vectors.py -o /tmp/author_task_vectors.py
+curl -L https://raw.githubusercontent.com/NVIDIA/Isaac-GR00T/ead52833afbbf4243f8cd5e7664f48a94de03b19/gr00t/model/modules/dit.py -o /tmp/groot_dit.py
+USE_TF=0 python tests/check_task_vectors.py /tmp/author_task_vectors.py
+USE_TF=0 python tests/check_groot_rmu.py /tmp/groot_dit.py
+```
+
+The second check requires diffusers 0.35.1, already part of the pinned GR00T environment. The audit
+used Python 3.13.5 and CPU torch 2.9.1; it did not run GR00T's pinned CUDA torch 2.7.1 environment.
