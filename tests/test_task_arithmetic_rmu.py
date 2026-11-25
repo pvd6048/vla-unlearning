@@ -148,6 +148,55 @@ class RMUTests(unittest.TestCase):
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_resume_rejects_a_changed_fit_budget_before_loading_weights(self):
+        with tempfile.TemporaryDirectory() as tmp, cpu_runtime():
+            directory = Path(tmp)
+            node = SimpleNamespace(dir=directory, weights_path=directory / "weights.safetensors")
+            recipe = dataclasses.replace(RECIPE, unlearn_lr=.01, unlearn_steps=2, log_every=2)
+            path = Node.from_path("test", "LA/LB/UB-task_arithmetic")
+            plan = plan_op(path, recipe)
+            original = plan.update_rule.step
+            calls = []
+
+            def stop_after_one(*args):
+                if calls:
+                    raise InterruptedError()
+                calls.append(True)
+                return original(*args)
+            plan.update_rule.step = stop_after_one
+            with self.assertRaises(InterruptedError):
+                train(node, Quadratic(), plan, [batch()] * 2, {}, recipe, set())
+            for steps in (1, 3):
+                model = Quadratic()
+                before = model.weight.detach().clone()
+                changed = dataclasses.replace(recipe, unlearn_steps=steps)
+                with self.assertRaisesRegex(ValueError, "training budget"):
+                    train(node, model, plan_op(path, changed), [batch()] * steps, {}, changed, set())
+                self.assertTrue(torch.equal(before, model.weight))
+            self.assertFalse(node.weights_path.exists())
+
+    def test_shared_loop_refuses_auxiliary_fit_snapshots(self):
+        with tempfile.TemporaryDirectory() as tmp, cpu_runtime():
+            directory = Path(tmp)
+            node = SimpleNamespace(dir=directory, weights_path=directory / "weights.safetensors")
+            recipe = dataclasses.replace(RECIPE, unlearn_lr=.01, unlearn_steps=2, log_every=2)
+            plan = plan_op(Node.from_path("test", "LA/LB/UB-task_arithmetic"), recipe)
+            with self.assertRaisesRegex(ValueError, "snapshot"):
+                train(node, Quadratic(), plan, [batch()] * 2, {}, recipe, {1})
+            self.assertFalse((directory / "step_000001.safetensors").exists())
+            self.assertFalse(node.weights_path.exists())
+
+    def test_cli_rejects_zero_or_negative_smoke_step_budgets(self):
+        from vlu.run_op import main
+        for method in ("rmu", "task_arithmetic"):
+            for steps in (0, -1):
+                args = ["run_op.py", "--run", "test", "--node", f"LA/LB/UB-{method}@unlearn_lr=1e-5",
+                        "--steps", str(steps)]
+                with patch.object(sys, "argv", args), patch("vlu.run_op.run_seed", return_value=0), \
+                     patch.object(Node, "done", new=property(lambda n: n.last_op.kind == "L")):
+                    with self.assertRaisesRegex(ValueError, "positive"):
+                        main()
+
     def test_auxiliary_fit_cannot_be_requested_as_a_finished_snapshot(self):
         from vlu.run_op import main
         args = ["run_op.py", "--run", "test", "--node", "LA/LB/UB-task_arithmetic@unlearn_lr=1e-5",

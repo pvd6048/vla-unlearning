@@ -67,6 +67,14 @@ class BenchmarkTests(unittest.TestCase):
                 self.assertTrue(item["tasks"])
                 self.assertEqual(item["seed"], 0)
 
+    def test_new_methods_alone_still_plan_the_incidental_forgetting_control(self):
+        plan = merge([], main_run.items(self.run, METHODS[1:]))
+        trained = {i["node"] for i in plan if i["kind"] == "train"}
+        features = {i["node"] for i in plan if i["kind"] == "features"}
+        self.assertIn(main_drift.F, trained)
+        self.assertIn(main_drift.F, features)
+        self.assertIn(main_drift.C, trained)
+
     def populate_evals(self):
         for item in self.plan:
             node = Node.from_path(self.run, item["node"])

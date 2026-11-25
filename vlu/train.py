@@ -86,6 +86,9 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
     named = trainable_named_parameters(model)
     params = list(named.values())
     rule = getattr(plan, "update_rule", None)
+    finalize = getattr(rule, "finalize", None)
+    if finalize is not None and save_at:
+        raise ValueError("snapshots of an auxiliary fit are not completed unlearning checkpoints")
     # With a gradient mask (SalUn) only the selected weights may change, so no weight decay either
     # (AdamW's decay would shrink the masked-out weights).
     no_decay = plan.grad_mask is not None or (rule is not None and rule.disable_weight_decay)
@@ -101,6 +104,8 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
     start = 0
     if resume_path.exists():
         state = torch.load(resume_path, map_location="cpu", weights_only=False)
+        if not 0 <= state["step"] < plan.steps or state.get("planned_steps", plan.steps) != plan.steps:
+            raise ValueError("resume checkpoint has a different training budget; use a fresh operation")
         check_finite(state["weights"], "resume weights")
         with torch.no_grad():
             for name, p in trainable_named_parameters(model).items():
@@ -185,6 +190,7 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
                 _check_optimizer_finite(optimizer)
                 state = {
                     "step": done,
+                    "planned_steps": plan.steps,
                     "weights": {n: p.detach().cpu() for n, p in trainable_named_parameters(model).items()},
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(),
@@ -203,7 +209,6 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
     # Some methods publish a transformation of their fitted weights, rather than the fit itself.
     # Keep resume.pt until the transformed checkpoint is safely saved: an interruption must never
     # mark an auxiliary fit as a completed unlearning operation.
-    finalize = getattr(rule, "finalize", None)
     if finalize is not None:
         with cost.phase("finalize"), cost.flops("finalize"):
             final_metrics = finalize(model)

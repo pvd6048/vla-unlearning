@@ -42,12 +42,17 @@ FISHER = "LA/LB/LC:A,B"  # at theta0 of every U_B: the curvature of B and of a r
 VIDEOS = 2  # per task per eval, to see how the models fail (PLAN.md section 5.3, question 4)
 
 
+def with_controls(methods: list[str]) -> list[str]:
+    """The drift comparison always needs the vanilla purge branch, even for a custom method list."""
+    return list(dict.fromkeys(["purge", *methods]))
+
+
 def items(run: str, methods: list[str] | None = None) -> list[dict]:
     """The plan items, in run order (scripts/submit.py's, from its own options), with probe features only of
     the nodes the drift metrics use (each extraction loads the model on a training GPU)."""
     from main_drift import endpoints  # here: main_drift imports this module
 
-    methods = METHODS if methods is None else methods
+    methods = with_controls(METHODS if methods is None else methods)
     args = make_parser().parse_args(["--run", run, "--stream", "S1", "--methods", ",".join(methods), "--nodes", ",".join(CONTROL),
                                      "--videos", str(VIDEOS), "--features", "--fisher", FISHER])
     used = set(endpoints(methods))
@@ -67,6 +72,7 @@ def main():
     methods = METHODS if args.methods is None else [m for m in args.methods.split(",") if m]
     if not methods:
         parser.error("--methods must not be empty")
+    methods = with_controls(methods)
     run_seed(args.run, args.seed)  # creates the run, or checks its seed
     try:
         plan = merge(load_plan(args.run), items(args.run, methods))

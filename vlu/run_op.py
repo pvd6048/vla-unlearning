@@ -42,6 +42,8 @@ def main():
     parser.add_argument("--steps", type=int, help="override the op's step budget (smoke tests only)")
     parser.add_argument("--save-at", default="", help="extra weight snapshots, e.g. 2000,5000")
     args = parser.parse_args()
+    if args.steps is not None and args.steps < 1:
+        raise ValueError("--steps must be positive")
 
     node = Node.from_path(args.run, args.node)
     seed = run_seed(args.run, args.seed)
