@@ -72,6 +72,13 @@ class Op:
     def shares_parent_weights(self) -> bool:
         return self.kind == "U" and self.method in ZERO_STEP_METHODS
 
+    @property
+    def method_spec(self) -> str:
+        """Method plus overrides, so reports do not collapse distinct benchmark variants."""
+        if self.kind != "U":
+            raise ValueError("only unlearning operations have a method specification")
+        return str(self).split("-", 1)[1]
+
     def __str__(self) -> str:
         base = f"{self.kind}{self.task}" + (f"-{self.method}" if self.method else "")
         return base + ("@" + "+".join(f"{k}={v}" for k, v in self.overrides) if self.overrides else "")
@@ -236,7 +243,7 @@ def recipe_for(op: Op, recipe: Recipe) -> Recipe:
 
 # Unlearning methods that train on, or compare against, the retained tasks: they cannot unlearn a
 # parent's only task (vlu/ops.py's plans rely on this check, see plan_op).
-NEEDS_RETAINED_TASK = frozenset({"graddiff", "npo_rt", "gu", "sharp_minmax", "ssd", "salun", "vlaforget"})
+NEEDS_RETAINED_TASK = frozenset({"graddiff", "npo_rt", "gu", "sharp_minmax", "rmu", "ssd", "salun", "vlaforget"})
 
 
 def check_op(node: Node, recipe: Recipe = RECIPE) -> None:
@@ -259,6 +266,19 @@ def check_op(node: Node, recipe: Recipe = RECIPE) -> None:
         rank = recipe_for(op, recipe).gu_rank
         if not isinstance(rank, int) or rank < 1:
             raise ValueError(f"{node}: gu_rank must be a positive integer")
+    if op.method in ("task_arithmetic", "rmu"):
+        effective = recipe_for(op, recipe)
+        keys = ("task_arithmetic_scale",) if op.method == "task_arithmetic" else ("rmu_alpha", "rmu_steering")
+        for key in keys:
+            value = getattr(effective, key)
+            if value is None or not math.isfinite(value) or value < 0:
+                raise ValueError(f"{node}: {key} must be finite and nonnegative")
+        if op.method == "rmu" and (type(effective.rmu_layer) is not int or effective.rmu_layer < 0):
+            raise ValueError(f"{node}: rmu_layer must be a nonnegative integer")
+        if type(effective.unlearn_steps) is not int or effective.unlearn_steps < 1:
+            raise ValueError(f"{node}: unlearn_steps must be positive for {op.method}")
+        if effective.unlearn_lr is not None and (not math.isfinite(effective.unlearn_lr) or effective.unlearn_lr <= 0):
+            raise ValueError(f"{node}: unlearn_lr must be finite and positive")
     if op.method == "sharp_minmax":
         effective = recipe_for(op, recipe)
         for key in ("sharp_forget_fraction", "sharp_alpha"):
@@ -285,6 +305,8 @@ _KEYS_USED = {
     "ga": _UNLEARN_KEYS,
     "graddiff": _UNLEARN_KEYS,
     "gu": _UNLEARN_KEYS + ("gu_rank",),
+    "task_arithmetic": _UNLEARN_KEYS + ("task_arithmetic_scale",),
+    "rmu": _UNLEARN_KEYS + ("rmu_layer", "rmu_alpha", "rmu_steering"),
     "sharp_minmax": _UNLEARN_KEYS + ("importance_batches", "sharp_forget_fraction", "sharp_alpha",
                                     "sharp_rho", "sharp_strength", "sharp_adaptive"),
     "npo": _UNLEARN_KEYS + ("npo_beta",),

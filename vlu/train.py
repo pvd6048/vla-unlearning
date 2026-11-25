@@ -200,6 +200,15 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
                 tmp.replace(resume_path)  # atomic: a crash leaves either the old or the new state
         step_end = time.monotonic()
 
+    # Some methods publish a transformation of their fitted weights, rather than the fit itself.
+    # Keep resume.pt until the transformed checkpoint is safely saved: an interruption must never
+    # mark an auxiliary fit as a completed unlearning operation.
+    finalize = getattr(rule, "finalize", None)
+    if finalize is not None:
+        with cost.flops("finalize"):
+            final_metrics = finalize(model)
+        check_finite(named, "finalized weights")
+        log({"step": plan.steps, "stage": "finalize", **final_metrics, "probe": probe_losses(model, probes)})
     with cost.phase("save"):
         save_weights(model, node.weights_path)
     resume_path.unlink(missing_ok=True)

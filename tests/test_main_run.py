@@ -69,7 +69,7 @@ assert [item_key(i) for i in later[:len(first)]] == [item_key(i) for i in first]
 print(f"plan: adding methods to {METHODS[:1]} appends their items, the earlier ones keep their place")
 
 # A method without a learning rate yet is refused when planning (vlu/config.py unlearn_lrs).
-uncalibrated = sorted({"ga", "graddiff", "gu", "sharp_minmax", "npo", "npo_rt", "salun"} - set(dict(RECIPE.unlearn_lrs)))
+uncalibrated = sorted({"ga", "graddiff", "gu", "sharp_minmax", "task_arithmetic", "rmu", "npo", "npo_rt", "salun"} - set(dict(RECIPE.unlearn_lrs)))
 assert not set(METHODS) & set(uncalibrated), "main_run.METHODS must only hold calibrated methods"
 if uncalibrated:
     script = f"import sys; sys.path.insert(0, 'scripts'); import main_run; main_run.METHODS.append({uncalibrated[0]!r}); main_run.main()"

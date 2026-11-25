@@ -81,6 +81,10 @@ class Recipe:
     # calibration round 2 (alpha 5, lambda 1, retain reference: A 1.00, B 0.00); NPO's beta is PROVISIONAL.
     npo_beta: float = 0.1  # NPO paper default; log-likelihood stand-in = -sum of squared FM errors of a chunk
     gu_rank: int = 2  # recent retain directions per tensor; memory = up to rank gradient buffers
+    task_arithmetic_scale: float = 1.0  # theta0 - scale * (forget-fitted theta - theta0)
+    rmu_layer: int = 0  # train only this DiT block; preserve the baseline checkpoint's full scope
+    rmu_alpha: float = 100.0  # retain activation MSE weight; provisional on GR00T
+    rmu_steering: float = 20.0  # norm of the fixed positive-uniform random target; provisional
     # Sharp MinMax: paper CIFAR-100 split and vanilla SAM settings; provisional for GR00T.
     sharp_forget_fraction: float = 0.3
     sharp_alpha: float = 0.99

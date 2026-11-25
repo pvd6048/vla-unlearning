@@ -189,7 +189,7 @@ print("submit: SSD / SalUn on a parent's only task rejected when planning; GA ac
 
 # A method without a learning rate yet (vlu/config.py unlearn_lrs) is rejected when planning.
 from vlu.config import RECIPE  # noqa: E402
-uncalibrated = sorted({"ga", "graddiff", "gu", "sharp_minmax", "npo", "npo_rt", "salun"} - set(dict(RECIPE.unlearn_lrs)))
+uncalibrated = sorted({"ga", "graddiff", "gu", "sharp_minmax", "task_arithmetic", "rmu", "npo", "npo_rt", "salun"} - set(dict(RECIPE.unlearn_lrs)))
 for method in uncalibrated:
     try:
         submit.build_items(argparse.Namespace(**{**vars(ns), "stream": "SNAP", "methods": f"ssd,{method}"}))
