@@ -90,11 +90,16 @@ class Recipe:
     gu_last_blocks: int = 3
     gu_refresh_every: int = 2
     gu_cap: float = 0.5
+    gu_forget_weight: float = 1.5  # gamma in the authors' GeometricUnlearn.yaml
+    gu_retain_weight: float = 1.0  # alpha; set gamma=1 for a matched NPO-RT control
     # Sharp MinMax: paper CIFAR-100 split and vanilla SAM settings; provisional for GR00T.
     # The forget partition: the weights with the "largest" forget gradients (the paper's App. E.2 and
     # section 4.2: "most salient to F") or the "smallest" (its Algorithm 1, "bottom 10%", and the authors'
     # generate_mask.py, which ranks ascending). The calibration tries both.
-    sharp_select: str = "largest"
+    sharp_select: str = "smallest"  # Algorithm 1 and released generate_mask.py; E.2 says largest
+    sharp_optimizer: str = "sgd"  # paper E.1; "adamw" reproduces the released code's override
+    sharp_momentum: float = 0.9
+    sharp_weight_decay: float = 5e-4  # paper's CIFAR setup, applied to all optimized tensors
     sharp_forget_fraction: float = 0.3
     sharp_alpha: float = 0.99
     sharp_rho: float = 0.1

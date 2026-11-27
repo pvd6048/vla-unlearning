@@ -1,29 +1,14 @@
-"""Saliency-split Sharp MinMax: retain SAM descent, then forget sharpness maximization.
+"""Sharp MinMax, Tang & Khanna (arXiv:2506.13715), Algorithms 1/2.
 
-Tang & Khanna, arXiv:2506.13715, Algorithm 2 and sharp-unlearn/sam/sam.py. Each phase uses
-g = g0 + sign * lambda * (g_perturbed - g0), with sign +1 for retain and -1 for forget.
-The forget objective is negative FM. As in the paper and the authors' code, each phase perturbs all trainable
-weights along the full gradient g0 (SAM's first_step, norm over all weights) and then keeps the blended
-gradient on its own partition only. The authors mask only g_perturbed before blending, so their forget step
-2 g0 - g1 * mask also moves the retain partition by 2 g0; here the blend is masked as a whole. The retain
-phase at the default lambda = 1 is exactly their update (their g0 + (g1 * mask - g0) is g1 * mask); otherwise,
-and in the forget phase, theirs also moves the other partition and ours does not.
+The second gradient is masked BEFORE blending: g0 + sign*lambda*(mask*g1 - g0).
+In particular, forget maximization at lambda=1 uses 2*g0 - mask*g1, including
+updates outside the forget partition. This is the literal published/released update.
 
-Memory (GR00T: one fp32 copy of the trainable weights is 6.5 GB). The authors use two AdamW optimizers
-over all weights (unlearn/impl.py, "Adam Override"). With the partition masks and no weight decay, each
-of them only ever has nonzero moments on its own partition, so one pair of moment buffers holds both
-exactly: each phase updates the moments and the weights inside its partition only, with AdamW's formulas
-and its own step count. That is the same update as two torch AdamW optimizers (tests/test_sharp_minmax.py)
-with half their state (13 GB instead of 26). The blend is formed in place; the perturbation saves the
-weights it moves (all of them, the authors' old_p), so one step holds the weights, the moments, the masks,
-two gradient copies and the saved weights (toy measurement: about NPO-RT's peak plus 0.3 copies).
-
-alpha: the losses are scaled by alpha and -(1 - alpha) as in the authors' code, but under AdamW (theirs and
-ours) a constant scale of a phase's gradient cancels in m / sqrt(v), so alpha changes almost nothing (only
-through eps and clipping). It is kept for fidelity, not calibrated.
+Default: the paper's constant-rate SGD, momentum .9 and decay 5e-4. The released
+training script's AdamW override is available explicitly. Each phase owns an
+independent native optimizer over all trainable weights. See PAPER_ALIGNMENT.md.
 """
 from contextlib import contextmanager
-import math
 
 import torch
 from torch.nn.modules.batchnorm import _BatchNorm
@@ -84,30 +69,39 @@ def replay_randomness(model, cpu_rng, cuda_rng):
 
 
 class SharpMinMaxUpdate:
-    disable_weight_decay = True  # AdamW decay would move the inactive partition
+    disable_weight_decay = False
+    constant_lr = True
 
-    def __init__(self, masks, alpha, rho, strength, adaptive=False):
-        self.masks = masks  # True = forget partition, False = retain partition
+    def __init__(self, masks, alpha, rho, strength, adaptive=False,
+                 optimizer_name="sgd", momentum=.9, weight_decay=5e-4):
+        self.masks = masks  # True = forget selection
         self.alpha, self.rho, self.strength, self.adaptive = alpha, rho, strength, adaptive
-        self.moments = {}  # name -> [exp_avg, exp_avg_sq], each partition's AdamW moments on its own entries
-        self.steps = {"retain": 0, "forget": 0}  # each partition's AdamW step count
-        self.optimizer = None
+        self.optimizer_name, self.momentum, self.weight_decay = optimizer_name, momentum, weight_decay
+        self.optimizer = self.forget_optimizer = None
+
+    def make_optimizer(self, model, lr):
+        params = list(trainable_named_parameters(model).values())
+        if self.optimizer_name == "sgd":
+            return torch.optim.SGD(params, lr=lr, momentum=self.momentum, weight_decay=self.weight_decay)
+        if self.optimizer_name == "adamw":
+            return torch.optim.AdamW(params, lr=lr, weight_decay=self.weight_decay)
+        raise ValueError("sharp_optimizer must be 'sgd' or 'adamw'")
 
     def initialize(self, optimizer):
-        """The loop's AdamW supplies the (scheduled) learning rate, betas and eps; its own step is not used."""
-        if not isinstance(optimizer, torch.optim.AdamW):
-            raise TypeError("Sharp MinMax applies AdamW per partition; it needs an AdamW optimizer")
-        for group in optimizer.param_groups:
-            if group["weight_decay"] or group.get("amsgrad") or group.get("maximize"):
-                raise ValueError("Sharp MinMax's AdamW has no weight decay, amsgrad or maximize")
+        expected = torch.optim.SGD if self.optimizer_name == "sgd" else torch.optim.AdamW
+        if not isinstance(optimizer, expected):
+            raise TypeError(f"Sharp MinMax needs {expected.__name__} for this recipe")
         self.optimizer = optimizer
+        # Copy group settings, not defaults: newer torch versions add constructor-incompatible defaults.
+        groups = [{**group, "params": list(group["params"])} for group in optimizer.param_groups]
+        self.forget_optimizer = expected(groups, lr=optimizer.param_groups[0]["lr"])
 
     def _active(self, name, forget):
         return self.masks[name] if forget else ~self.masks[name]
 
-    def _phase(self, model, inputs, named, forget, max_grad_norm):
-        """One partition's sharpness-aware gradient (the perturbation over all weights, the blend masked to
-        the partition, clipped) and loss."""
+    def _phase(self, model, inputs, named, forget, max_grad_norm=float("inf")):
+        """Full-gradient SAM perturbation, then the authors' second-gradient-only mask.
+        No gradient clipping: Algorithm 2 and the released training loop do not clip."""
         names, params = list(named), list(named.values())
         coefficient = -(1 - self.alpha) if forget else self.alpha
         cpu_rng = torch.get_rng_state()
@@ -115,91 +109,71 @@ class SharpMinMaxUpdate:
         cuda_rng = {d: torch.cuda.get_rng_state(d) for d in devices}
         loss = model(inputs)["loss"]
         g0 = gradients(coefficient * loss, params)
-        with perturbed(params, g0, self.rho, self.adaptive):  # all weights, as the authors' first_step
+        with perturbed(params, g0, self.rho, self.adaptive):
             with replay_randomness(model, cpu_rng, cuda_rng):
                 second_loss = model(inputs)["loss"]
                 g1 = gradients(coefficient * second_loss, params)
         sign = -1 if forget else 1
-        for i, name in enumerate(names):  # g0 <- (g0 + sign * strength * (g1 - g0)) * mask, in place
-            if g0[i] is None and g1[i] is None:
+        blended = []
+        for name, base, second in zip(names, g0, g1):
+            if base is None and second is None:
+                blended.append(None)
                 continue
-            mask = self._active(name, forget)
-            if g0[i] is None:
-                g0[i] = torch.zeros_like(g1[i])
-            if g1[i] is not None:
-                g0[i].add_(g1[i].sub_(g0[i]), alpha=sign * self.strength)
-            else:
-                g0[i].mul_(1 - sign * self.strength)
-            g0[i].mul_(mask)
-            g1[i] = None
-        check_finite({str(i): g for i, g in enumerate(g0) if g is not None}, "sharpness gradients")
-        norm = clip_(g0, max_grad_norm)
-        return loss.detach(), g0, norm
-
-    @torch.no_grad()
-    def _adamw(self, named, grads, forget):
-        """torch AdamW (weight_decay 0) restricted to the partition: moments and weights change only inside
-        it, so the other partition's moments, kept in the same buffers, are untouched."""
-        phase = "forget" if forget else "retain"
-        self.steps[phase] += 1
-        step = self.steps[phase]
-        # Looked up every step: the scheduler sets the lr there, and load_state_dict (resume) replaces the dicts.
-        groups = {id(p): group for group in self.optimizer.param_groups for p in group["params"]}
-        for (name, p), g in zip(named.items(), grads):
-            if g is None:
-                continue
-            group = groups[id(p)]
-            beta1, beta2 = group["betas"]
-            mask = self._active(name, forget)
-            if name not in self.moments:
-                self.moments[name] = [torch.zeros_like(p, memory_format=torch.preserve_format),
-                                      torch.zeros_like(p, memory_format=torch.preserve_format)]
-            exp_avg, exp_avg_sq = self.moments[name]
-            exp_avg.copy_(torch.where(mask, exp_avg.lerp(g, 1 - beta1), exp_avg))
-            exp_avg_sq.copy_(torch.where(mask, torch.addcmul(exp_avg_sq * beta2, g, g, value=1 - beta2), exp_avg_sq))
-            # As torch's AdamW (single-tensor path): Python floats for the bias corrections.
-            bias_correction1 = 1 - beta1 ** float(step)
-            bias_correction2_sqrt = math.sqrt(1 - beta2 ** float(step))
-            denom = (exp_avg_sq.sqrt() / bias_correction2_sqrt).add_(group["eps"])
-            p.addcdiv_(exp_avg * mask, denom, value=-group["lr"] / bias_correction1)
+            base = torch.zeros_like(second) if base is None else base
+            masked = torch.zeros_like(base) if second is None else second * self._active(name, forget)
+            blended.append(base + sign * self.strength * (masked - base))
+        check_finite({str(i): g for i, g in enumerate(blended) if g is not None}, "sharpness gradients")
+        return loss.detach(), blended, clip_(blended, float("inf"))
 
     def step(self, model, batch, optimizer, max_grad_norm):
         named = trainable_named_parameters(model)
-        if set(named) != set(self.masks):
-            raise ValueError("Sharp MinMax mask does not match the trainable parameters")
-        retain, retain_grads, r_norm = self._phase(model, batch["retain"], named, False, max_grad_norm)
-        self._adamw(named, retain_grads, False)
-        del retain_grads
-        # Check before the forget phase as well: invalid weights must not enter the next forward.
-        check_finite(named, "Sharp MinMax retain update")
-        forget, forget_grads, f_norm = self._phase(model, batch["forget"], named, True, max_grad_norm)
-        self._adamw(named, forget_grads, True)
-        del forget_grads
-        optimizer.step()  # no parameter has a gradient: a no-op, so the LR scheduler sees a step
+        self.check_masks(named)
+        for source, target in zip(optimizer.param_groups, self.forget_optimizer.param_groups):
+            target["lr"] = source["lr"]
+        norms, losses = [], []
+        for forget, opt in ((False, optimizer), (True, self.forget_optimizer)):
+            phase = "forget" if forget else "retain"
+            loss, grads, norm = self._phase(model, batch[phase], named, forget)
+            for p, g in zip(named.values(), grads):
+                p.grad = g
+            opt.step()
+            opt.zero_grad(set_to_none=True)
+            # AdamW/SGD changed weights inside train.py's enclosing autocast region.
+            torch.clear_autocast_cache()
+            check_finite(named, f"Sharp MinMax {phase} update")
+            check_finite({f"{i}.{key}": value for i, state in enumerate(opt.state.values())
+                          for key, value in state.items() if isinstance(value, torch.Tensor)},
+                         f"Sharp MinMax {phase} optimizer")
+            losses.append(loss)
+            norms.append(norm)
+        retain, forget = losses
         return self.alpha * retain - (1 - self.alpha) * forget, {
-            "retain_fm": retain.item(), "forget_fm": forget.item(), "grad_norm": max(r_norm, f_norm)}
+            "retain_fm": retain.item(), "forget_fm": forget.item(), "grad_norm": max(norms)}
 
     def check_masks(self, named):
+        if set(named) != set(self.masks):
+            raise ValueError("Sharp MinMax mask does not match the trainable parameters")
         for name, p in named.items():
             mask = self.masks[name]
             if mask.dtype != torch.bool or mask.shape != p.shape or mask.device != p.device:
                 raise ValueError(f"invalid Sharp MinMax mask for {name}")
 
+    def _settings(self):
+        return (self.alpha, self.rho, self.strength, self.adaptive,
+                self.optimizer_name, self.momentum, self.weight_decay)
+
     def state_dict(self):
-        return {"kind": "sharp_minmax", "moments": self.moments, "steps": dict(self.steps),
-                "masks": self.masks, "settings": (self.alpha, self.rho, self.strength, self.adaptive)}
+        return {"kind": "sharp_minmax", "version": 3, "masks": self.masks,
+                "settings": self._settings(), "forget_optimizer": self.forget_optimizer.state_dict()}
 
     def load_state_dict(self, state):
-        if state.get("kind") != "sharp_minmax" or tuple(state["settings"]) != (
-                self.alpha, self.rho, self.strength, self.adaptive):
+        if state.get("version") != 3:
+            raise ValueError("Sharp checkpoint predates the literal Algorithm 2 update; start a fresh operation")
+        if state.get("kind") != "sharp_minmax" or tuple(state["settings"]) != self._settings():
             raise ValueError("Sharp MinMax checkpoint has different method settings")
-        if "moments" not in state:
-            raise ValueError("Sharp MinMax checkpoint from the two-optimizer version: start the op again")
-        check_finite({f"{n}.{i}": v for n, pair in state["moments"].items() for i, v in enumerate(pair)},
-                     "Sharp MinMax optimizer state")
-        self.moments, self.steps, self.masks = state["moments"], dict(state["steps"]), state["masks"]
+        self.forget_optimizer.load_state_dict(state["forget_optimizer"])
+        self.masks = state["masks"]
 
     def to(self, named):
         self.masks = {n: m.to(named[n].device) for n, m in self.masks.items()}
-        self.moments = {n: [v.to(named[n].device) for v in pair] for n, pair in self.moments.items()}
-        self.check_masks({n: named[n] for n in self.masks})
+        self.check_masks(named)

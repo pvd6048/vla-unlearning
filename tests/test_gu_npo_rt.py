@@ -1,6 +1,7 @@
 """GU on NPO-RT (vlu/gu_npo_rt.py): known-answer projections, basis growth, NPO-RT's update while the basis
 is empty, exact resume and planning, on CPU with the GR00T-shaped fake."""
 import dataclasses
+import copy
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -26,7 +27,7 @@ def rule_for(n, basis, v, cap=.5, k=8):
     p = nn.Parameter(torch.zeros(n))
     optimizer = torch.optim.AdamW([p], lr=1e-3)
     optimizer.state[p] = {"exp_avg_sq": v.clone()}
-    rule = GuNpoRt(.1, ["w"], k, 2, cap)
+    rule = GuNpoRt(.1, ["w"], k, 2, cap, gamma=1., alpha=1.)
     rule.initialize(optimizer)
     rule.basis["w"] = [u.half() for u in basis]
     return rule, p
@@ -159,12 +160,66 @@ def run(directory, method, steps, recipe_changes=None, interrupt_at=None, seed=4
 
 
 class TrainingTests(unittest.TestCase):
+    def test_algorithm_1_recovers_from_joint_gradient_on_nonrefresh_steps(self):
+        class Policy(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.action_head = nn.Module()
+                self.action_head.action_decoder = nn.Linear(3, 3, bias=False)
+
+            def forward(self, x):
+                pred = self.action_head.action_decoder(x[:, None])
+                error = (pred.square() - x[:, None]).square()
+                return {"loss": error.mean(), "action_loss": error,
+                        "action_mask": torch.ones_like(error)}
+
+        torch.manual_seed(19)
+        model = Policy()
+        ref = copy.deepcopy(model).requires_grad_(False)
+        with torch.no_grad():
+            model.action_head.action_decoder.weight.add_(.2)
+        name = "action_head.action_decoder.weight"
+        p = dict(model.named_parameters())[name]
+        gamma, alpha = 1.5, .7
+        rule = GuNpoRt(.1, [name], 2, 10, .5, gamma, alpha)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=.001)
+        optimizer.state[p] = {"exp_avg_sq": torch.ones_like(p)}
+        rule.initialize(optimizer)
+        rule.attach(model, ref)
+        rule.basis[name] = [torch.eye(p.numel())[0].reshape_as(p).half()]
+        rule.calls = 1  # no basis refresh: the current anchor is still required
+        x, y = torch.randn(2, 3), torch.randn(2, 3)
+        out, frozen = model(x), ref(x)
+        ratio = frozen["action_loss"].sum((1, 2)) - out["action_loss"].sum((1, 2))
+        npo = 20 * torch.nn.functional.softplus(.1 * ratio).mean()
+        retain = model(y)["loss"]
+        anchor = (model.action_head.action_decoder(y[:, None]) - ref.action_head.action_decoder(y[:, None])).square().mean()
+        total = torch.autograd.grad(gamma * npo + alpha * retain, p)[0]
+        gr = torch.autograd.grad(anchor, p)[0]
+        recovered = (total - alpha * gr) / gamma
+        expected = rule._project(name, p, recovered, gr)
+        original = rule._project
+        seen = []
+
+        def inspect(n, parameter, gf, gr_now):
+            torch.testing.assert_close(gf, recovered)
+            torch.testing.assert_close(gr_now, gr)
+            seen.append(n)
+            return original(n, parameter, gf, gr_now)
+
+        with patch.object(rule, "_project", side_effect=inspect), patch.object(optimizer, "step"):
+            rule.step(model, {"forget": x, "retain": y}, optimizer, float("inf"))
+        self.assertEqual(seen, [name])
+        self.assertEqual(len(rule.basis[name]), 1)
+        torch.testing.assert_close(p.grad, expected)
+        self.assertGreater(rule.last_anchor, 0.)
+
     def test_empty_basis_trains_exactly_as_npo_rt(self):
         """With the basis never refreshed after the first step (where the anchor is zero), every step is
         NPO-RT's: same forwards, random draws, gradients (up to summation order) and AdamW."""
         with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
             npo_rt, _, _ = run(Path(a), "npo_rt", 4)
-            gu, _, rule = run(Path(b), "npo_rt_gu", 4, {"gu_refresh_every": 10 ** 6})
+            gu, _, rule = run(Path(b), "npo_rt_gu", 4, {"gu_refresh_every": 10 ** 6, "gu_forget_weight": 1.})
         self.assertEqual(sum(map(len, rule.basis.values())), 0)
         moved = 0
         for (n, p), q in zip(npo_rt.named_parameters(), gu.parameters()):

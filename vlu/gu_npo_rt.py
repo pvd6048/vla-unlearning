@@ -2,8 +2,7 @@
 
 GU is a plug-in for a base unlearning objective (the paper: "any forget loss"; the authors' config uses
 SimNPO, their code also NPO). Here the base is NPO-RT (vlu/ops.py: NPO on the forget task plus the FM loss
-on the retained tasks, weights gamma = alpha = 1, NPO-RT's own; the authors' trainer defaults to gamma = 1.5,
-but keeping the base method's weights makes npo_rt vs npo_rt_gu differ only by the projection). We follow
+on the retained tasks, with the authors' default gamma = 1.5 and alpha = 1). We follow
 the paper's Algorithm 1 / Appendix B and the authors' code (Lemutisme/geo-unlearning@bbe4d50,
 src/trainer/unlearn/geometric.py, RetainNullProjector and GeometricUnlearn.optimizer_step):
 
@@ -24,20 +23,19 @@ src/trainer/unlearn/geometric.py, RetainNullProjector and GeometricUnlearn.optim
 - Update (per projected tensor, whitened): forget part = P_perp g~_f plus the components a_j u_j of g~_f
   whose sign is opposite to the retain gradient's along u_j (a_j b_j < -tau, tau = 0), their norm capped at
   gu_cap (sign_cap_ratio = 0.5) x ||P_perp g~_f||; retain part = P_U g~_r; both mapped back by
-  x (sqrt(v) + 1e-8) and added. Then clipping and the usual AdamW step (NPO-RT's, weight decay included).
+  x (sqrt(v) + 1e-8), weighted by gamma and alpha, and added. Then clipping and AdamW.
 
 Choices where the sources differ, or where GR00T needs one:
-- g_r is the gradient of the base method's retain loss (the paper's Appendix B.1: g~_r = W grad L_r). The
-  authors' code instead uses the anchor's gradient for the tangent and sign terms and recovers g_f as
-  (g_tot - alpha g_anchor) / gamma, which mixes the retain loss's gradient into "g_f"; we compute g_f and
-  g_r separately (two backward passes on the forward graphs NPO-RT builds anyway), so g_tot = g_f + g_r.
+- Algorithm 1 and the released trainer use g_r = grad(anchor) and recover g_f as
+  (g_tot - alpha g_r) / gamma. We preserve this literally, including the retain-FM contribution in g_f.
+  The anchor gradient is evaluated every step; only basis growth is intermittent.
 - The authors fall back to an EMA of squared gradients before the optimizer has a second moment; that is
   only the first step here, where the anchor's gradient is zero and the basis empty, so there is nothing
   to whiten: the first step is NPO-RT's.
 - The projection uses the authors' sequential subtraction along the basis (exact when the stored vectors
   are orthogonal; float16 rounding makes them nearly so).
-With an empty basis (always the first two steps) the update is exactly NPO-RT's
-(tests/test_gu_npo_rt.py).
+With an empty basis the update is the weighted base objective's gradient. Setting gamma = alpha = 1
+recovers NPO-RT (tests/test_gu_npo_rt.py). See PAPER_ALIGNMENT.md for necessary flow-policy adaptations.
 
 Memory: the reference copy (as NPO), the basis (k float16 copies of the projected tensors) and their
 per-step gradients; the projected tensors are the last 3 of GR00T's DiT blocks plus the output layers.
@@ -69,8 +67,10 @@ def projected_names(names: list[str], last_blocks: int) -> list[str]:
 class GuNpoRt:
     disable_weight_decay = False  # NPO-RT's AdamW, decay included
 
-    def __init__(self, beta: float, names: list[str], k: int, refresh_every: int, cap: float):
+    def __init__(self, beta: float, names: list[str], k: int, refresh_every: int, cap: float,
+                 gamma: float = 1.5, alpha: float = 1.0):
         self.beta, self.names, self.k, self.refresh_every, self.cap = beta, list(names), k, refresh_every, cap
+        self.gamma, self.alpha = gamma, alpha
         self.basis = {n: [] for n in self.names}
         self.calls = 0
         self.last_anchor = 0.0
@@ -140,8 +140,8 @@ class GuNpoRt:
         scale = self._scale(p) if basis else None
         if scale is None:  # no basis yet: NPO-RT's gradient
             if g_f is None or g_r is None:
-                return g_f if g_r is None else g_r
-            return g_f + g_r
+                return self.gamma * g_f if g_f is not None else (self.alpha * g_r if g_r is not None else None)
+            return self.gamma * g_f + self.alpha * g_r
         us = [u.float() for u in basis]
         out = None
         f = r = None
@@ -163,13 +163,14 @@ class GuNpoRt:
                 if tan_norm > self.cap * perp_norm:
                     tangent *= self.cap * perp_norm / tan_norm
                 selected = perp + tangent
-            out = selected * scale
+            out = self.gamma * selected * scale
         if r is not None:
             tangent_r = torch.zeros_like(r)
             for uu in us:
                 tangent_r += (r * uu).sum() / (uu * uu).sum().clamp_min(1e-12) * uu
-            out = tangent_r * scale if out is None else out + tangent_r * scale
-        return out.to(p.dtype)
+            retain = self.alpha * tangent_r * scale
+            out = retain if out is None else out + retain
+        return out.to(p.dtype) if out is not None else None
 
     def step(self, model, batch, optimizer, max_grad_norm):
         named = trainable_named_parameters(model)
@@ -183,52 +184,59 @@ class GuNpoRt:
         metrics = {"forget_fm": out["loss"].item(), "log_ratio": log_ratio.mean().item(),
                    "npo_weight": (2 * torch.sigmoid(self.beta * log_ratio.detach())).mean().item()}
         del out, ref_out, log_ratio
-        npo.backward()
-        g_f = {}
-        for name in self.names:  # keep the forget gradient of the projected tensors apart
-            g_f[name], named[name].grad = named[name].grad, None
-        # The retain FM loss (NPO-RT's retain term) and, on refresh steps, the anchor for the basis.
+        (self.gamma * npo).backward()
+        # The anchor is part of every GU update; only basis refresh is intermittent.
         refresh = self.calls % self.refresh_every == 0
         self.calls += 1
-        self._capture = refresh
+        self._capture = True
         try:
             out_r, reference = self._paired(model, batch["retain"])
-            if refresh:
-                mine = self._taps.pop("mine")
-                reference()
-                theirs = self._taps.pop("ref")
+            mine = self._taps.pop("mine")
+            reference()
+            theirs = self._taps.pop("ref")
         finally:
             self._capture = False
             self._taps.clear()
         retain_loss = out_r["loss"]
         check_finite({"loss": retain_loss}, "retain loss")
+        anchor = velocity_kl(out_r, {"velocity": mine}, {"velocity": theirs})
+        del mine, theirs
+        check_finite({"anchor": anchor}, "GU retain anchor")
+        grads = torch.autograd.grad(anchor, [named[n] for n in self.names], retain_graph=True, allow_unused=True)
         if refresh:
-            anchor = velocity_kl(out_r, {"velocity": mine}, {"velocity": theirs})
-            del mine, theirs
-            check_finite({"anchor": anchor}, "GU retain anchor")
-            grads = torch.autograd.grad(anchor, [named[n] for n in self.names], retain_graph=True, allow_unused=True)
             self._grow_basis(named, grads)
-            self.last_anchor = anchor.item()
-            del grads, anchor
+        self.last_anchor = anchor.item()
+        del anchor
         metrics["retain_fm"] = retain_loss.item()
         del out_r
-        retain_loss.backward()
-        for name in self.names:
+        (self.alpha * retain_loss).backward()
+        for name, g_r in zip(self.names, grads):
             p = named[name]
-            p.grad = self._project(name, p, g_f.pop(name), p.grad)
+            # Algorithm 1: recover from the joint gradient, not a separately computed forget loss.
+            total = p.grad
+            if total is None and g_r is None:
+                continue
+            g_f = None
+            if total is not None:
+                g_f = (total - self.alpha * g_r) / self.gamma if g_r is not None else total / self.gamma
+            p.grad = self._project(name, p, g_f, g_r)
+        del grads
         grad_norm = torch.nn.utils.clip_grad_norm_(params, max_grad_norm, error_if_nonfinite=True).item()
         optimizer.step()
         metrics.update(anchor=self.last_anchor, basis_size=sum(map(len, self.basis.values())) / len(self.basis),
                        grad_norm=grad_norm)
-        return npo.detach() + retain_loss.detach(), metrics
+        return self.gamma * npo.detach() + self.alpha * retain_loss.detach(), metrics
 
     def state_dict(self):
-        return {"kind": "npo_rt_gu", "names": self.names, "basis": self.basis, "calls": self.calls,
-                "last_anchor": self.last_anchor, "settings": (self.beta, self.k, self.refresh_every, self.cap)}
+        return {"kind": "npo_rt_gu", "version": 2, "names": self.names, "basis": self.basis, "calls": self.calls,
+                "last_anchor": self.last_anchor,
+                "settings": (self.beta, self.k, self.refresh_every, self.cap, self.gamma, self.alpha)}
 
     def load_state_dict(self, state):
+        if state.get("version") != 2:
+            raise ValueError("GU checkpoint predates Algorithm 1 gradient recovery; start a fresh operation")
         if state.get("kind") != "npo_rt_gu" or state["names"] != self.names or tuple(state["settings"]) != (
-                self.beta, self.k, self.refresh_every, self.cap):
+                self.beta, self.k, self.refresh_every, self.cap, self.gamma, self.alpha):
             raise ValueError("GU checkpoint has different method settings or projected tensors")
         self.basis, self.calls, self.last_anchor = state["basis"], state["calls"], state["last_anchor"]
 

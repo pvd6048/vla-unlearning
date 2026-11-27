@@ -89,11 +89,14 @@ def train(node: Node, model, plan: OpPlan, batches, probes: dict[str, dict], rec
     # With a gradient mask (SalUn) only the selected weights may change, so no weight decay either
     # (AdamW's decay would shrink the masked-out weights).
     no_decay = plan.grad_mask is not None or (rule is not None and rule.disable_weight_decay)
-    optimizer = _optimizer(model, plan.lr, 0.0 if no_decay else recipe.weight_decay)
+    optimizer = (rule.make_optimizer(model, plan.lr) if hasattr(rule, "make_optimizer")
+                 else _optimizer(model, plan.lr, 0.0 if no_decay else recipe.weight_decay))
     if rule is not None:
         rule.initialize(optimizer)
     masked = [(named[n], m) for n, m in plan.grad_mask.items()] if plan.grad_mask is not None else []
-    scheduler = get_cosine_schedule_with_warmup(optimizer, math.ceil(recipe.warmup_ratio * plan.steps), plan.steps)
+    scheduler = (torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.)
+                 if getattr(rule, "constant_lr", False) else
+                 get_cosine_schedule_with_warmup(optimizer, math.ceil(recipe.warmup_ratio * plan.steps), plan.steps))
 
     resume_path = node.dir / "resume.pt"
     # Short ops (including the default 1000-step U ops) need a checkpoint before the end too.

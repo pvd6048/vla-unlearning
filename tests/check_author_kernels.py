@@ -7,6 +7,8 @@ import ast
 import hashlib
 from pathlib import Path
 import re
+from types import SimpleNamespace
+import copy
 
 import stubs  # noqa: F401
 import torch
@@ -34,19 +36,6 @@ class Nonlinear(nn.Module):
         return {"loss": (x[0] + 2*x[1] - x[2]).square() + .2*x.pow(4).sum()}
 
 
-def masked_sgd(active):
-    """SGD on the active partition only: our partition-safe final update, as the reference's base optimizer."""
-    class MaskedSGD(torch.optim.SGD):
-        @torch.no_grad()
-        def step(self, closure=None):
-            for group in self.param_groups:
-                for p in group["params"]:
-                    if p.grad is not None:
-                        p.grad.mul_(active)
-            return super().step(closure)
-    return MaskedSGD
-
-
 def check_sharp(source):
     namespace = {}
     exec(compile(source, "author_sam.py", "exec"), namespace)
@@ -61,12 +50,12 @@ def check_sharp(source):
                     inputs = {}
                     coefficient = -.3 if forget else .7
                     rule = SharpMinMaxUpdate({"weight": mask}, .7, rho, strength, adaptive)
-                    optimizer = torch.optim.SGD(own.parameters(), lr=.02, momentum=.9)
-                    other = namespace["SAM"](reference.parameters(), masked_sgd(active),
+                    optimizer = torch.optim.SGD(own.parameters(), lr=.02, momentum=.9, weight_decay=5e-4)
+                    other = namespace["SAM"](reference.parameters(), torch.optim.SGD,
                                              sign="max" if forget else "min", rho=rho, lamb=strength,
-                                             adaptive=adaptive, lr=.02, momentum=.9)
+                                             adaptive=adaptive, lr=.02, momentum=.9, weight_decay=5e-4)
                     for _ in range(4):
-                        # Our blended, masked gradient, applied by the same SGD as the reference's base optimizer.
+                        # Our literal blend, applied by the unmodified native base optimizer.
                         _, grads, _ = rule._phase(own, inputs, {"weight": own.weight}, forget, float("inf"))
                         own.weight.grad = grads[0]
                         optimizer.step()
@@ -81,7 +70,7 @@ def check_sharp(source):
                         max_error = max(max_error, (own.weight-reference.weight).abs().max().item())
                         torch.testing.assert_close(own.weight, reference.weight, atol=1e-12, rtol=1e-12)
                     cases += 1
-    print(f"Sharp author SAM: {cases} configurations x 4 momentum steps; max abs error {max_error:.3g}")
+    print(f"Sharp author SAM: {cases} configurations x 4 momentum/decay steps; max abs error {max_error:.3g}")
 
 
 def check_gu(source):
@@ -124,7 +113,7 @@ def check_gu_npo_rt(source):
                                                      basis_dtype=torch.float16, basis_update_every=1,
                                                      residual_keep_thresh=1e-3)
         reference.bind_optimizer(optimizer)
-        rule = GuNpoRt(.1, ["weight"], 3, 1, .5)
+        rule = GuNpoRt(.1, ["weight"], 3, 1, .5, gamma=1., alpha=1.)
         rule.initialize(optimizer)
         xs = [torch.randn(3, 12) for _ in range(4)]
         xs.insert(2, 2 * xs[0])  # a parallel gradient: kept by neither
@@ -151,6 +140,66 @@ def check_gu_npo_rt(source):
     print(f"GU on NPO-RT vs the authors' projector (Adam metric): 10 seeds, basis and projections; max abs error {max_error:.3g}")
 
 
+def check_gu_algorithm_1(source):
+    """Execute the author's optimizer_step unchanged, with a tiny classifier and a no-op parent step.
+    This includes recovery, sign gating, cap, both weights and the full Adam-metric projection.
+    Only the LLM trainer scaffolding is replaced; its KL is evaluated literally.
+    """
+    from vlu.gu_npo_rt import GuNpoRt
+    tree = ast.parse(source)
+    projector = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "RetainNullProjector")
+    trainer = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "GeometricUnlearn")
+    trainer.bases = [ast.Name(id="Parent", ctx=ast.Load())]
+    trainer.body = [n for n in trainer.body if isinstance(n, ast.FunctionDef) and
+                    n.name in ("optimizer_step", "nullProjProjectTan")]
+    class Parent:
+        def optimizer_step(self, *args, **kwargs): pass
+    namespace = {"torch": torch, "re": re, "F": torch.nn.functional, "Parent": Parent}
+    module = ast.fix_missing_locations(ast.Module(body=[projector, trainer], type_ignores=[]))
+    exec(compile(module, "author_gu_algorithm_1.py", "exec"), namespace)
+    class Classifier(nn.Linear):
+        def forward(self, x):
+            return SimpleNamespace(logits=super().forward(x))
+
+    error = 0.
+    for seed in range(10):
+        torch.manual_seed(seed)
+        model = Classifier(4, 3, bias=False)
+        ref = copy.deepcopy(model).requires_grad_(False)
+        with torch.no_grad(): model.weight.add_(.2 * torch.randn_like(model.weight))
+        optimizer = torch.optim.AdamW(model.parameters(), lr=.001)
+        optimizer.state[model.weight] = {"exp_avg_sq": torch.rand_like(model.weight) + .1}
+        projection = namespace["RetainNullProjector"](model, ["weight"], k=2, use_adam_diag=True,
+                                                      use_opt_state=True, basis_dtype=torch.float16)
+        projection.bind_optimizer(optimizer)
+        # The released trainer differentiates the anchor twice on refresh steps without retaining
+        # its graph. Compare its unmodified non-refresh rewrite; basis growth is checked separately.
+        projection.basis_update_every, projection._step = 2, 1
+        q = torch.linalg.qr(torch.randn(12, 2)).Q
+        projection.basis["weight"] = [u.reshape_as(model.weight).half() for u in q.T]
+        author = namespace["GeometricUnlearn"]()
+        author.model, author.ref_model, author.null_proj = model, ref, projection
+        author._last_retain_inputs = {"x": torch.randn(5, 4)}
+        author._last_forget_inputs = {"x": torch.randn(5, 4)}
+        author.gamma, author.alpha = 1.5, .7
+        author.sign_selective, author.sign_tau, author.sign_cap_ratio = True, 0., .5
+        x = author._last_retain_inputs
+        anchor = torch.nn.functional.kl_div(model(**x).logits.log_softmax(-1),
+                                            ref(**x).logits.softmax(-1), reduction="batchmean")
+        gr = torch.autograd.grad(anchor, model.weight)[0]
+        total = torch.randn_like(model.weight)
+        own = GuNpoRt(.1, ["weight"], 2, 2, .5, gamma=author.gamma, alpha=author.alpha)
+        own.initialize(optimizer)
+        own.basis["weight"] = list(projection.basis["weight"])
+        recovered = (total - author.alpha * gr) / author.gamma
+        actual = own._project("weight", model.weight, recovered, gr)
+        model.weight.grad = total.clone()
+        author.optimizer_step(optimizer=optimizer)
+        error = max(error, (actual-model.weight.grad).abs().max().item())
+        torch.testing.assert_close(actual, model.weight.grad, atol=1e-6, rtol=1e-5)
+    print(f"GU complete author gradient rewrite: 10 seeds, gamma=1.5, alpha=.7; max abs error {error:.3g}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("gu_source", type=Path)
@@ -162,6 +211,6 @@ if __name__ == "__main__":
     check_sharp(sharp)
     check_gu(gu)
     check_gu_npo_rt(gu)
-    print("Kernel checks only. Differ from the authors by design: gu's (GU-FM's) optimizer and anchors; npo_rt_gu's "
-          "anchor (velocity stand-in for the KL) and its g_r (the retain loss's gradient); Sharp's blend, masked "
-          "as a whole (the authors' forget blend also moves the retain partition by 2 g0).")
+    check_gu_algorithm_1(gu)
+    print("Kernel checks only; complete GR00T/LIBERO experiments are not reproduced. "
+          "The primary GU method is npo_rt_gu; gu remains a legacy experimental method.")
