@@ -258,7 +258,8 @@ class TrainingTests(unittest.TestCase):
         node = Node.from_path("gu", "LA/LB/UB-npo_rt_gu")
         check_op(node, recipe)
         for key, value in (("gu_basis_k", 0), ("gu_last_blocks", 0), ("gu_refresh_every", 0), ("gu_cap", 1.5),
-                           ("gu_cap", float("nan")), ("npo_beta", 0.)):
+                           ("gu_cap", float("nan")), ("npo_beta", 0.),
+                           ("gu_forget_weight", 0.), ("gu_retain_weight", float("nan"))):
             with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, key):
                 check_op(node, dataclasses.replace(recipe, **{key: value}))
         with self.assertRaisesRegex(ValueError, "no learning rate"):

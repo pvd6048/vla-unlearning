@@ -327,7 +327,7 @@ def _plan_npo_rt_gu(node: Node, recipe: Recipe) -> OpPlan:
 
     forget, retain = _forget_retain(node, recipe)
     plan = OpPlan({"forget": forget, "retain": retain}, None, recipe.unlearn_steps, recipe.unlearn_lr,
-                  {"npo_beta": recipe.npo_beta, "retain_coeff": 1.0, "gu_basis_k": recipe.gu_basis_k,
+                  {"npo_beta": recipe.npo_beta, "retain_coeff": recipe.gu_retain_weight, "gu_basis_k": recipe.gu_basis_k,
                    "gu_last_blocks": recipe.gu_last_blocks, "gu_refresh_every": recipe.gu_refresh_every,
                    "gu_cap": recipe.gu_cap, "retain_anchor": "masked mean squared velocity difference to theta0",
                    "gu_forget_weight": recipe.gu_forget_weight, "gu_retain_weight": recipe.gu_retain_weight,

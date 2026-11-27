@@ -1,7 +1,8 @@
 """The training loop shared by every op.
 
-AdamW with linear warmup + cosine decay (fresh for each op), bf16 autocast over fp32 trainable
-weights, gradient clipping: the same optimization as NVIDIA's HF-Trainer fine-tune. The loop is
+By default, AdamW with linear warmup + cosine decay (fresh for each op), bf16 autocast over fp32 trainable
+weights, and gradient clipping. Update rules can supply their published optimizer and schedule;
+Sharp uses constant-rate SGD (or explicitly selected AdamW), with no clipping. The loop is
 resumable: every `save_every` steps it writes resume.pt (weights, optimizer, scheduler, RNG, step),
 and a rerun of the same op continues from there.
 """

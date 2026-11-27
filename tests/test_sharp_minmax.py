@@ -240,7 +240,9 @@ class SharpTests(unittest.TestCase):
             with patch.object(Node, "dir", new_callable=lambda: property(lambda self: directory)), \
                  patch("vlu.ops.accumulate_grads", return_value={"weight": torch.tensor([1., 3.])}) as importance:
                 plan = plan_op(node, recipe)
+                rng_before = torch.get_rng_state()
                 plan.prepare(ctx)
+                self.assertTrue(torch.equal(torch.get_rng_state(), rng_before))
                 self.assertTrue(torch.equal(plan.update_rule.masks["weight"], torch.tensor([False, True])))
                 second = plan_op(node, recipe)
                 second.prepare(ctx)
@@ -252,6 +254,9 @@ class SharpTests(unittest.TestCase):
                 smallest = plan_op(node, dataclasses.replace(recipe, sharp_select="smallest"))
                 smallest.prepare(ctx)  # the authors' generate_mask.py: the lowest-ranked half
                 self.assertTrue(torch.equal(smallest.update_rule.masks["weight"], torch.tensor([True, False])))
+                torch.save({"masks": smallest.update_rule.masks}, directory / "sharp_minmax_mask.pt")
+                with self.assertRaisesRegex(ValueError, "older algorithm"):
+                    smallest.prepare(ctx)
 
     def test_smallest_split_counts_only_live_entries(self):
         """Per-embodiment projector stacks: only LIBERO's row can change, so the other rows (zero saliency)
@@ -293,10 +298,20 @@ class SharpTests(unittest.TestCase):
     def test_resume_saves_both_optimizers_and_masks(self):
         self.check_resume(Quadratic)
 
+    def test_optional_author_code_adamw_resume_is_exact(self):
+        self.check_resume(NoisyQuadratic, optimizer_name="adamw")
+
+    def test_legacy_shared_moment_checkpoints_are_rejected(self):
+        model = Quadratic()
+        rule = make_rule()
+        rule.initialize(rule.make_optimizer(model, .01))
+        with self.assertRaisesRegex(ValueError, "predates"):
+            rule.load_state_dict({"kind": "sharp_minmax", "moments": {}, "steps": {}})
+
     def test_resume_matches_with_stochastic_sharpness_evaluations(self):
         self.check_resume(NoisyQuadratic)
 
-    def check_resume(self, model_type):
+    def check_resume(self, model_type, optimizer_name="sgd"):
         with tempfile.TemporaryDirectory() as tmp:
             def run(name, interrupt=False):
                 torch.manual_seed(41)
@@ -306,12 +321,14 @@ class SharpTests(unittest.TestCase):
                 recipe = dataclasses.replace(RECIPE, unlearn_lr=.01, unlearn_steps=6, save_every=3, log_every=6)
                 plan = plan_op(Node.from_path("sharp", "LA/LB/UB-sharp_minmax"), recipe)
                 plan.update_rule = make_rule()
+                plan.update_rule.optimizer_name = optimizer_name
                 model = model_type()
                 original = plan.update_rule.step
                 calls = []
                 def step(*args):
                     if interrupt and len(calls) == 3:
                         raise InterruptedError()
+                    self.assertEqual(args[2].param_groups[0]["lr"], .01)  # constant from the first step
                     result = original(*args)
                     calls.append(result[0].item())
                     return result

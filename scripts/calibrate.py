@@ -64,14 +64,13 @@ from vlu.worker import item_key, load_plan, plan_path, someone_working, write_pl
 #   0.66, 2e-4 to 0.00. A's probe loss rose in the vision and projector stages (about equally), hardly in the
 #   reasoning stage. 2e-4 is dropped and two lower rates added: 1e-5, 2e-5, 5e-5. (A's probe loss ended at
 #   0.08 for both paper values: it does not show the difference in SR A.)
-# - GU on NPO-RT (new; vlu/gu_npo_rt.py, the authors' algorithm as a plug-in on our best base method): the
-#   NPO-RT grid, so each rate compares with and without the retain-null projection.
-# - Sharp MinMax (new; vlu/sharp_minmax.py): under AdamW a phase's step is about lr per entry, so the forget
-#   partition's ascent is GA restricted to 30% of the weights while the other 70% descend on the retained
-#   task. GA lost A from 3e-7 (all weights) and GradDiff was halfway at 3e-7..6e-7 and lost A at 1e-6, so the
-#   grid brackets them from above: 3e-7, 1e-6, 3e-6, with each of the paper's two readings of the partition
-#   (the largest forget gradients, App. E.2; the smallest, Algorithm 1 and the authors' generate_mask.py).
-#   alpha is not varied: it cancels under AdamW (vlu/sharp_minmax.py).
+# - GU now follows Algorithm 1's anchor-gradient recovery, gamma=1.5, alpha=1. NPO-RT's grid is a
+#   provisional bracket, not a matched-weight projection ablation. The explicit new weight override
+#   gives fresh node paths so results from the earlier algorithm cannot be reused.
+# - Sharp now follows literal Algorithm 2 (mask g1 only), two independent optimizers, full-forget-pass
+#   saliency, and the paper's constant-rate SGD. Its former AdamW rates are not transferable. The new
+#   PROVISIONAL bracket is 2e-4, 2e-3, 2e-2 (the paper's CIFAR rate), with both mask orientations because
+#   Algorithm 1/code say smallest and Appendix E.2 says largest. Alpha matters under SGD.
 # - The collaborator's GU-FM (method "gu", a GU-inspired projection of the AdamW proposal) is not calibrated:
 #   it is not the authors' algorithm (GU_SHARP_AUDIT.md) and at rank 2 over all trainable weights needs
 #   about 53 GB, more than a training GPU has.
@@ -85,9 +84,9 @@ VARIANTS = [
     "ssd@ssd_adaptive=1+ssd_reference=retain",  # ASSD's tuning-free alpha
     *[f"salun@unlearn_lr={lr}" for lr in ("1e-5", "3e-5", "1e-4")],
     *[f"vlaforget@vlaforget.lr={lr}" for lr in ("1e-5", "2e-5", "5e-5")],  # 5e-5: the paper's lower value
-    *[f"npo_rt_gu@unlearn_lr={lr}" for lr in ("1e-6", "3e-6", "1e-5", "3e-5")],
-    *[f"sharp_minmax@unlearn_lr={lr}" + ("" if select == "largest" else "+sharp_select=smallest")
-      for select in ("largest", "smallest") for lr in ("3e-7", "1e-6", "3e-6")],
+    *[f"npo_rt_gu@unlearn_lr={lr}+gu_forget_weight=1.5" for lr in ("1e-6", "3e-6", "1e-5", "3e-5")],
+    *[f"sharp_minmax@unlearn_lr={lr}+sharp_optimizer=sgd+sharp_select={select}"
+      for select in ("smallest", "largest") for lr in ("2e-4", "2e-3", "2e-2")],
 ]
 
 

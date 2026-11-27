@@ -1,5 +1,10 @@
 # GU and Sharp MinMax audit — 2026-11-24
 
+> Historical audit. The current implementation and verification are documented in
+> [PAPER_ALIGNMENT.md](PAPER_ALIGNMENT.md). Earlier partition-safe/shared-state Sharp and separate-gradient
+> GU descriptions below are superseded; their toy memory estimates do not apply to the corrected methods.
+
+
 The implemented computations pass the focused CPU checks below after two GU numerical fixes.
 **They must be reported as FM adaptations. In particular, `gu` is not the authors' complete GU
 algorithm.** Passing the numerical checks does not establish forgetting or retention on a robot.
@@ -175,3 +180,25 @@ Re-checked against the same pinned sources plus the authors' `unlearn/impl.py`, 
   paper's: all weights move and are saved/restored; only the blended update is masked. The author check now
   runs their SAM class through Algorithm 2's phase (masked second gradient, masked base step) on a loss that
   couples the partitions: max error 2.8e-16; the old partition-only perturbation fails it and two tests.
+
+## Paper alignment correction — 2026-11-27
+
+The primary `npo_rt_gu` now follows Algorithm 1's anchor-gradient recovery, including evaluation
+between refreshes and the author's default gamma=1.5/alpha=1. Sharp now follows literal Algorithm 2:
+mask only g1, preserve cross-partition forget updates, and use two independent native optimizers.
+Default SGD/momentum/decay and constant LR follow the paper; optional AdamW is explicitly the
+released-code recipe. Full forget-pass saliency and exact ascending ranks replace sampled
+quantiles. The largest orientation remains a documented alternative for the Appendix E.2 wording.
+
+Direct source execution verified the GU full gradient rewrite (non-refresh) on ten seeds:
+max error 2.38e-7. Basis/projection comparison error was 0. Sharp matched the unmodified author
+SAM with ordinary SGD momentum and decay across 32 configurations/four steps: max error 8.88e-16.
+Unlike the earlier check, this does not insert a partition-masking base optimizer into the reference.
+CPU focused regression: 64 tests, 63 passed, one unrelated CUDA-only test skipped.
+Full GPU policy performance and cost remain unmeasured here.
+
+The released GU trainer also has a refresh-step graph-lifetime defect: its basis helper calls
+`autograd.grad(..., retain_graph=False)`, followed by a second grad call on the same KL.
+Executing that path raises the standard freed-graph RuntimeError. Our basis/projection reuse
+one gradient and preserve the supervised-retain graph. This is an execution fix, not a new algorithm.
+See the current alignment document for the full source/claim matrix and remaining VLA adaptations.
