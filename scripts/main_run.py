@@ -19,7 +19,8 @@ METHODS holds only the methods whose hyperparameters are set (the planner refuse
 method has no learning rate in vlu/config.py). The others are added after calibration round 3; rerunning
 run_local.sh --main then adds their tails and keeps everything already done.
 Disk: ~6.5 GB per trained node (purge's are hard links to its parent's): ~110 GB for the methods below,
-~300 GB with all eight.
+~330 GB with all of round 3's methods (purge, SSD, SalUn, NPO, NPO-RT, GU on NPO-RT, Sharp MinMax,
+VLA-Forget; GA and GradDiff are dropped).
 """
 
 import argparse
@@ -33,7 +34,8 @@ from vlu.nodes import run_seed  # noqa: E402
 from vlu.worker import load_plan, plan_path, write_plan  # noqa: E402
 
 SEED = 0
-# Calibration round 2 set these (vlu/config.py); ga, graddiff, npo, npo_rt and vlaforget follow round 3.
+# Calibration round 2 set these (vlu/config.py). npo, npo_rt, npo_rt_gu, sharp_minmax and vlaforget join after
+# round 3 sets their rates (unlearn_lrs, vlaforget.lr; sharp_select too); ga and graddiff are dropped.
 METHODS = ["purge", "ssd", "salun"]
 CONTROL = ["LA/LB/LC/LD", "LA/LB/LC/LD/LE"]  # PLAN.md section 5.1, branch C (both evaluated, as the tails)
 FISHER = "LA/LB/LC:A,B"  # at theta0 of every U_B: the curvature of B and of a retained task (main_drift.py)

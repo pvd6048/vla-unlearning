@@ -81,7 +81,20 @@ class Recipe:
     # calibration round 2 (alpha 5, lambda 1, retain reference: A 1.00, B 0.00); NPO's beta is PROVISIONAL.
     npo_beta: float = 0.1  # NPO paper default; log-likelihood stand-in = -sum of squared FM errors of a chunk
     gu_rank: int = 2  # recent retain directions per tensor; memory = up to rank gradient buffers
+    # GU on NPO-RT (vlu/gu_npo_rt.py), the authors' defaults (Lemutisme/geo-unlearning@bbe4d50,
+    # configs/trainer/GeometricUnlearn.yaml and geometric.py): up to 8 retain directions per tensor (null_k),
+    # refreshed every 2nd step (basis_update_every), on the last 3 blocks (auto_last_k_layers) plus the output
+    # layers; the retain-tangent part of the forget update that is kept is capped at 0.5 x its
+    # retain-orthogonal part (sign_cap_ratio). NPO's beta is npo_beta.
+    gu_basis_k: int = 8
+    gu_last_blocks: int = 3
+    gu_refresh_every: int = 2
+    gu_cap: float = 0.5
     # Sharp MinMax: paper CIFAR-100 split and vanilla SAM settings; provisional for GR00T.
+    # The forget partition: the weights with the "largest" forget gradients (the paper's App. E.2 and
+    # section 4.2: "most salient to F") or the "smallest" (its Algorithm 1, "bottom 10%", and the authors'
+    # generate_mask.py, which ranks ascending). The calibration tries both.
+    sharp_select: str = "largest"
     sharp_forget_fraction: float = 0.3
     sharp_alpha: float = 0.99
     sharp_rho: float = 0.1

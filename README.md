@@ -76,27 +76,32 @@ Run `python tests/test_npo.py` for CPU formula, gradient, reference, RNG and res
 
 ## GU and Sharp MinMax
 
-Two further methods are available: `gu` (optimizer-aware retain-null updates) and `sharp_minmax`
-(saliency-split retain SAM / forget sharpness maximization). Both require a retained task besides
-the one being unlearned. Their implementations are in `vlu/gu.py` and `vlu/sharp_minmax.py`; see
-[METHODS.md](METHODS.md) for the paper mappings and explicit GR00T adaptations.
-The [source and numerical audit](GU_SHARP_AUDIT.md) distinguishes verified computations from
-paper-reproduction claims. Report these as GU-FM (strict proposal projection) and Sharp MinMax-FM
-(partition-safe AdamW); in particular, `gu` does not reproduce the authors' full GU optimizer.
+Three methods come from these two papers, all requiring a retained task besides the one unlearned:
+- `npo_rt_gu` (`vlu/gu_npo_rt.py`): Geometric-disentanglement Unlearning as the paper uses it, a plug-in on a
+  base objective, here NPO-RT. The last 3 DiT blocks and the output layers get NPO-RT's gradient projected
+  in Adam's metric: the forget part off a retain subspace (up to 8 directions from a reference-velocity
+  anchor, the FM stand-in of the paper's KL), keeping only opposite-signed tangential parts (capped), the
+  retain part onto it. The authors' defaults; see METHODS.md for each choice. Calibrated in round 3.
+- `sharp_minmax` (`vlu/sharp_minmax.py`): saliency-split retain SAM / forget sharpness maximization (Tang &
+  Khanna). `sharp_select` picks the forget partition: the `largest` forget gradients (the paper's App. E.2)
+  or the `smallest` (its Algorithm 1 and the authors' code). Calibrated in round 3 with both.
+- `gu` (`vlu/gu.py`): a GU-inspired projection of the AdamW proposal (report it as GU-FM, strict proposal
+  projection). It is not the authors' algorithm, and at rank 2 over all trainable weights it needs about
+  53 GB of GPU memory, so it is not calibrated.
 
-After training `LA/LB`, example calibration commands are:
+The [source and numerical audit](GU_SHARP_AUDIT.md) distinguishes verified computations from
+paper-reproduction claims. Example commands after training `LA/LB` (illustrative rates):
 
 ```bash
-python -m vlu.run_op --run goal_s0 --node 'LA/LB/UB-gu@unlearn_lr=1e-6+gu_rank=2'
-python -m vlu.run_op --run goal_s0 --node 'LA/LB/UB-sharp_minmax@unlearn_lr=1e-6+sharp_forget_fraction=0.3+sharp_alpha=0.99+sharp_rho=0.1'
+python -m vlu.run_op --run goal_s0 --node 'LA/LB/UB-npo_rt_gu@unlearn_lr=1e-5'
+python -m vlu.run_op --run goal_s0 --node 'LA/LB/UB-sharp_minmax@unlearn_lr=1e-6+sharp_select=smallest'
 ```
 
-These rates and strengths are illustrative. Neither method is added to the calibrated main-run list
-or given a calibrated learning rate. The usual node overrides and `scripts/submit.py --nodes` work;
-calibrate them before adding them to the main benchmark. GU checkpoints its retain basis; Sharp MinMax
-saves its mask and both optimizers. Both support the shared loop's probes, snapshots and resume.
-Compare measured compute as well as step counts: Sharp MinMax performs two optimizer updates and four
-forward/gradient evaluations per step; GU stores up to `gu_rank` retain-gradient buffers.
+None has a calibrated learning rate yet; they join the main run after round 3. GU on NPO-RT checkpoints
+its basis; Sharp MinMax saves its mask, both partitions' AdamW moments (one shared pair of buffers) and
+step counts. All support the shared loop's probes, snapshots and resume. Compare measured compute as well as
+step counts: Sharp MinMax makes four forward/gradient evaluations and two partition updates per step; GU on
+NPO-RT one forward more than NPO-RT on every second step (the reference's, for the anchor).
 
 ## One-time setup (login node)
 
@@ -147,7 +152,7 @@ Slurm resources for training and eval jobs are in `RESOURCES` at the top of `scr
 
 `CALIBRATION.md` is the one-page instruction for someone running our hyperparameter calibration on
 their own GPU machine: `scripts/setup_cluster.sh`, then `scripts/run_local.sh`, which runs the base
-tests, the calibration plan (`scripts/calibrate.py`: LA with 2k/5k/10k snapshots, LA/LB, 17 unlearning
+tests, the calibration plan (`scripts/calibrate.py`: LA with 2k/5k/10k snapshots, LA/LB, 27 unlearning
 variants of B, and drift features of every model; a variant trained before the cost meter is archived to
 `$VLU_RUNS_DIR/_archive/` and trained again, so every variant is measured; `--prune-weights` frees the
 weights of nodes no longer planned) with one local worker per GPU, computes drift
@@ -246,10 +251,10 @@ Pass bar (PLAN.md): ≥ 80% SR on A after 10k steps. The `--eval-seeds 0,1` pair
 ## Week 1: stream S1
 
 ```bash
-python scripts/submit.py --run goal_s0 --stream S1 --methods purge,ga,graddiff,npo,npo_rt,ssd,salun,vlaforget --dry-run   # look first
-python scripts/submit.py --run goal_s0 --stream S1 --methods purge,ga,graddiff,npo,npo_rt,ssd,salun,vlaforget
+python scripts/submit.py --run goal_s0 --stream S1 --methods purge,npo,npo_rt,npo_rt_gu,ssd,salun,sharp_minmax,vlaforget --dry-run   # look first
+python scripts/submit.py --run goal_s0 --stream S1 --methods purge,npo,npo_rt,npo_rt_gu,ssd,salun,sharp_minmax,vlaforget
 python scripts/results.py --run goal_s0
-python scripts/metrics.py --stream S1 --methods purge,ga,graddiff,npo,npo_rt,ssd,salun,vlaforget --runs goal_s0
+python scripts/metrics.py --stream S1 --methods purge,npo,npo_rt,npo_rt_gu,ssd,salun,sharp_minmax,vlaforget --runs goal_s0
 ```
 
 This plans the shared prefix once, every method's tail, the oracles (`LA/LC`, `LA/LC/LD`), and an
@@ -316,7 +321,8 @@ How the methods map onto GR00T's flow-matching loss (PROVISIONAL values in `vlu/
 
 - A–E task mapping (`vlu/tasks.py`): currently LIBERO-Goal tasks 0–4.
 - Unlearning budget and lr (`vlu/config.py`): 1000 steps for every method. Learning rate per method
-  (`unlearn_lrs`): SalUn 3e-5 (calibration round 2); NPO and NPO-RT after round 3, and until then an op
+  (`unlearn_lrs`): SalUn 3e-5 (calibration round 2); NPO, NPO-RT, GU on NPO-RT and Sharp MinMax (with its
+  `sharp_select`) after round 3, and until then an op
   of theirs is refused unless it sets one (`@unlearn_lr=...`). GA and GradDiff are dropped (no rate forgot B
   and kept A; PLAN.md); their code stays. VLA-Forget's
   `vlaforget.lr` (2e-4, its paper's value) is PROVISIONAL too. SSD keeps its defaults (round 2).

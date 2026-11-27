@@ -75,7 +75,7 @@ print("overrides: parsed, printed back, typed, validated, applied to the op only
 from vlu.nodes import _KEYS_USED, check_op  # noqa: E402
 
 lr_methods = [m for m in vlu.ops.UNLEARN_METHODS if "unlearn_lr" in _KEYS_USED[m]]
-assert set(lr_methods) == {"ga", "graddiff", "gu", "sharp_minmax", "npo", "npo_rt", "salun"}, lr_methods
+assert set(lr_methods) == {"ga", "graddiff", "gu", "sharp_minmax", "npo", "npo_rt", "npo_rt_gu", "salun"}, lr_methods
 lrs = dict(RECIPE.unlearn_lrs)
 assert set(lrs) <= set(lr_methods) and RECIPE.unlearn_lr is None
 assert hash(RECIPE) == hash(dataclasses.replace(RECIPE)), "the recipe is immutable and hashable"

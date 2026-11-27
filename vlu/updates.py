@@ -23,6 +23,22 @@ def gradients(loss, params):
     return [g.detach() if g is not None else None for g in values]
 
 
+def clip_(values, max_grad_norm: float) -> float:
+    """clip_grad_norm_ on a list of gradients (None entries skipped) instead of the parameters' .grad:
+    the same total norm and clip coefficient (max_norm / (norm + 1e-6), at most 1). Returns the norm before
+    clipping; a non-finite norm is an error, as with error_if_nonfinite=True."""
+    present = [g for g in values if g is not None]
+    if not present:
+        return 0.0
+    norm = torch.linalg.vector_norm(torch.stack([torch.linalg.vector_norm(g) for g in present]))
+    if not torch.isfinite(norm):
+        raise RuntimeError(f"the total norm of the gradients is non-finite: {norm.item()}")
+    coefficient = torch.clamp(max_grad_norm / (norm + 1e-6), max=1.0)
+    for g in present:
+        g.mul_(coefficient)
+    return norm.item()
+
+
 def set_gradients(params, values, max_grad_norm):
     for p, g in zip(params, values):
         p.grad = g

@@ -236,7 +236,7 @@ def recipe_for(op: Op, recipe: Recipe) -> Recipe:
 
 # Unlearning methods that train on, or compare against, the retained tasks: they cannot unlearn a
 # parent's only task (vlu/ops.py's plans rely on this check, see plan_op).
-NEEDS_RETAINED_TASK = frozenset({"graddiff", "npo_rt", "gu", "sharp_minmax", "ssd", "salun", "vlaforget"})
+NEEDS_RETAINED_TASK = frozenset({"graddiff", "npo_rt", "npo_rt_gu", "gu", "sharp_minmax", "ssd", "salun", "vlaforget"})
 
 
 def check_op(node: Node, recipe: Recipe = RECIPE) -> None:
@@ -251,7 +251,7 @@ def check_op(node: Node, recipe: Recipe = RECIPE) -> None:
         raise ValueError(f"{node}: cannot unlearn {op.task}, it is not retained by the parent")
     if op.method in NEEDS_RETAINED_TASK and kept == [op.task]:
         raise ValueError(f"{node}: {op.method} needs a retained task besides {op.task}")
-    if op.method in ("npo", "npo_rt"):
+    if op.method in ("npo", "npo_rt", "npo_rt_gu"):
         beta = recipe_for(op, recipe).npo_beta
         if beta is None or not math.isfinite(beta) or beta <= 0:
             raise ValueError(f"{node}: npo_beta must be finite and strictly positive, got {beta!r}")
@@ -259,8 +259,19 @@ def check_op(node: Node, recipe: Recipe = RECIPE) -> None:
         rank = recipe_for(op, recipe).gu_rank
         if not isinstance(rank, int) or rank < 1:
             raise ValueError(f"{node}: gu_rank must be a positive integer")
+    if op.method == "npo_rt_gu":
+        effective = recipe_for(op, recipe)
+        for key in ("gu_basis_k", "gu_last_blocks", "gu_refresh_every"):
+            value = getattr(effective, key)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ValueError(f"{node}: {key} must be a positive integer, got {value!r}")
+        cap = effective.gu_cap
+        if cap is None or not math.isfinite(cap) or not 0 <= cap <= 1:
+            raise ValueError(f"{node}: gu_cap must lie in [0, 1], got {cap!r}")
     if op.method == "sharp_minmax":
         effective = recipe_for(op, recipe)
+        if effective.sharp_select not in ("largest", "smallest"):
+            raise ValueError(f"{node}: sharp_select must be 'largest' or 'smallest', got {effective.sharp_select!r}")
         for key in ("sharp_forget_fraction", "sharp_alpha"):
             value = getattr(effective, key)
             if value is None or not math.isfinite(value) or not 0 < value < 1:
@@ -285,10 +296,13 @@ _KEYS_USED = {
     "ga": _UNLEARN_KEYS,
     "graddiff": _UNLEARN_KEYS,
     "gu": _UNLEARN_KEYS + ("gu_rank",),
-    "sharp_minmax": _UNLEARN_KEYS + ("importance_batches", "sharp_forget_fraction", "sharp_alpha",
-                                    "sharp_rho", "sharp_strength", "sharp_adaptive"),
+    # No weight_decay: Sharp MinMax trains without it (it would move the inactive partition).
+    "sharp_minmax": tuple(k for k in _UNLEARN_KEYS if k != "weight_decay") + (
+        "importance_batches", "sharp_select", "sharp_forget_fraction", "sharp_alpha", "sharp_rho", "sharp_strength",
+        "sharp_adaptive"),
     "npo": _UNLEARN_KEYS + ("npo_beta",),
     "npo_rt": _UNLEARN_KEYS + ("npo_beta",),
+    "npo_rt_gu": _UNLEARN_KEYS + ("npo_beta", "gu_basis_k", "gu_last_blocks", "gu_refresh_every", "gu_cap"),
     "ssd": ("batch_size", "importance_batches", "ssd_alpha", "ssd_lambda", "ssd_reference", "ssd_adaptive"),
     "salun": _UNLEARN_KEYS + ("salun_keep", "importance_batches"),
     "vlaforget": ("unlearn_steps", "batch_size") + tuple(f"vlaforget.{f.name}" for f in fields(VLAForgetConfig)),

@@ -52,16 +52,16 @@ class SharpTests(unittest.TestCase):
                 old = model.weight.detach().clone()
                 active = torch.tensor([False, True]) if forget else torch.tensor([True, False])
                 coefficient = -.5 if forget else .5
-                g0 = coefficient * 2 * old * active
-                e = .1 * g0 / g0.norm()
-                g1 = coefficient * 2 * (old + e) * active
+                g0 = coefficient * 2 * old
+                e = .1 * g0 / g0.norm()  # all weights move, as the authors' first_step
+                g1 = coefficient * 2 * (old + e)
                 sign = -1 if forget else 1
-                expected = old - .01 * (g0 + sign * strength * (g1 - g0))
-                opt = torch.optim.SGD([model.weight], lr=.01)
-                rule._phase(model, batches()["forget" if forget else "retain"], {"weight": model.weight},
-                            opt, forget, float("inf"))
-                torch.testing.assert_close(model.weight, expected)
-                self.assertTrue(torch.equal(model.weight[~active], old[~active]))
+                expected = (g0 + sign * strength * (g1 - g0)) * active
+                _, grads, _ = rule._phase(model, batches()["forget" if forget else "retain"], {"weight": model.weight},
+                                          forget, float("inf"))
+                torch.testing.assert_close(grads[0], expected)
+                self.assertTrue(torch.equal(grads[0][~active], torch.zeros_like(old[~active])))
+                self.assertTrue(torch.equal(model.weight, old))  # the perturbation is undone exactly
                 self.assertEqual(model.frozen.item(), 3.)
 
     def test_adaptive_perturbation_matches_asam(self):
@@ -81,6 +81,75 @@ class SharpTests(unittest.TestCase):
                 raise RuntimeError("second pass")
         self.assertTrue(torch.equal(p, old))
 
+    @unittest.skipUnless(torch.cuda.is_available(), "needs CUDA (bf16 autocast, as train.py)")
+    def test_perturbed_forward_sees_moved_weights_under_autocast(self):
+        """train.py runs a whole rule.step in one autocast region, whose cache of bf16 weight copies does not
+        notice in-place changes: without clearing it the perturbed forward used the original weights."""
+        torch.manual_seed(0)
+        layer = nn.Linear(16, 4).cuda()
+        x = torch.randn(8, 16, device="cuda")
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            before = layer(x).detach()
+            with perturbed([layer.weight], [torch.ones_like(layer.weight)], 1., False):
+                moved = layer(x).detach()
+            after = layer(x).detach()
+        self.assertGreater((moved - before).abs().max().item(), .1)
+        self.assertTrue(torch.equal(after, before))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "needs CUDA (bf16 autocast, as train.py)")
+    def test_step_under_autocast_uses_current_weights(self):
+        """Under train.py's autocast: the retain phase's second gradient is taken at w + e and the forget
+        phase's first gradient at the weights after the retain update."""
+        class Linear(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layer = nn.Linear(16, 1, bias=False)
+
+            def forward(self, inputs):
+                return {"loss": (self.layer(inputs["x"]).float() - inputs["y"]).square().mean()}
+
+        def grad_at(model, weight, inputs, scale):
+            with torch.no_grad():
+                model.layer.weight.copy_(weight)
+            with torch.autocast("cuda", dtype=torch.bfloat16):  # a fresh region: no cached copies
+                loss = model(inputs)["loss"]
+            return torch.autograd.grad(scale * loss, [model.layer.weight])[0]
+
+        torch.manual_seed(0)
+        model = Linear().cuda()
+        data = {k: {"x": torch.randn(32, 16, device="cuda"), "y": torch.randn(32, 1, device="cuda")}
+                for k in ("retain", "forget")}
+        forget_mask = torch.arange(16, device="cuda").view(1, 16) % 2 == 0
+        rule = SharpMinMaxUpdate({"layer.weight": forget_mask}, .5, 1., 1.)
+        optimizer = torch.optim.AdamW([model.layer.weight], lr=.1, weight_decay=0.)
+        rule.initialize(optimizer)
+        seen = []
+        original = rule._adamw
+
+        def recording(named, grads, forget):
+            seen.append((model.layer.weight.detach().clone(), grads[0].clone()))
+            original(named, grads, forget)
+        rule._adamw = recording
+        w0 = model.layer.weight.detach().clone()
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            rule.step(model, data, optimizer, 1e9)
+        w_end = model.layer.weight.detach().clone()
+        (w_retain, retain_grad), (w_forget, forget_grad) = seen
+        probe = Linear().cuda()
+        # Retain, strength 1: the blend is the gradient at w + e alone (inside the retain partition); e moves
+        # all weights along the full gradient.
+        g0 = grad_at(probe, w0, data["retain"], .5)
+        expected = grad_at(probe, w0 + g0 / g0.norm(), data["retain"], .5) * ~forget_mask
+        g0 = g0 * ~forget_mask
+        self.assertGreater((expected - g0).abs().max().item(), 1e-3)  # the perturbation matters here
+        torch.testing.assert_close(retain_grad, expected, atol=1e-5, rtol=1e-3)
+        # Forget: at the weights after the retain update (moved), blend 2 g0 - g1.
+        self.assertGreater((w_forget - w0).abs().max().item(), 1e-3)
+        g0 = grad_at(probe, w_forget, data["forget"], -.5)
+        g1 = grad_at(probe, w_forget + g0 / g0.norm(), data["forget"], -.5)
+        torch.testing.assert_close(forget_grad, (2 * g0 - g1) * forget_mask, atol=1e-5, rtol=1e-3)
+        self.assertFalse(torch.equal(w_end, w_forget))
+
     def test_zero_radius_is_split_descent_and_ascent(self):
         model = Quadratic()
         rule = make_rule(rho=0.)
@@ -91,8 +160,69 @@ class SharpTests(unittest.TestCase):
             rule.step(model, batches(), optimizer, 1.)
             self.assertLess(model.weight[0].item(), old[0].item())
             self.assertGreater(model.weight[1].item(), old[1].item())
-        self.assertIsNot(optimizer.state[model.weight]["exp_avg"],
-                         rule.forget_optimizer.state[model.weight]["exp_avg"])
+        self.assertEqual(optimizer.state, {})  # the loop's AdamW only supplies lr, betas and eps
+        self.assertEqual(rule.steps, {"retain": 4, "forget": 4})
+
+    def test_shared_moments_equal_two_independent_adamw(self):
+        """One pair of moment buffers, updated per partition, gives the authors' two AdamW optimizers'
+        update (theirs: unlearn/impl.py, both over all weights; masked gradients, no decay)."""
+        class Wide(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.a = nn.Parameter(torch.randn(5, 4))
+                self.b = nn.Parameter(torch.randn(7))
+            def forward(self, inputs):
+                noise = torch.randn(7)
+                return {"loss": (self.a.tanh().sum(1).repeat(2)[:7] * self.b - inputs["target"] - noise).square().sum()}
+        torch.manual_seed(3)
+        masks = {"a": torch.rand(5, 4) < .3, "b": torch.rand(7) < .3}
+        data = {"retain": {"target": torch.randn(7)}, "forget": {"target": torch.randn(7)}}
+        lrs = [.01, .03, .02, .005, .04, .01]
+        def groups(model):
+            return [{"params": [model.a], "weight_decay": 0.}, {"params": [model.b], "weight_decay": 0.}]
+        torch.manual_seed(5)
+        shared = Wide()
+        init = {n: p.detach().clone() for n, p in shared.named_parameters()}
+        rule = SharpMinMaxUpdate(dict(masks), .9, .05, 1.3, adaptive=True)
+        optimizer = torch.optim.AdamW(groups(shared), lr=lrs[0], betas=(.8, .95), eps=1e-6)
+        rule.initialize(optimizer)
+        torch.manual_seed(7)
+        for lr in lrs:
+            for group in optimizer.param_groups:
+                group["lr"] = lr
+            rule.step(shared, data, optimizer, 2.)
+        # Reference: the same blended gradients, applied by two torch AdamW optimizers.
+        reference = Wide()
+        with torch.no_grad():
+            for n, p in reference.named_parameters():
+                p.copy_(init[n])
+        ref_rule = SharpMinMaxUpdate(dict(masks), .9, .05, 1.3, adaptive=True)
+        named = dict(reference.named_parameters())
+        retain_opt = torch.optim.AdamW(groups(reference), lr=lrs[0], betas=(.8, .95), eps=1e-6)
+        forget_opt = torch.optim.AdamW(groups(reference), lr=lrs[0], betas=(.8, .95), eps=1e-6)
+        torch.manual_seed(7)
+        for lr in lrs:
+            for opt in (retain_opt, forget_opt):
+                for group in opt.param_groups:
+                    group["lr"] = lr
+            for forget, opt in ((False, retain_opt), (True, forget_opt)):
+                _, grads, _ = ref_rule._phase(reference, data["forget" if forget else "retain"], named, forget, 2.)
+                for p, g in zip(named.values(), grads):
+                    p.grad = g
+                opt.step()
+                opt.zero_grad(set_to_none=True)
+        for n, p in shared.named_parameters():
+            torch.testing.assert_close(p, named[n], rtol=0, atol=1e-6, msg=n)
+            self.assertFalse(torch.equal(p, init[n]), n)
+        # Each optimizer's moments are zero outside its partition, and the shared buffers hold both.
+        for n, p in named.items():
+            retain_state, forget_state = retain_opt.state[p], forget_opt.state[p]
+            m = masks[n]
+            for k, key in enumerate(("exp_avg", "exp_avg_sq")):
+                self.assertTrue(torch.equal(retain_state[key][m], torch.zeros_like(retain_state[key][m])))
+                self.assertTrue(torch.equal(forget_state[key][~m], torch.zeros_like(forget_state[key][~m])))
+                combined = torch.where(m, forget_state[key], retain_state[key])
+                torch.testing.assert_close(rule.moments[n][k], combined, rtol=0, atol=1e-7)
 
     def test_two_passes_replay_noise_and_preserve_rng(self):
         draws = []
@@ -129,7 +259,7 @@ class SharpTests(unittest.TestCase):
 
     def test_planning_rejects_invalid_settings_and_missing_retain(self):
         recipe = dataclasses.replace(RECIPE, unlearn_lr=.01)
-        for key, values in {"sharp_alpha": (0., 1., float("nan")), "sharp_forget_fraction": (0., 1., None),
+        for key, values in {"sharp_select": ("top", None), "sharp_alpha": (0., 1., float("nan")), "sharp_forget_fraction": (0., 1., None),
                             "sharp_rho": (-1., float("inf")), "sharp_strength": (-1., None),
                             "importance_batches": (0, -1)}.items():
             for value in values:
@@ -155,6 +285,39 @@ class SharpTests(unittest.TestCase):
                 second.prepare(ctx)
                 self.assertEqual(importance.call_count, 1)
                 self.assertTrue((directory / "sharp_minmax_mask.pt").exists())
+                with self.assertRaisesRegex(ValueError, "different recipe"):
+                    plan_op(node, dataclasses.replace(recipe, sharp_select="smallest")).prepare(ctx)
+                (directory / "sharp_minmax_mask.pt").unlink()
+                smallest = plan_op(node, dataclasses.replace(recipe, sharp_select="smallest"))
+                smallest.prepare(ctx)  # the authors' generate_mask.py: the lowest-ranked half
+                self.assertTrue(torch.equal(smallest.update_rule.masks["weight"], torch.tensor([True, False])))
+
+    def test_smallest_split_counts_only_live_entries(self):
+        """Per-embodiment projector stacks: only LIBERO's row can change, so the other rows (zero saliency)
+        are never in the forget partition, and the fraction refers to the live entries."""
+        from vlu.drift.weights import live_part
+        from vlu.ops import embodiment_index
+        node = Node.from_path("sharp", "LA/LB/UB-sharp_minmax")
+        recipe = dataclasses.replace(RECIPE, unlearn_lr=.01, sharp_forget_fraction=.25, sharp_select="smallest")
+        name = "action_head.state_encoder.W"
+        row = embodiment_index()
+        saliency = torch.zeros(32, 2, 4)
+        saliency[row] = torch.arange(1., 9.).reshape(2, 4)
+        class Stack(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.p = nn.Parameter(torch.zeros(32, 2, 4))
+        model = Stack()
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(Node, "dir", new_callable=lambda: property(lambda self: Path(tmp))), \
+                patch("vlu.ops.trainable_named_parameters", return_value={name: model.p}), \
+                patch("vlu.ops.accumulate_grads", return_value={name: saliency}):
+            plan = plan_op(node, recipe)
+            plan.prepare(OpContext(node, model, {}, None, {}, 0))
+            mask = plan.update_rule.masks[name]
+        self.assertEqual(int(mask.sum()), 2)  # the 2 smallest of the 8 live entries
+        self.assertTrue(torch.equal(live_part(name, mask, row).flatten()[:2], torch.tensor([True, True])))
+        self.assertEqual(plan.notes["actual_forget_fraction"], .25)
 
     def test_empty_saliency_partition_is_rejected(self):
         node = Node.from_path("sharp", "LA/LB/UB-sharp_minmax")
@@ -208,7 +371,7 @@ class SharpTests(unittest.TestCase):
     def test_both_methods_integrate_with_groot_shaped_fake(self):
         from fakes import Fake, Demos, Proc, collate, make_sample
         from vlu.data import OpBatches
-        for method in ("gu", "sharp_minmax"):
+        for method in ("gu", "sharp_minmax", "npo_rt_gu"):
             with self.subTest(method=method), tempfile.TemporaryDirectory() as tmp, cpu_runtime():
                 directory = Path(tmp)
                 with patch.object(Node, "dir", new_callable=lambda: property(lambda self: directory)), \

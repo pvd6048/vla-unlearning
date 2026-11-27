@@ -31,7 +31,13 @@ non-current-device RNG check is skipped unless two CUDA devices are available. T
 actual operation plans; only GR00T imports and the training loop's CUDA/worker plumbing are stubbed.
 
 `python tests/test_gu.py` checks metric projections, actual AdamW displacements and exact resume.
-`python tests/test_sharp_minmax.py` checks sharp min/max signs, partition isolation, ASAM perturbations,
-temporary-weight restoration, paired randomness, saved saliency masks and both-optimizer resume.
-It also trains both new plans with probes/snapshots on the GR00T-shaped fake under CPU plumbing.
+`python tests/test_sharp_minmax.py` checks sharp min/max signs, partition isolation, ASAM perturbations, current weights under CUDA autocast (skipped without CUDA),
+temporary-weight restoration (only the perturbed entries are saved), paired randomness, saved saliency masks
+(largest and smallest split, live embodiment rows only), that the shared moment buffers give exactly the
+update of two independent torch AdamW optimizers, and resume. It also trains GU, Sharp MinMax and GU on NPO-RT
+with probes/snapshots on the GR00T-shaped fake under CPU plumbing.
+`python tests/test_gu_npo_rt.py` checks GU on NPO-RT: known-answer whitened projections (retain-orthogonal
+forget part, sign-selective capped tangent, retain part in the basis' span), basis growth (Gram-Schmidt,
+residual threshold, size cap, float16), the projected tensors, NPO-RT's exact update while the basis is empty,
+exact resume and planning checks.
 These run on CPU and are included in the local runner (Slurm's check already discovers all tests).

@@ -157,6 +157,37 @@ scaling, singular/full-rank cases, actual displacements with Adam momentum/decay
 and identical deterministic/stochastic interrupted/resumed weights on CPU.
 GR00T/LIBERO effectiveness and GPU memory use remain unverified; set an explicit calibrated learning rate.
 
+**Not calibrated (2026-11-26).** Measured on a toy model with many small tensors, one GU-FM step at rank 2
+holds about 3 fp32 copies of the trainable weights more than a plain AdamW step (the 2 basis vectors, the
+retain gradients and the `before` clone): about 53 GB on GR00T, where a training GPU has 44 GB. The
+benchmark uses the authors' algorithm instead, on NPO-RT (next section).
+
+## GU on NPO-RT (`npo_rt_gu`): the authors' algorithm on our base method
+
+Reference: as above (paper v4, Algorithm 1 and Appendix B; `geometric.py` and
+`configs/trainer/GeometricUnlearn.yaml` at `bbe4d50`). In the paper GU is a plug-in for "any forget loss";
+the authors' config runs it on SimNPO, their code also on NPO. Ours is NPO-RT, the best base method of the
+calibration (24 November: SR A 1.00, B 0.00 at 3e-6 and 1e-5). Details and the code mapping are in the
+docstring of `vlu/gu_npo_rt.py`.
+
+| | Paper / authors' code | Ours | Same? |
+|---|---|---|---|
+| Base objective | gamma L_f + alpha L_r (GradDiff base; with `loss: npo`, NPO forget loss, NLL retain, the trainer's gamma = 1.5, alpha = 1; `npo_config`'s gamma is not read) | NPO(forget) + L_FM(retain), weights 1 and 1 (NPO-RT's own) | **Ours**: the base method's weights, so `npo_rt` vs `npo_rt_gu` differs only by the projection |
+| Projected tensors | last K = 3 blocks (`.layers.i.`/`.blocks.i.` names), final norm, output head | last 3 DiT `transformer_blocks`, `proj_out_*`, the action decoder | Adapted: GR00T's output comes from the action head |
+| Metric | Adam diagonal, g~ = g / (sqrt(v) + 1e-8), v = `exp_avg_sq` | same | Same |
+| Retain anchor | KL(pi_theta ‖ pi_ref) on retain data | masked mean squared difference of the predicted velocities of theta and theta0 (VLA-Forget's KL stand-in), same noise and timesteps | FM adaptation |
+| Basis | per tensor, up to `null_k` = 8, Gram–Schmidt in fp32, kept if residual >= 1e-3 x gradient, stored fp16, refreshed every 2nd step, never replaced once full | same (`gu_basis_k`, `gu_refresh_every`) | Same |
+| Forget part | P_perp g~_f + opposite-signed tangent components (tau = 0), capped at kappa = 0.5 x the perpendicular norm | same (`gu_cap`) | Same |
+| Retain part | P_U g~_r (`inject_retain_tangent`) | same | Same |
+| g_r | Algorithm 1 / App. B.1: grad of L_r; code: grad of the KL anchor, and g_f recovered as (g_tot − alpha g_anchor)/gamma | grad of NPO-RT's retain loss; g_f and g_r from separate backward passes | **Paper** (the code's recovery mixes the retain loss into "g_f") |
+| Before Adam's second moment exists | EMA of squared gradients | nothing to whiten: at step 1 the anchor and its gradient are zero and the basis empty, so the step is NPO-RT's | Equivalent here |
+| Optimizer | AdamW, the base method's lr | AdamW, NPO-RT's recipe (weight decay 1e-5, warmup, cosine), clipping after the projection | Same |
+
+While the basis is empty (always the first two steps) the update is exactly NPO-RT's
+(`tests/test_gu_npo_rt.py`), so a difference between `npo_rt` and `npo_rt_gu` at the same rate is the
+projection's. Memory (toy measurement, as above): NPO-RT plus about 0.1–0.5 of a weight copy (the basis and
+gradients of the projected 12% of the weights), about 42 GB on GR00T. The calibration uses NPO-RT's grid.
+
 ## Sharp MinMax: opposite sharpness updates on a saliency split
 
 Reference: Tang & Khanna, [Sharpness-Aware Machine Unlearning](https://arxiv.org/abs/2506.13715),
@@ -164,21 +195,30 @@ Algorithm 2 and Appendix E.2; `HaoranTang/sharp-unlearn` commit `98c41d9`, `unle
 and `sam/sam.py`. This is the split method, not a SAM wrapper around GradDiff.
 
 `sharp_minmax` estimates absolute accumulated forget-FM gradients with `importance_batches`, then
-assigns the top `sharp_forget_fraction` of the live trainable entries to the forget partition.
+assigns `sharp_forget_fraction` of the live trainable entries to the forget partition: the largest
+(`sharp_select=largest`, the default) or the smallest (`sharp_select=smallest`).
 As in SalUn, the threshold uses the shared bounded-memory quantile estimate for very large scopes;
 ties can change the actual fraction, which is recorded. Empty partitions fail. The mask is saved
 atomically in `sharp_minmax_mask.pt` and reused on restart (including a recipe check).
-The paper is internally inconsistent: section 3.2 and Algorithm 1 describe the smallest/bottom
-gradients, while Appendix E.2 explicitly describes the highest gradients. We follow E.2's
-saliency interpretation and disclose that choice rather than claiming unambiguous agreement.
+The sources disagree on which: Appendix E.2 ("choose the highest percentage") and section 4.2 ("most
+salient to F") describe the largest gradients; section 3.2 ("smallest magnitudes cut off"), Algorithm 1
+("e.g., 0.1 = bottom 10%") and the authors' `generate_mask.py` (ascending `argsort`, ranks below the cutoff
+set to 1, although its comment says "top") take the smallest. The calibration runs both.
 
-Each step does retain first, forget second, using independent AdamW states:
+Each step does retain first, forget second, each with its own AdamW (as the authors: two AdamW over all
+weights, `unlearn/impl.py`, "Adam Override"). With masked gradients and no decay each optimizer's moments
+are zero outside its partition, so one pair of moment buffers, updated per partition with AdamW's formulas
+and its own step count, holds both exactly (`tests/test_sharp_minmax.py` compares with two torch AdamW
+optimizers). This halves the optimizer state (13 GB on GR00T instead of 26); the blend is formed in place.
+Toy measurement (calibrated to the measured GA 33.4 and NPO-RT 39.5 GiB): about 40 GiB on GR00T (as merged,
+with two full AdamW states: about 63 GB).
 
 - Retain loss `alpha * L_FM(retain)`, sharpness minimization.
 - Forget loss `-(1-alpha) * L_FM(forget)`, sharpness maximization.
-- On each partition, perturb along its gradient by rho (optionally ASAM's parameter-scaled
-  perturbation), re-evaluate, restore weights exactly, and update with
-  `g0 + sign * strength * (g_perturbed - g0)`; sign is +1 for retain, -1 for forget.
+- In each phase, perturb all trainable weights along the phase's full gradient g0 by rho (SAM's first
+  step; optionally ASAM's parameter-scaled perturbation), re-evaluate, restore weights exactly, and update
+  the phase's partition with `(g0 + sign * strength * (g_perturbed - g0)) * mask`; sign is +1 for retain,
+  -1 for forget.
 
 **Adapted:** cross-entropy becomes FM; both evaluations use the same FM noise, timestep and dropout
 draws to isolate curvature. Trainable scope remains the baseline GR00T scope. AdamW and the shared
@@ -186,18 +226,29 @@ warmup/cosine schedule replace the reference's SGD setup; decay is disabled so i
 inactive partition. One operation step is a retain update plus a forget update (four forward/gradient
 evaluations), not the cost of one ordinary baseline update. Preparation uses sampled batches rather
 than a full epoch, as for SalUn. Default alpha=.99, rho=.1, fraction=.3, strength=1 and vanilla SAM
-are provisional starting values, not calibrated robot settings.
+are provisional starting values, not calibrated robot settings. SAM 0.1 is the paper's best unlearning
+setting on CIFAR-100 (Table 3; ASAM 1.0 on ImageNet). alpha scales each phase's loss, as in the authors' code,
+but under AdamW (theirs and ours) a constant scale of a phase's gradients cancels in m / sqrt(v) and leaves
+only eps and clipping effects, so alpha is effectively inert and is not calibrated.
 
 **Partition correction:** the reference masks only the second gradient, but its sharpness-max
-blend also includes the original gradient. Here the original gradient, perturbation and blended
-update are all masked, preventing cross-partition updates. Both optimizer states, the mask and
+blend also includes the original gradient. With the README's lamb = 1, the reference's forget step is
+2 g0 − g1 · mask, so the unmasked 2 g0 (forget ascent) also moves the retain partition. Here the blended
+update is masked as a whole, preventing cross-partition updates; the retain phase at lamb = 1 is exactly the
+reference's. The perturbation is the paper's and the reference's: all weights, along the unmasked gradient
+(Algorithm 2 masks only before the second step), so sharpness is measured in the whole model.
+`tests/check_author_kernels.py` runs the authors' SAM class through Algorithm 2's phase on a loss that couples
+the partitions and matches to 3e-16. Both optimizer states, the mask and
 method settings are checkpointed. Temporary weights are restored even when a perturbed pass fails;
-BatchNorm statistics are updated only on the first evaluation.
+BatchNorm statistics are updated only on the first evaluation. Every in-place weight change (perturbing,
+restoring) clears autocast's weight cache: train.py runs a step in one bf16 autocast region, whose cached
+bf16 copies of trainable fp32 weights do not notice in-place changes, so without it the perturbed pass saw
+the original weights (g1 = g0, no sharpness term) and the forget phase the weights before the retain update.
 Use **Sharp MinMax-FM (partition-safe AdamW)** in reports; experiment notes include the variant
 and pinned author commit. It preserves the opposite-sharpness update kernels, with the adaptations above.
 
 `tests/test_sharp_minmax.py` checks analytic quadratic updates/signs, ASAM perturbations, partition
-isolation, noise replay, saliency-mask persistence, planning errors and exact resume. It also runs
+isolation, noise replay, the forwards under CUDA bf16 autocast seeing the moved weights, saliency-mask persistence, planning errors and exact resume. It also runs
 both new methods through preparation, shared-loop training, probes and snapshots on the small
 GR00T-shaped fake. Real model forgetting, runtime, memory and rollout quality remain unverified.
 

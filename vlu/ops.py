@@ -193,7 +193,8 @@ def _plan_sharp_minmax(node: Node, recipe: Recipe) -> OpPlan:
 
     forget, retain = _forget_retain(node, recipe)
     plan = OpPlan({"forget": forget, "retain": retain}, None, recipe.unlearn_steps, recipe.unlearn_lr,
-                  {"sharp_forget_fraction": recipe.sharp_forget_fraction, "sharp_alpha": recipe.sharp_alpha,
+                  {"sharp_select": recipe.sharp_select,
+                   "sharp_forget_fraction": recipe.sharp_forget_fraction, "sharp_alpha": recipe.sharp_alpha,
                    "sharp_rho": recipe.sharp_rho, "sharp_strength": recipe.sharp_strength,
                    "sharp_adaptive": recipe.sharp_adaptive, "importance_batches": recipe.importance_batches,
                    "implementation_variant": "partition_safe_fm_adamw",
@@ -205,18 +206,29 @@ def _plan_sharp_minmax(node: Node, recipe: Recipe) -> OpPlan:
         embodiment = embodiment_index()
         if path.exists():
             saved = torch.load(path, map_location="cpu", weights_only=True)
-            if saved["fraction"] != recipe.sharp_forget_fraction or saved["batches"] != recipe.importance_batches:
+            if (saved["fraction"], saved["batches"], saved.get("select", "largest")) != (
+                    recipe.sharp_forget_fraction, recipe.importance_batches, recipe.sharp_select):
                 raise ValueError("Sharp MinMax mask was prepared with a different recipe")
             masks = {n: m.to(params[n].device) for n, m in saved["masks"].items()}
         else:
             grads = accumulate_grads(ctx, forget, recipe.importance_batches, stream=0, square=False)
             saliency = {name: g.abs() for name, g in grads.items()}
-            threshold = top_fraction_threshold({n: live_part(n, s, embodiment) for n, s in saliency.items()},
-                                               recipe.sharp_forget_fraction)
-            masks = {n: (s >= threshold) & (s > 0) for n, s in saliency.items()}
+            live = {n: live_part(n, s, embodiment) for n, s in saliency.items()}
+            fraction = recipe.sharp_forget_fraction
+            if recipe.sharp_select == "largest":  # as SalUn: zero saliency is never selected
+                threshold = top_fraction_threshold(live, fraction)
+                masks = {n: (s >= threshold) & (s > 0) for n, s in saliency.items()}
+            else:  # the authors' generate_mask.py: the lowest-ranked entries, zeros included
+                threshold = top_fraction_threshold(live, 1 - fraction)  # the fraction-quantile
+                masks = {}
+                for n, s in saliency.items():
+                    mask = torch.zeros_like(s, dtype=torch.bool)
+                    view = live_part(n, mask, embodiment)  # only the weights that can change
+                    view.copy_(live_part(n, s, embodiment) <= threshold)
+                    masks[n] = mask
             ctx.node.dir.mkdir(parents=True, exist_ok=True)
             tmp = path.with_name(path.name + ".tmp")
-            torch.save({"fraction": recipe.sharp_forget_fraction, "batches": recipe.importance_batches,
+            torch.save({"fraction": fraction, "batches": recipe.importance_batches, "select": recipe.sharp_select,
                         "masks": masks}, tmp)
             tmp.replace(path)
         selected = sum(int(live_part(n, m, embodiment).sum()) for n, m in masks.items())
@@ -287,6 +299,32 @@ def _npo(node: Node, recipe: Recipe, with_retain: bool) -> OpPlan:
     if with_retain:
         notes["retain_coeff"] = 1.0
     return OpPlan(parts, loss_fn, recipe.unlearn_steps, recipe.unlearn_lr, notes, prepare=prepare)
+
+
+def _plan_npo_rt_gu(node: Node, recipe: Recipe) -> OpPlan:
+    """GU on NPO-RT (vlu/gu_npo_rt.py): NPO-RT's objective, with the gradient of the last DiT blocks and the
+    output layers projected off a retain subspace in Adam's metric (Geometric-disentanglement Unlearning,
+    Algorithm 1), adapted to flow matching."""
+    from vlu.gu_npo_rt import GuNpoRt, projected_names
+
+    forget, retain = _forget_retain(node, recipe)
+    plan = OpPlan({"forget": forget, "retain": retain}, None, recipe.unlearn_steps, recipe.unlearn_lr,
+                  {"npo_beta": recipe.npo_beta, "retain_coeff": 1.0, "gu_basis_k": recipe.gu_basis_k,
+                   "gu_last_blocks": recipe.gu_last_blocks, "gu_refresh_every": recipe.gu_refresh_every,
+                   "gu_cap": recipe.gu_cap, "retain_anchor": "masked mean squared velocity difference to theta0",
+                   "reference_commit": "Lemutisme/geo-unlearning@bbe4d5077b21f6ded0ddbff8bf49b0336260626a"})
+
+    def prepare(ctx: OpContext):
+        params = trainable_named_parameters(ctx.model)
+        names = projected_names(list(params), recipe.gu_last_blocks)
+        rule = GuNpoRt(recipe.npo_beta, names, recipe.gu_basis_k, recipe.gu_refresh_every, recipe.gu_cap)
+        rule.attach(ctx.model, frozen_reference(ctx.model))
+        plan.notes["projected_tensors"] = len(names)
+        plan.notes["projected_fraction"] = sum(params[n].numel() for n in names) / sum(p.numel() for p in params.values())
+        plan.update_rule = rule
+
+    plan.prepare = prepare
+    return plan
 
 
 def _plan_ssd(node: Node, recipe: Recipe) -> OpPlan:
@@ -467,6 +505,7 @@ UNLEARN_METHODS: dict[str, Callable[[Node, Recipe], OpPlan]] = {
     "sharp_minmax": _plan_sharp_minmax,
     "npo": _plan_npo,
     "npo_rt": _plan_npo_rt,
+    "npo_rt_gu": _plan_npo_rt_gu,
     "ssd": _plan_ssd,
     "salun": _plan_salun,
     "vlaforget": _plan_vlaforget,
