@@ -50,7 +50,7 @@ class OpContext:
             for start in range(0, len(demos.index), batch_size):
                 samples = [make_sample(self.processor, self.modality_configs, demos, episode, step)
                            for episode, step in demos.index[start:start + batch_size]]
-                yield self.processor.collator(samples)["inputs"]
+                yield dict(self.processor.collator(samples)["inputs"])  # as OpBatches
         finally:
             self.processor.train() if was_training else self.processor.eval()
 

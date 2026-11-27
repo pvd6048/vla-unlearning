@@ -61,7 +61,7 @@ bash scripts/run_local.sh                                 # about 13-17 hours
 
 - **Is it the new code?** If `git pull` prints an error, or the `git log` line shows an earlier date,
   please stop and send us `git pull`'s message and the output of `git status`. Once it runs, the self-tests
-  include `tests/test_task_arithmetic_rmu.py` and `tests/check_groot_rmu.py`, the plan line says
+  include `tests/test_task_arithmetic_rmu.py`, `tests/check_groot_rmu.py` and `tests/test_cuda_round3.py`, the plan line says
   `37 unlearning variants` (the 36 above plus "purge", which trains nothing; the run of 24 November said 38,
   the code of 25 November 17, earlier code of 27 November 27), and it prints
   `archived (trained before the cost meter; ...)` for 12 variants. If the plan line shows another number,

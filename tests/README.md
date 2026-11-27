@@ -51,6 +51,11 @@ stream metric, report generation and efficiency exports on synthetic fixtures. O
 fcntl import stand-in is only for pure planner/report helpers; worker locking is not tested.
 Both run on CPU; set `USE_TF=0` if optional TensorFlow imports slow down transformers startup.
 
+`python tests/test_cuda_round3.py` runs every round-3 calibration variant of GU on NPO-RT, Sharp MinMax, task
+arithmetic and RMU through `vlu/run_op.py`'s preparation, training and saving on CUDA, with bf16 autocast,
+DataLoader workers and the cost meter, on the GR00T-shaped fake (Sharp's SGD rates scaled to the fake's
+gradients); skipped without CUDA.
+
 Original-source checks: `check_task_vectors.py` (optional) compares against the authors' arithmetic,
 and `check_groot_rmu.py` compares RMU with a full frozen reference using GR00T's actual DiT blocks
 on CPU (diffusers 0.35.1 required). Without an argument it uses the pinned GR00T checkout's `dit.py`

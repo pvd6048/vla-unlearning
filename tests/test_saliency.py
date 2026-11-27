@@ -45,7 +45,7 @@ class SaliencyTests(unittest.TestCase):
             training = True
             def eval(self): self.training = False
             def train(self): self.training = True
-            def collator(self, samples): return {"inputs": samples}
+            def collator(self, samples): return {"inputs": {"samples": samples}}  # a mapping, as GR00T's
         processor = Processor()
         index = [(episode, step) for episode in range(2) for step in range(5)]
         ctx = OpContext(None, None, {"B": SimpleNamespace(index=index)}, processor, {}, 0)
@@ -58,7 +58,7 @@ class SaliencyTests(unittest.TestCase):
         with patch("vlu.data.make_sample", side_effect=sample):
             batches = list(ctx.full_task_batches("B", 4))
         self.assertEqual(visited, index)
-        self.assertEqual([len(b) for b in batches], [4, 4, 2])
+        self.assertEqual([len(b["samples"]) for b in batches], [4, 4, 2])
         self.assertTrue(processor.training)
 
 
