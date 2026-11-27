@@ -101,9 +101,16 @@ class Recipe:
     # section 4.2: "most salient to F") or the "smallest" (its Algorithm 1, "bottom 10%", and the authors'
     # generate_mask.py, which ranks ascending). The calibration tries both.
     sharp_select: str = "smallest"  # Algorithm 1 and released generate_mask.py; E.2 says largest
-    sharp_optimizer: str = "sgd"  # paper E.1; "adamw" reproduces the released code's override
+    # "adamw" (the released code's override) keeps two full AdamW states: about 50 GiB on GR00T, more than a
+    # 48 GB GPU holds (toy estimate calibrated to the measured GA/NPO-RT peaks); "sgd" about 40 GiB.
+    sharp_optimizer: str = "sgd"  # paper E.1
     sharp_momentum: float = 0.9
-    sharp_weight_decay: float = 5e-4  # paper's CIFAR setup, applied to all optimized tensors
+    # Adapted, not the paper's 5e-4 (its from-scratch CIFAR regularizer): with momentum .9 coupled SGD decay
+    # shrinks every weight by lr * wd / (1 - momentum) per optimizer, two per step. At useful SGD rates on
+    # GR00T (0.02-0.5, scripts/calibrate.py) 5e-4 would shrink the pretrained weights by 18% (lr 0.02) to 99%
+    # (lr 0.5) over 1000 steps, swamping the unlearning signal. The repo's AdamW decay (1e-5, decoupled)
+    # changes weights by about lr * 1e-5 per step, i.e. nothing; its SGD counterpart is 0.
+    sharp_weight_decay: float = 0.0
     sharp_forget_fraction: float = 0.3
     sharp_alpha: float = 0.99
     sharp_rho: float = 0.1

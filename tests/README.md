@@ -44,14 +44,17 @@ These run on CPU and are included in the local runner (Slurm's check already dis
 
 `python tests/test_task_arithmetic_rmu.py` checks task-vector negation against an independent
 forget-task fit, RMU's two-step reference objective, action masks, restricted update scope, reference
-inputs, hook cleanup and deterministic stochastic-resume behavior, including interrupted finalization.
+inputs, hook cleanup, that RMU's forwards stop after the target block (and its logged hidden-state norm),
+and deterministic stochastic-resume behavior, including interrupted finalization.
 `python tests/test_method_benchmarks.py` checks benchmark variants, S1/oracle/drift planning, every
 stream metric, report generation and efficiency exports on synthetic fixtures. On Windows its
 fcntl import stand-in is only for pure planner/report helpers; worker locking is not tested.
 Both run on CPU; set `USE_TF=0` if optional TensorFlow imports slow down transformers startup.
 
-Optional original-source checks: `check_task_vectors.py` compares against the authors' arithmetic,
+Original-source checks: `check_task_vectors.py` (optional) compares against the authors' arithmetic,
 and `check_groot_rmu.py` compares RMU with a full frozen reference using GR00T's actual DiT blocks
-on CPU (diffusers 0.35.1 required). Source downloads, commit pins, hashes and audit scope are
+on CPU (diffusers 0.35.1 required). Without an argument it uses the pinned GR00T checkout's `dit.py`
+(`$GR00T_DIR`), so `scripts/run_local.sh` runs it as a self-test; without a GR00T environment it reports
+a skip. Source downloads, commit pins, hashes and audit scope are
 documented in [TASK_ARITHMETIC_RMU.md](../TASK_ARITHMETIC_RMU.md). These checks need no model weights
 or LIBERO data and are not rollout or GPU-cost benchmarks.

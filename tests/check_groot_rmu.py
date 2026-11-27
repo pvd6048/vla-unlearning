@@ -1,16 +1,19 @@
 """Optional CPU check against GR00T's actual pinned DiT block, without its model weights/data.
 
-Requires diffusers==0.35.1 and the source path documented in TASK_ARITHMETIC_RMU.md. This compares
+Requires diffusers==0.35.1 and GR00T's dit.py at the pinned commit. Without an argument it uses the
+checkout of the GR00T environment ($GR00T_DIR, set by slurm/env.sh), so scripts/run_local.sh runs it as a
+self-test; without $GR00T_DIR (no GR00T environment, e.g. a laptop) it reports a skip. This compares
 RMU's block-only reference shortcut to an independently evaluated frozen full miniature model.
 """
 import argparse
 import copy
 import hashlib
+import os
 from pathlib import Path
 import runpy
+import sys
 
 import stubs  # noqa: F401
-import diffusers
 import torch
 from torch import nn
 
@@ -97,8 +100,15 @@ def check(block_type):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("dit_source", type=Path)
+    parser.add_argument("dit_source", type=Path, nargs="?",
+                        help="GR00T's gr00t/model/modules/dit.py (default: the one in $GR00T_DIR)")
     args = parser.parse_args()
+    if args.dit_source is None:
+        if not os.environ.get("GR00T_DIR"):
+            print("SKIP: no $GR00T_DIR (GR00T environment) and no dit.py given")
+            sys.exit(0)
+        args.dit_source = Path(os.environ["GR00T_DIR"]) / "gr00t" / "model" / "modules" / "dit.py"
+    import diffusers  # GR00T's pinned dependency; only needed for the check itself
     source = args.dit_source.read_text(encoding="utf-8").rstrip() + "\n"
     if hashlib.sha256(source.encode()).hexdigest() != "26809bbe5872ef3e27e59cc0935334d57f868e98c5805a1a54f0f03e39f8f3e4":
         parser.error("source does not match the inspected GR00T revision")

@@ -64,13 +64,26 @@ from vlu.worker import item_key, load_plan, plan_path, someone_working, write_pl
 #   0.66, 2e-4 to 0.00. A's probe loss rose in the vision and projector stages (about equally), hardly in the
 #   reasoning stage. 2e-4 is dropped and two lower rates added: 1e-5, 2e-5, 5e-5. (A's probe loss ended at
 #   0.08 for both paper values: it does not show the difference in SR A.)
-# - GU now follows Algorithm 1's anchor-gradient recovery, gamma=1.5, alpha=1. NPO-RT's grid is a
-#   provisional bracket, not a matched-weight projection ablation. The explicit new weight override
-#   gives fresh node paths so results from the earlier algorithm cannot be reused.
-# - Sharp now follows literal Algorithm 2 (mask g1 only), two independent optimizers, full-forget-pass
-#   saliency, and the paper's constant-rate SGD. Its former AdamW rates are not transferable. The new
-#   PROVISIONAL bracket is 2e-4, 2e-3, 2e-2 (the paper's CIFAR rate), with both mask orientations because
-#   Algorithm 1/code say smallest and Appendix E.2 says largest. Alpha matters under SGD.
+# - GU now follows Algorithm 1's anchor-gradient recovery, gamma=1.5, alpha=1, on NPO-RT's grid. The explicit
+#   weight override gives fresh node paths, so results of the earlier algorithm cannot be reused. Two
+#   controls with gamma=1 at NPO-RT's working rates (3e-6, 1e-5) differ from npo_rt only by the projection;
+#   without them a GU/NPO-RT difference mixes the projection with the 1.5x forget weight.
+# - Sharp follows literal Algorithm 2 (mask g1 only), two independent optimizers, full-forget-pass saliency
+#   and the paper's constant-rate SGD, with weight decay 0 (vlu/config.py: the paper's 5e-4 would shrink the
+#   weights by 18-99% over 1000 steps at these rates). Rates, from the 24 Nov logs' gradient norms (retain
+#   ~0.2, forget ~1, over 1.6e9 weights) with momentum .9 (x10): an SGD step moves a weight by ~lr * 5e-5 in
+#   the retain phase and, with the forget loss scaled by 1 - alpha = 0.01, ~lr * 2.5e-6 in the forget phase,
+#   versus ~lr for AdamW. At 2e-2 (the paper's CIFAR rate, kept as the anchor) that is 1e-6 (3-10x below
+#   NPO-RT's working AdamW rates) and 5e-8 (6x below GA's 3e-7, which forgot); at 5e-1 it is 2.5e-5 (NPO-RT's
+#   upper bracket, 3e-5) and 1.25e-6 (4x above GA's 3e-7). So 2e-2, 1e-1, 5e-1, each with both mask
+#   orientations (Algorithm 1/code: smallest; Appendix E.2: largest). Estimates: the round places them.
+# - Task arithmetic (fit B from theta0, then theta0 - scale * tau; MUSE's "task vector" baseline): under AdamW
+#   the fit moves each weight by ~lr per step even with B's loss already low, so the edit grows with
+#   lr * scale. GA lost A from 3e-7 (all weights, ascent): 3e-7, 1e-6, 3e-6 at scale 1, and scale 2 at 1e-6
+#   (an edit size between 1e-6 and 3e-6 at scale 1: extrapolating the fit versus fitting harder).
+# - RMU (one DiT block): WMDP's rate 5e-5 and 1e-5, at block 0 (cross-attention to the text tokens) and block
+#   7 (self-attention; WMDP's layer 7 of 32). Steering 20 is WMDP's; the logged hidden_norm / steering_ratio
+#   shows how it compares with GR00T's activations, for round 4.
 # - The collaborator's GU-FM (method "gu", a GU-inspired projection of the AdamW proposal) is not calibrated:
 #   it is not the authors' algorithm (GU_SHARP_AUDIT.md) and at rank 2 over all trainable weights needs
 #   about 53 GB, more than a training GPU has.
@@ -85,8 +98,12 @@ VARIANTS = [
     *[f"salun@unlearn_lr={lr}" for lr in ("1e-5", "3e-5", "1e-4")],
     *[f"vlaforget@vlaforget.lr={lr}" for lr in ("1e-5", "2e-5", "5e-5")],  # 5e-5: the paper's lower value
     *[f"npo_rt_gu@unlearn_lr={lr}+gu_forget_weight=1.5" for lr in ("1e-6", "3e-6", "1e-5", "3e-5")],
-    *[f"sharp_minmax@unlearn_lr={lr}+sharp_optimizer=sgd+sharp_select={select}"
-      for select in ("smallest", "largest") for lr in ("2e-4", "2e-3", "2e-2")],
+    *[f"npo_rt_gu@unlearn_lr={lr}+gu_forget_weight=1" for lr in ("3e-6", "1e-5")],  # projection-only controls
+    *[f"sharp_minmax@unlearn_lr={lr}+sharp_optimizer=sgd+sharp_weight_decay=0+sharp_select={select}"
+      for select in ("smallest", "largest") for lr in ("2e-2", "1e-1", "5e-1")],
+    *[f"task_arithmetic@unlearn_lr={lr}" for lr in ("3e-7", "1e-6", "3e-6")],
+    "task_arithmetic@unlearn_lr=1e-6+task_arithmetic_scale=2",
+    *[f"rmu@unlearn_lr={lr}+rmu_layer={layer}" for layer in (0, 7) for lr in ("1e-5", "5e-5")],
 ]
 
 

@@ -60,7 +60,7 @@ class SharpTests(unittest.TestCase):
                 sign = -1 if forget else 1
                 expected = g0 + sign * strength * (g1 * active - g0)
                 _, grads, _ = rule._phase(model, batches()["forget" if forget else "retain"], {"weight": model.weight},
-                                          forget, float("inf"))
+                                          forget)
                 torch.testing.assert_close(grads[0], expected)
                 if forget:
                     self.assertGreater(grads[0][~active].abs().sum().item(), 0.)
@@ -157,9 +157,31 @@ class SharpTests(unittest.TestCase):
     def test_zero_radius_still_updates_outside_forget_selection(self):
         model = Quadratic()
         rule = make_rule(rho=0.)
-        _, grads, _ = rule._phase(model, batches()["forget"], {"weight": model.weight}, True, 1e-9)
+        _, grads, _ = rule._phase(model, batches()["forget"], {"weight": model.weight}, True)
         # g0=-w, g1=g0: 2*g0 - mask*g0. No final mask or clipping.
         torch.testing.assert_close(grads[0], torch.tensor([-2., -2.]))
+
+    def test_retain_gradients_are_freed_before_the_forget_phase(self):
+        """Memory: the retain phase's gradients (one weight copy) must not be alive during the forget phase,
+        whose second backward is the step's peak (on GR00T about 45 instead of 40 GiB)."""
+        import weakref
+        model = Quadratic()
+        rule = make_rule()
+        optimizer = rule.make_optimizer(model, .01)
+        rule.initialize(optimizer)
+        original, alive, retain_refs = rule._phase, [], []
+
+        def phase(model_, inputs, named, forget):
+            if forget:
+                alive.extend(ref() is not None for ref in retain_refs)
+            loss, grads, norm = original(model_, inputs, named, forget)
+            if not forget:
+                retain_refs.extend(weakref.ref(g) for g in grads if g is not None)
+            return loss, grads, norm
+        rule._phase = phase
+        rule.step(model, batches(), optimizer, 1.)
+        self.assertTrue(retain_refs)
+        self.assertEqual(alive, [False] * len(retain_refs))
 
     def test_native_optimizers_keep_independent_per_parameter_counters(self):
         class OptionalWeight(nn.Module):

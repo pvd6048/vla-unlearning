@@ -56,7 +56,7 @@ def check_sharp(source):
                                              adaptive=adaptive, lr=.02, momentum=.9, weight_decay=5e-4)
                     for _ in range(4):
                         # Our literal blend, applied by the unmodified native base optimizer.
-                        _, grads, _ = rule._phase(own, inputs, {"weight": own.weight}, forget, float("inf"))
+                        _, grads, _ = rule._phase(own, inputs, {"weight": own.weight}, forget)
                         own.weight.grad = grads[0]
                         optimizer.step()
                         optimizer.zero_grad(set_to_none=True)

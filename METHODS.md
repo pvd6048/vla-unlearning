@@ -190,10 +190,12 @@ masks only its second gradient, and updates using
 At strength 1, forget uses `2*g0-active_mask*g1`, so it can update the other partition too.
 The previous final masking/shared-moment shortcut has been removed.
 
-Default optimizer is the paper E.1's constant-rate SGD with momentum .9 and decay 5e-4 on all
-optimized tensors. There is no extra clipping or warmup/cosine schedule. Two independent native
-optimizers preserve their own histories and per-parameter counters.
-`sharp_optimizer=adamw` explicitly selects the released script's override.
+Default optimizer is the paper E.1's constant-rate SGD with momentum .9, with weight decay 0 instead of
+the paper's 5e-4 (`sharp_weight_decay`; at useful SGD rates on GR00T 5e-4 would shrink the pretrained
+weights by 18-99% over 1000 steps, PAPER_ALIGNMENT.md). There is no extra clipping or warmup/cosine
+schedule. Two independent native optimizers preserve their own histories and per-parameter counters
+(about 40 GiB on GR00T). `sharp_optimizer=adamw` explicitly selects the released script's override; its two
+AdamW states need about 50 GiB, more than a 48 GB GPU holds.
 Default alpha=.99, rho=.1, fraction=.3, strength=1, vanilla SAM. Alpha affects SGD update magnitudes.
 
 Saliency is the absolute signed-gradient sum over a complete forget-data pass. Exact global ranks
@@ -201,7 +203,8 @@ select floor(N*fraction) live entries; deterministic tie filling avoids quantile
 Unused embodiment rows are excluded from ranking. Algorithm 1/code select the smallest gradients
 (the default); Appendix E.2 describes the largest, available as `sharp_select=largest`.
 Both orientations have provisional calibration variants with new node paths.
-The default SGD grid is 2e-4, 2e-3, 2e-2, not the obsolete AdamW grid.
+The SGD grid is 2e-2 (the paper's CIFAR rate), 1e-1, 5e-1, derived in `scripts/calibrate.py` from the
+measured gradient norms; not the obsolete AdamW grid.
 
 Necessary adaptations include continuous-action FM, common continual data/budget/scope, paired
 FM randomness, and autocast-cache clearing so perturbed/current weights are actually visible.

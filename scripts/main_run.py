@@ -2,8 +2,11 @@
 machine without Slurm. Normally called by scripts/run_local.sh --main (see CALIBRATION.md).
 
     python scripts/main_run.py [--run goal_s0]
-    python scripts/main_run.py --run ta_rmu_s0 --seed 0 \
-        --methods 'purge,task_arithmetic@unlearn_lr=1e-5,rmu@unlearn_lr=1e-5'
+    python scripts/main_run.py --run goal_s0 --methods 'rmu@unlearn_lr=5e-5+rmu_layer=7'
+
+--methods replaces METHODS for this call (purge is always added). The plan only grows (submit.merge): the
+methods already planned stay. Add methods to goal_s0, not to a new run name: every run trains its own nodes
+(runs/<run>/), so a new run would retrain the whole stream (LA..LE, 10k steps each, and the oracles).
 
 Run `goal_s0` (seed 0), LIBERO-Goal tasks A-E (vlu/tasks.py), every op with the recipe of vlu/config.py
 (10k steps per learned task with ER, 1000 steps per unlearning op):
@@ -21,8 +24,8 @@ METHODS holds only the methods whose hyperparameters are set (the planner refuse
 method has no learning rate in vlu/config.py). The others are added after calibration round 3; rerunning
 run_local.sh --main then adds their tails and keeps everything already done.
 Disk: ~6.5 GB per trained node (purge's are hard links to its parent's): ~110 GB for the methods below,
-~330 GB with all of round 3's methods (purge, SSD, SalUn, NPO, NPO-RT, GU on NPO-RT, Sharp MinMax,
-VLA-Forget; GA and GradDiff are dropped).
+~380 GB with all of round 3's methods (purge, SSD, SalUn, NPO, NPO-RT, GU on NPO-RT, Sharp MinMax,
+VLA-Forget, task arithmetic, RMU; GA and GradDiff are dropped; ~26 GB per method's tail).
 """
 
 import argparse
@@ -36,8 +39,9 @@ from vlu.nodes import run_seed  # noqa: E402
 from vlu.worker import load_plan, plan_path, write_plan  # noqa: E402
 
 SEED = 0
-# Calibration round 2 set these (vlu/config.py). npo, npo_rt, npo_rt_gu, sharp_minmax and vlaforget join after
-# round 3 sets their rates (unlearn_lrs, vlaforget.lr; sharp_select too); ga and graddiff are dropped.
+# Calibration round 2 set these (vlu/config.py). npo, npo_rt, npo_rt_gu, sharp_minmax, vlaforget, task_arithmetic
+# and rmu join after round 3 sets their rates (unlearn_lrs, vlaforget.lr; sharp_select, task_arithmetic_scale,
+# rmu_layer too); ga and graddiff are dropped.
 METHODS = ["purge", "ssd", "salun"]
 CONTROL = ["LA/LB/LC/LD", "LA/LB/LC/LD/LE"]  # PLAN.md section 5.1, branch C (both evaluated, as the tails)
 FISHER = "LA/LB/LC:A,B"  # at theta0 of every U_B: the curvature of B and of a retained task (main_drift.py)

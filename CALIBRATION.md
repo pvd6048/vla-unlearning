@@ -1,16 +1,9 @@
 # Calibration run (on a machine without Slurm)
 
-Thank you for running this. It fine-tunes the GR00T N1.6 robot policy on two LIBERO tasks, tries 27
-settings of 8 unlearning methods, and evaluates everything in the LIBERO simulator. It also measures what
+Thank you for running this. It fine-tunes the GR00T N1.6 robot policy on two LIBERO tasks, tries 37
+settings of 10 unlearning methods, and evaluates everything in the LIBERO simulator. It also measures what
 each method costs: time, memory, compute and the GPU's energy. The results tell
 us how to set our hyperparameters. You don't need to interpret anything: run it and send back one file.
-
-GU and Sharp were realigned to their papers on 2026-11-27; see [PAPER_ALIGNMENT.md](PAPER_ALIGNMENT.md).
-Their new override tokens create fresh calibration nodes. Earlier GU/Sharp results, checkpoints,
-sampled masks and toy memory estimates must not be reused. Sharp now uses constant-rate SGD by default,
-with a provisional 2e-4/2e-3/2e-2 grid and both mask orientations; GU uses gamma=1.5, alpha=1.
-The corrected variants have not been measured on GR00T here. The existing 44-GB free-memory preflight
-is not evidence that these variants fit; their actual GPU peak and full-pass preparation cost need measurement.
 
 ## What the machine needs
 
@@ -20,8 +13,8 @@ is not evidence that these variants fit; their actual GPU peak and full-pass pre
   same time. The run checks the free memory at the start, warns about GPUs already in use, and stops
   if no GPU has 44 GB free.
 - NVIDIA driver 570 or newer (CUDA 12.8); 525 or newer usually works too.
-- About 320 GB of free disk (it fills to about 240 GB: 25 GB of software, model and data, 195 GB of
-  trained model weights, 17 GB of drift data; up to 40 GB more for checkpoints while training), 64 GB of
+- About 400 GB of free disk (it fills to about 305 GB: 25 GB of software, model and data, 260 GB of
+  trained model weights, 17 GB of drift data; up to 50 GB more for checkpoints while training), 64 GB of
   RAM or more, internet access during setup (about 15 GB is downloaded).
 - `git`, `curl`, `cmake` and a C compiler (`build-essential` on Ubuntu). No root access or Slurm is needed.
 
@@ -50,8 +43,8 @@ If the disk with space is not where you want the code, you can instead put the l
 
 ## Round 3 (on the machine that ran rounds 1 and 2)
 
-This round keeps the training of tasks A and B from before and trains 26 unlearning variants: 14 new ones
-(among them two newly added methods, GU on NPO-RT and Sharp MinMax) and 12 trained before (in round 2 or on
+This round keeps the training of tasks A and B from before and trains 36 unlearning variants: 24 new ones
+(among them four newly added methods: GU on NPO-RT, Sharp MinMax, task arithmetic and RMU) and 12 trained before (in round 2 or on
 24 November) again, now with the measurement of their time, memory, compute and energy. The 12 earlier
 ones are moved to a separate folder first (`$VLU_RUNS_DIR/_archive/`; nothing is deleted). In the
 `vla-unlearning` folder:
@@ -62,15 +55,17 @@ git pull
 git log -1 --format='%h %ad' --date=short               # must be dated 2026-11-27 or later (see below)
 tmux new -s cal3
 bash scripts/setup_cluster.sh 2>&1 | tee -a setup.log   # adds the energy-measurement package (a few minutes)
-df -h .                                                   # needs about 220 GB free
-bash scripts/run_local.sh                                 # about 9-12 hours
+df -h .                                                   # needs about 290 GB free
+bash scripts/run_local.sh                                 # about 13-17 hours
 ```
 
 - **Is it the new code?** If `git pull` prints an error, or the `git log` line shows an earlier date,
   please stop and send us `git pull`'s message and the output of `git status`. Once it runs, the self-tests
-  include `tests/test_cost.py` and `tests/test_gu_npo_rt.py`, the plan line says `27 unlearning variants`
-  (the 26 above plus "purge", which trains nothing; the run of 24 November said 38, the code of 25 November
-  17), and it prints `archived (trained before the cost meter; ...)` for 12 variants.
+  include `tests/test_task_arithmetic_rmu.py` and `tests/check_groot_rmu.py`, the plan line says
+  `37 unlearning variants` (the 36 above plus "purge", which trains nothing; the run of 24 November said 38,
+  the code of 25 November 17, earlier code of 27 November 27), and it prints
+  `archived (trained before the cost meter; ...)` for 12 variants. If the plan line shows another number,
+  please stop and send us that line.
 - **Not enough disk?** Before `run_local.sh`, this deletes the model weights of the earlier rounds'
   variants that are no longer used (and of the 12 moved ones), up to about 180 GB; their results stay:
   `source slurm/env.sh && $MAIN_PY scripts/calibrate.py --prune-weights`
@@ -104,7 +99,7 @@ always enough for us to see what happened.
 1. Records the machine (GPUs, driver, library versions) and picks GPU rendering for the simulator if a
    test render works on every GPU, else software rendering.
 2. Runs the code's self-tests (a few minutes). If one fails it stops here and packs the logs.
-3. Trains task A (with checkpoints at 2k, 5k, 10k steps), then task B, then 27 unlearning variants of
+3. Trains task A (with checkpoints at 2k, 5k, 10k steps), then task B, then 37 unlearning variants of
    task B, and evaluates each in the simulator. Each variant's time, memory, compute and GPU energy are
    measured as it runs. One worker runs per GPU. After each training it also
    records how the model's internals respond to a fixed set of test frames (a few minutes per model).

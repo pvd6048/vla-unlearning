@@ -3,6 +3,8 @@
 Forget action-token activations approach a fixed random target; retain activations match the
 pre-unlearning block. Only that block is edited, so its frozen copy can evaluate exactly the same
 incoming activations without duplicating the rest of GR00T. FM noise/timesteps therefore match.
+Each forward stops right after the target block: nothing downstream enters the objective, so running
+the rest of GR00T would only add compute to the method's measured cost.
 """
 import copy
 
@@ -20,17 +22,31 @@ def hidden_tensor(output):
     return hidden
 
 
-def action_mse(hidden, target, action_mask):
-    """Mean squared hidden error over valid action tokens; exclude state/padding tokens."""
+class _Captured(Exception):
+    """Raised by the target block's hook to end a forward once its output is captured."""
+
+
+def _valid_actions(hidden, action_mask):
     valid = action_mask.to(hidden.device).bool().any(dim=-1)
     if valid.ndim != 2 or hidden.shape[0] != valid.shape[0] or hidden.shape[1] < valid.shape[1]:
         raise ValueError("RMU activation and action-mask shapes do not match")
     if not valid.any():
         raise ValueError("RMU needs at least one valid action token")
-    hidden = hidden[:, -valid.shape[1]:].float()[valid]
+    return valid
+
+
+def action_tokens(hidden, action_mask):
+    """The valid action tokens' hidden states, [n, width] in float32 (state/padding tokens excluded)."""
+    valid = _valid_actions(hidden, action_mask)
+    return hidden[:, -valid.shape[1]:].float()[valid]
+
+
+def action_mse(hidden, target, action_mask):
+    """Mean squared hidden error over valid action tokens; exclude state/padding tokens."""
+    valid = _valid_actions(hidden, action_mask)
     if target.ndim == 3:
         target = target[:, -valid.shape[1]:][valid]
-    error = hidden - target.float()
+    error = action_tokens(hidden, action_mask) - target.float()
     return error.square().mean()
 
 
@@ -55,6 +71,8 @@ class RMUUpdate:
         pass
 
     def forward(self, model, inputs, with_reference=False):
+        """The target block's output (and, with_reference, the frozen block's on the same inputs); the
+        model's forward ends right after that block."""
         captured = {}
 
         def before(module, args, kwargs):
@@ -66,19 +84,22 @@ class RMUUpdate:
                     *tree_map(detach, args), **tree_map(detach, kwargs)))
 
         def after(module, args, output):
-            if "hidden" in captured:
-                raise ValueError("RMU target block was called more than once in one forward")
             captured["hidden"] = hidden_tensor(output)
+            raise _Captured  # the block's first call ends the forward, so it is never called twice
 
         handle = self.module.register_forward_hook(after)
         ref_handle = self.module.register_forward_pre_hook(before, with_kwargs=True) if with_reference else None
         try:
-            output = model(inputs)
+            model(inputs)
+        except _Captured:
+            pass
         finally:
             handle.remove()
             if ref_handle is not None:
                 ref_handle.remove()
-        return output, captured
+        if "hidden" not in captured:
+            raise ValueError("RMU target block was not called by the model's forward")
+        return captured
 
     def step(self, model, batch, optimizer, max_grad_norm):
         named = trainable_named_parameters(model)
@@ -87,10 +108,10 @@ class RMUUpdate:
         model.eval()  # isolate activation steering from dropout, as for the frozen reference
         model.zero_grad(set_to_none=True)
         try:
-            forget, f = self.forward(model, batch["forget"])
-            check_finite({"forget_fm": forget["loss"]}, "RMU model output")
-            forget_fm = forget["loss"].item()
-            del forget  # release the unused downstream FM graph before the retain forward
+            f = self.forward(model, batch["forget"])
+            check_finite({"hidden": f["hidden"]}, "RMU forget activations")
+            # The steering target's norm is per token: compare it with the activations' own scale.
+            hidden_norm = action_tokens(f["hidden"].detach(), batch["forget"]["action_mask"]).norm(dim=-1).mean().item()
             if self.control is None:
                 generator = torch.Generator().manual_seed(self.seed)
                 vector = torch.rand(f["hidden"].shape[-1], generator=generator)
@@ -98,10 +119,8 @@ class RMUUpdate:
             if self.control.shape != (f["hidden"].shape[-1],):
                 raise ValueError("RMU control-vector width does not match the target block")
             forget_loss = action_mse(f["hidden"], self.control, batch["forget"]["action_mask"])
-            retain, r = self.forward(model, batch["retain"], with_reference=True)
-            check_finite({"retain_fm": retain["loss"]}, "RMU model output")
-            retain_fm = retain["loss"].item()
-            del retain
+            r = self.forward(model, batch["retain"], with_reference=True)
+            check_finite({"hidden": r["hidden"], "reference": r["reference"]}, "RMU retain activations")
             retain_loss = action_mse(r["hidden"], r["reference"], batch["retain"]["action_mask"])
             loss = forget_loss + self.alpha * retain_loss
             norm = set_gradients(params, gradients(loss, params), max_grad_norm)
@@ -110,7 +129,8 @@ class RMUUpdate:
             for module, training in modes.items():
                 module.training = training
         return loss.detach(), {"forget_rmu": forget_loss.item(), "retain_rmu": retain_loss.item(),
-                               "forget_fm": forget_fm, "retain_fm": retain_fm,
+                               "hidden_norm": hidden_norm,
+                               "steering_ratio": self.steering / hidden_norm if hidden_norm > 0 else float("inf"),
                                "grad_norm": norm}
 
     def state_dict(self):

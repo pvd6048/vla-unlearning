@@ -41,7 +41,8 @@ The recovered g_f includes some retain-FM gradient because the anchor differs fr
 retain loss. This is intentional: it is the published/released recovery, rather than an independently
 redefined forget gradient. With an empty basis the update equals the weighted base gradient.
 To isolate projection against the existing unit-weight NPO-RT control, explicitly set
-`gu_forget_weight=1`; the default gamma=1.5 comparison changes the base weight too.
+`gu_forget_weight=1`; the default gamma=1.5 comparison changes the base weight too. Calibration round 3
+runs both: gamma=1.5 on NPO-RT's grid and gamma=1 at NPO-RT's working rates 3e-6 and 1e-5.
 
 The author trainer attempts two differentiations of the same anchor graph on refresh steps,
 while its basis helper frees that graph. Our implementation differentiates once with the graph
@@ -67,8 +68,12 @@ Thus the forget update can move the other partition. Weight decay and momentum c
 with zero current masked gradients too. No final mask or partition restoration is applied.
 This preserves the literal paper pseudocode/released code instead of imposing stricter isolation.
 
-Defaults: constant-rate SGD, momentum .9, weight decay 5e-4 on all optimized tensors,
-alpha=.99, rho=.1, forget fraction .3, strength=1, vanilla SAM.
+Defaults: constant-rate SGD, momentum .9, alpha=.99, rho=.1, forget fraction .3, strength=1, vanilla
+SAM, and weight decay **0** (an adaptation; `sharp_weight_decay=5e-4` restores the paper's value, applied
+to all optimized tensors). The paper's 5e-4 is a from-scratch CIFAR regularizer: coupled SGD decay with
+momentum .9 shrinks each weight by lr * wd / (1 - momentum) per optimizer, two per step, so at useful
+SGD rates on GR00T it would shrink the pretrained weights by 18% (lr 0.02) to 99% (lr 0.5) over 1000
+steps and dominate the result.
 No extra gradient clipping or warmup/cosine scheduling is applied.
 Two independent native optimizer states preserve per-parameter counters and phase histories.
 
@@ -79,7 +84,9 @@ There are two explicit paper/code ambiguities:
 | Mask direction | `sharp_select=smallest`: Algorithm 1 and released mask generator rank ascending | `largest`: Appendix E.2/section 4.2 description |
 | Optimizer | `sharp_optimizer=sgd`: paper E.1's constant-rate SGD experiment recipe | `adamw`: released training script's unconditional override |
 
-AdamW uses the released code's defaults (betas .9/.999, eps 1e-8) and the configured decay.
+AdamW uses the released code's defaults (betas .9/.999, eps 1e-8) and the configured decay. Its two
+full AdamW states need about 50 GiB on GR00T, more than a 48 GB GPU holds; SGD needs about 40 GiB
+(toy measurements calibrated to the measured GA and NPO-RT peaks; see the review fixes below).
 The same two-phase equations apply. Under SGD alpha affects the update scale substantially;
 the old claim that alpha cancels applied approximately to AdamW, not to this default.
 
@@ -108,8 +115,8 @@ and records frame count, batch count and actual fraction.
 | Exact weight restoration, native optimizer checkpoints and finite checks | Execution/resume robustness; no extra projection or clipping added to Sharp |
 
 Learning rates and request budgets remain explicit VLA calibration choices. The Sharp SGD grid
-(2e-4, 2e-3, 2e-2) is provisional and includes the paper's CIFAR rate; it is not a demonstrated
-stable robot-policy setting. GU retains the provisional NPO-RT rate bracket.
+(2e-2, the paper's CIFAR rate, 1e-1 and 5e-1, with decay 0; derived in `scripts/calibrate.py` from the
+measured gradient norms) is provisional; it is not a demonstrated stable robot-policy setting. GU retains the provisional NPO-RT rate bracket.
 Fresh override tokens in `scripts/calibrate.py` prevent reuse of earlier GU/Sharp result directories.
 Old GU update states, Sharp shared-moment states and sampled Sharp masks are rejected.
 Start fresh operations, rather than resuming pre-correction checkpoints.
@@ -129,7 +136,7 @@ trainer has the graph-reuse defect above; basis growth is compared separately. N
 results were reproduced. The default SGD path and optional AdamW path preserve independent native
 state, rather than the former shared-state approximation.
 
-The pure calibration plan was also checked: all 27 variants parse, pass recipe validation and generate
+The pure calibration plan was also checked: all 27 variants (37 since the 27 Nov review) parse, pass recipe validation and generate
 fresh GU/Sharp node paths. A Windows import stand-in for fcntl was used only for this pure check;
 Linux worker locking/process behavior was not tested. The broader test_ops.py requires CUDA and
 could not run in this CPU-only environment.
@@ -149,5 +156,19 @@ Download the pinned author files linked above for the last command; the checker 
 source hashes before executing their classes. Existing performance/cost logging remains active.
 Old toy GPU-memory extrapolations for the removed shared-state algorithm do not apply.
 Two independent SGD momentum buffers or four AdamW moment buffers increase state/storage relative
-to that shortcut. Exact ranking also requires one float32 pool over live entries in host RAM.
-Measure actual GR00T peak memory and cost before making hardware-fit or efficiency claims.
+to that shortcut. Exact ranking also requires one float32 pool over live entries in host RAM
+(about 6.4 GB per running Sharp preparation). Round 3's cost meter measures the actual GR00T peaks.
+
+## Review fixes — 2026-11-27
+
+- **Sharp memory:** `step()` kept the retain phase's blended gradients (one weight copy) alive through the
+  forget phase, whose second backward is the step's peak: about 45 GiB on GR00T, above run_local.sh's 44 GB
+  training threshold and within ~2 GiB of an A6000. They are now released after the retain update, and the
+  blend frees each tensor's g0/g1 as it goes: about 40 GiB (SGD), as NPO-RT. Estimates from a toy with a
+  frozen backbone, bf16 autocast and activations sized so that GA and NPO-RT match their measured 33.4 and
+  39.5 GiB; each kind measured in its own process.
+- **Sharp decay and grid:** decay 0 and SGD rates 2e-2, 1e-1, 5e-1 (above and `scripts/calibrate.py`).
+- **Sharp gradient norm:** computed without rescaling the gradients (`vlu.updates.total_norm`; `_phase` no
+  longer takes an unused clipping argument).
+- **GU:** the gamma=1 controls above.
+

@@ -119,8 +119,26 @@ class RMUTests(unittest.TestCase):
         model = Noisy()
         rule = RMUUpdate(model, 0, 3., 2., 19)
         with torch.no_grad():
-            _, captured = rule.forward(model, mini_batch()["retain"], with_reference=True)
+            captured = rule.forward(model, mini_batch()["retain"], with_reference=True)
         torch.testing.assert_close(captured["hidden"], captured["reference"], atol=0., rtol=0.)
+
+    def test_forward_stops_after_the_target_block_and_logs_its_scale(self):
+        class Downstream(Mini):
+            def forward(self, inputs):
+                hidden = self.action_head.model.transformer_blocks[0](inputs["x"] @ self.upstream)
+                raise AssertionError(f"ran downstream of the target block ({hidden.shape})")
+        model = Downstream()
+        rule = RMUUpdate(model, 0, 3., 2., 19)
+        data = mini_batch()
+        with torch.no_grad():
+            hidden = model.action_head.model.transformer_blocks[0](data["forget"]["x"] @ model.upstream)
+        _, metrics = rule.step(model, data, torch.optim.SGD(model.parameters(), lr=.01), float("inf"))
+        norm = hidden[:, -2:].reshape(-1, 2).norm(dim=-1).mean().item()  # both action tokens are valid
+        self.assertAlmostEqual(metrics["hidden_norm"], norm, places=6)
+        self.assertAlmostEqual(metrics["steering_ratio"], 2. / norm, places=6)
+        self.assertFalse(rule.module._forward_hooks)
+        with self.assertRaisesRegex(ValueError, "not called"):
+            rule.forward(Quadratic(), {"x": torch.ones(3), "y": torch.zeros(())})
 
     def test_hooks_and_modes_are_restored_on_failure(self):
         model = Mini().train()

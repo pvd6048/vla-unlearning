@@ -164,7 +164,7 @@ Slurm resources for training and eval jobs are in `RESOURCES` at the top of `scr
 
 `CALIBRATION.md` is the one-page instruction for someone running our hyperparameter calibration on
 their own GPU machine: `scripts/setup_cluster.sh`, then `scripts/run_local.sh`, which runs the base
-tests, the calibration plan (`scripts/calibrate.py`: LA with 2k/5k/10k snapshots, LA/LB, 27 unlearning
+tests, the calibration plan (`scripts/calibrate.py`: LA with 2k/5k/10k snapshots, LA/LB, 37 unlearning
 variants of B, and drift features of every model; a variant trained before the cost meter is archived to
 `$VLU_RUNS_DIR/_archive/` and trained again, so every variant is measured; `--prune-weights` frees the
 weights of nodes no longer planned) with one local worker per GPU, computes drift
@@ -263,10 +263,10 @@ Pass bar (PLAN.md): ≥ 80% SR on A after 10k steps. The `--eval-seeds 0,1` pair
 ## Week 1: stream S1
 
 ```bash
-python scripts/submit.py --run goal_s0 --stream S1 --methods purge,npo,npo_rt,npo_rt_gu,ssd,salun,sharp_minmax,vlaforget --dry-run   # look first
-python scripts/submit.py --run goal_s0 --stream S1 --methods purge,npo,npo_rt,npo_rt_gu,ssd,salun,sharp_minmax,vlaforget
+python scripts/submit.py --run goal_s0 --stream S1 --methods purge,npo,npo_rt,npo_rt_gu,ssd,salun,sharp_minmax,vlaforget,task_arithmetic,rmu --dry-run   # look first
+python scripts/submit.py --run goal_s0 --stream S1 --methods purge,npo,npo_rt,npo_rt_gu,ssd,salun,sharp_minmax,vlaforget,task_arithmetic,rmu
 python scripts/results.py --run goal_s0
-python scripts/metrics.py --stream S1 --methods purge,npo,npo_rt,npo_rt_gu,ssd,salun,sharp_minmax,vlaforget --runs goal_s0
+python scripts/metrics.py --stream S1 --methods purge,npo,npo_rt,npo_rt_gu,ssd,salun,sharp_minmax,vlaforget,task_arithmetic,rmu --runs goal_s0
 ```
 
 This plans the shared prefix once, every method's tail, the oracles (`LA/LC`, `LA/LC/LD`), and an

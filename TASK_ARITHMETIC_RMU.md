@@ -8,6 +8,11 @@ Neither has a calibrated GR00T learning rate: an explicit `unlearn_lr` is requir
 
 Reference: Ilharco et al., *Editing Models with Task Arithmetic*, ICLR 2023;
 [author code at 826a64c67082fab0f40628233287948f0f8d7fa3](https://github.com/mlfoundations/task_vectors/blob/826a64c67082fab0f40628233287948f0f8d7fa3/src/task_vectors.py).
+The unlearning use here, where theta0 already knows the forget task and is fitted on it further before
+the negation, is the "task vector" baseline of Eldan & Russinovich (*Who's Harry Potter?*, 2023) and
+MUSE (Shi et al., 2024); cite those for the setting and Ilharco et al. for the arithmetic. Under AdamW
+the fit moves every weight by about lr per step even when the forget loss is already low, so tau holds
+optimizer drift as well as forget-task signal; the rate and scale are calibrated together.
 
 `task_arithmetic` starts from the current pre-unlearning checkpoint theta0. It fine-tunes on the
 forget task's ordinary FM loss for `unlearn_steps`, yielding theta_f, and publishes:
@@ -65,37 +70,31 @@ in a frozen full model with identical inputs and fixed upstream layers, while av
 full GR00T copy. The reference block, control vector and settings are checkpointed.
 
 Defaults `rmu_alpha=100`, `rmu_steering=20` are starting values inherited from the reference code,
-not calibrated robot settings. There is no FM ascent/descent term in RMU's objective: forget and
-retain FM losses are logged as diagnostics alongside `forget_rmu`, `retain_rmu` and gradient norm.
+not calibrated robot settings. The steering coefficient is the target's per-token norm, so it only
+means something relative to the block's activations: each step logs `hidden_norm` (the mean per-token
+norm of the forget batch's action tokens at the block; at step 1 that of theta0) and `steering_ratio`
+(steering / hidden_norm). There is no FM ascent/descent term in RMU's objective. Each forward stops
+right after the target block (nothing downstream enters the objective, and running it would only add
+to the measured cost); the fixed per-task FM probes track the FM losses.
 
 ## Benchmark entry point and measurements
 
-`scripts/main_run.py --methods` accepts explicit method variants without adding uncalibrated
-methods to the default main experiment. It plans the full S1 stream, including later learning,
-the second unlearning request, retrain oracles, the purge/control branches (automatically included),
-and the existing feature/Fisher extraction. Reports and drift selection read the actual plan and
-preserve override values rather than collapsing different rates/scales into one method name.
-
-Example on a configured Linux GPU host, after the standard setup (rates below are provisional):
+Both methods are calibrated in round 3 with the other methods (`scripts/calibrate.py`, run `cal`,
+reusing LA and LA/LB): task arithmetic at `unlearn_lr` 3e-7, 1e-6, 3e-6 (scale 1) and 1e-6 at scale
+2; RMU at `unlearn_lr` 1e-5 and 5e-5, on DiT block 0 and block 7. After the round sets their values in
+`vlu/config.py`, they join `METHODS` in `scripts/main_run.py`, or are added to the same main run:
 
 ```bash
-source slurm/env.sh
-"$MAIN_PY" scripts/main_run.py --run ta_rmu_s0 --seed 0 \
-  --methods 'purge,task_arithmetic@unlearn_lr=1e-5,rmu@unlearn_lr=1e-5'
-"$MAIN_PY" scripts/submit.py --run ta_rmu_s0 --workers large:1
+"$MAIN_PY" scripts/main_run.py --run goal_s0 --methods 'rmu@unlearn_lr=5e-5+rmu_layer=7'
 ```
 
-After workers complete, collect drift and reports:
-
-```bash
-"$MAIN_PY" scripts/main_drift.py --run ta_rmu_s0
-"$MAIN_PY" scripts/main_report.py --run ta_rmu_s0 --out "$VLU_STORE/ta_rmu_report"
-```
-
-Use another run name with `--seed 1` for independent training seeds. `scripts/metrics.py --runs`
-can aggregate them. A scale or steering sweep is expressed by comma-separated method specs with
-`@task_arithmetic_scale=...` or `@rmu_steering=...` alongside explicit rates. Choose hyperparameters
-on calibration tasks before reporting main benchmark results.
+`--methods` replaces the default method list for that call (purge is always added) and the plan only
+grows, so methods already planned stay. Do not start a separate run (for example `ta_rmu_s0`) for them:
+every run trains its own nodes under `runs/<run>/`, so it would retrain the whole stream (LA..LE at 10k
+steps each, and the oracles) for two methods. Reports and drift selection read the actual plan and
+preserve override values rather than collapsing different rates/scales into one method name. For
+independent training seeds, a run per seed (`--run goal_s1 --seed 1`) is needed anyway;
+`scripts/metrics.py --runs` aggregates them.
 
 | Measurement group | Existing outputs used for both methods |
 |---|---|
@@ -196,3 +195,16 @@ USE_TF=0 python tests/check_groot_rmu.py /tmp/groot_dit.py
 
 The second check requires diffusers 0.35.1, already part of the pinned GR00T environment. The audit
 used Python 3.13.5 and CPU torch 2.9.1; it did not run GR00T's pinned CUDA torch 2.7.1 environment.
+
+## Review fixes — 2026-11-27
+
+- The documented `ta_rmu_s0` run would have retrained the whole stream; both methods are now in calibration
+  round 3 and join the main run `goal_s0` afterwards (section above, `scripts/main_run.py`).
+- RMU's forwards end after the target block (`tests/test_task_arithmetic_rmu.py` checks that nothing
+  downstream runs); the FM diagnostics computed downstream are gone, `hidden_norm` and `steering_ratio` added.
+- `tests/check_groot_rmu.py` defaults to the pinned GR00T checkout's `dit.py` (`$GR00T_DIR`, the same commit
+  ead52833 whose hash it checks; GR00T's uv.lock pins diffusers 0.35.1) and is one of `scripts/run_local.sh`'s
+  self-tests; it reports a skip where no GR00T environment exists.
+- Memory (reasoning, not measured): task arithmetic's fit is a plain AdamW fine-tune, about GA's measured 33.4
+  GiB; RMU computes gradients of one block only, no more than that. Neither changes weights inside a step, so
+  autocast's weight cache needs no clearing.

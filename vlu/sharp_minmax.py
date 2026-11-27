@@ -4,7 +4,8 @@ The second gradient is masked BEFORE blending: g0 + sign*lambda*(mask*g1 - g0).
 In particular, forget maximization at lambda=1 uses 2*g0 - mask*g1, including
 updates outside the forget partition. This is the literal published/released update.
 
-Default: the paper's constant-rate SGD, momentum .9 and decay 5e-4. The released
+Class defaults: the paper's constant-rate SGD, momentum .9 and decay 5e-4 (the GR00T recipe, vlu/config.py,
+uses decay 0 and explains why). The released
 training script's AdamW override is available explicitly. Each phase owns an
 independent native optimizer over all trainable weights. See PAPER_ALIGNMENT.md.
 """
@@ -14,7 +15,7 @@ import torch
 from torch.nn.modules.batchnorm import _BatchNorm
 
 from vlu.model import check_finite, trainable_named_parameters
-from vlu.updates import clip_, gradients
+from vlu.updates import gradients, total_norm
 
 
 @contextmanager
@@ -99,9 +100,10 @@ class SharpMinMaxUpdate:
     def _active(self, name, forget):
         return self.masks[name] if forget else ~self.masks[name]
 
-    def _phase(self, model, inputs, named, forget, max_grad_norm=float("inf")):
-        """Full-gradient SAM perturbation, then the authors' second-gradient-only mask.
-        No gradient clipping: Algorithm 2 and the released training loop do not clip."""
+    def _phase(self, model, inputs, named, forget):
+        """Full-gradient SAM perturbation, then the authors' second-gradient-only mask. Returns the loss, the
+        blended gradients and their norm. No gradient clipping: Algorithm 2 and the released training loop
+        do not clip."""
         names, params = list(named), list(named.values())
         coefficient = -(1 - self.alpha) if forget else self.alpha
         cpu_rng = torch.get_rng_state()
@@ -115,15 +117,18 @@ class SharpMinMaxUpdate:
                 g1 = gradients(coefficient * second_loss, params)
         sign = -1 if forget else 1
         blended = []
-        for name, base, second in zip(names, g0, g1):
+        for i, name in enumerate(names):
+            base, second = g0[i], g1[i]
+            g0[i] = g1[i] = None  # memory: drop each tensor's inputs once its blend exists
             if base is None and second is None:
                 blended.append(None)
                 continue
             base = torch.zeros_like(second) if base is None else base
             masked = torch.zeros_like(base) if second is None else second * self._active(name, forget)
             blended.append(base + sign * self.strength * (masked - base))
+            del base, second, masked
         check_finite({str(i): g for i, g in enumerate(blended) if g is not None}, "sharpness gradients")
-        return loss.detach(), blended, clip_(blended, float("inf"))
+        return loss.detach(), blended, total_norm(blended)
 
     def step(self, model, batch, optimizer, max_grad_norm):
         named = trainable_named_parameters(model)
@@ -136,8 +141,12 @@ class SharpMinMaxUpdate:
             loss, grads, norm = self._phase(model, batch[phase], named, forget)
             for p, g in zip(named.values(), grads):
                 p.grad = g
+            p = g = None  # the loop variables would keep the last gradient alive
             opt.step()
             opt.zero_grad(set_to_none=True)
+            # Memory: the retain phase's gradients (one weight copy) must not stay alive through the forget
+            # phase, whose second backward is the step's peak (about NPO-RT's peak on GR00T, ~40 GiB).
+            del grads
             # AdamW/SGD changed weights inside train.py's enclosing autocast region.
             torch.clear_autocast_cache()
             check_finite(named, f"Sharp MinMax {phase} update")
