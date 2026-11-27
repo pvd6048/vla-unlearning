@@ -1,4 +1,8 @@
-"""Small interface for methods whose update is more than loss.backward(); optimizer.step()."""
+"""Small interface for methods whose update is more than loss.backward(); optimizer.step().
+
+A rule may additionally define finalize(model) -> metrics. train.py calls it before publishing
+the final checkpoint, and logs new probes of the transformed weights (e.g. task-vector negation).
+"""
 from typing import Protocol
 
 import torch

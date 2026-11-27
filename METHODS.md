@@ -211,6 +211,14 @@ The actual author SAM matches over 32 configurations and four SGD momentum/decay
 CPU tests cover bf16 current-weight behavior, exact ranks, missing-gradient counters and resume.
 No GPU-memory fit, energy, cost advantage or LIBERO performance is claimed for these changes.
 
+## Task arithmetic and RMU-DiT
+
+The implementation/source mapping, checkpoint semantics, cost accounting and benchmark status
+for these additions are in [TASK_ARITHMETIC_RMU.md](TASK_ARITHMETIC_RMU.md).
+`task_arithmetic` uses a fresh forget-task FM fine-tune followed by exact weight-vector negation.
+`rmu` keeps the reference activation objective and positive-uniform target, adapted to valid
+action tokens of one trainable GR00T DiT block. Their operation notes pin the original author commits.
+
 ## 4. SSD (Selective Synaptic Dampening)
 
 | | Official code | Ours | |

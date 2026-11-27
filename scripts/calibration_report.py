@@ -70,7 +70,8 @@ def perf(log: list[dict]) -> tuple[str, str, str]:
 
 # What an op's method reports about itself (op.json notes), shown in the reports' tables.
 NOTES = ("dampened_fraction", "kept_fraction", "batch_forget_retain", "ssd_reference", "forget_share", "assd_alpha",
-         "assd_percentile", "retain_coeff")
+         "assd_percentile", "retain_coeff", "implementation_variant", "actual_forget_fraction",
+         "task_arithmetic_scale", "auxiliary_fit_steps", "rmu_layer", "rmu_alpha", "rmu_steering")
 
 
 def method_info(node: Node) -> str:
@@ -78,6 +79,10 @@ def method_info(node: Node) -> str:
     layers VLA-Forget selected, ...; '' if none."""
     notes = json.loads((node.dir / "op.json").read_text()).get("notes", {}) if (node.dir / "op.json").exists() else {}
     extra = {k: notes[k] for k in NOTES if k in notes}
+    for record in reversed(train_log(node)):
+        if record.get("stage") == "finalize":
+            extra.update({k: record[k] for k in ("task_vector_norm", "task_edit_norm") if k in record})
+            break
     if (node.dir / "vlaforget.json").exists():
         vf = json.loads((node.dir / "vlaforget.json").read_text())
         extra["selected"] = {s: d["selected"] for s, d in vf["stages"].items()}
@@ -86,13 +91,17 @@ def method_info(node: Node) -> str:
 
 
 def cost(node: Node) -> str:
-    """GPU-minutes of the op over all its sessions (vlu/run_op.py's cost.json), '-' if not recorded; '*' = a
+    """Method GPU-minutes over all sessions (legacy session time if detailed costs are absent); '*' = a
     lower bound (a session was killed before it could record its time)."""
     path = node.dir / "cost.json"
     if not path.exists():
         return "-"
     c = json.loads(path.read_text())
-    return f"{c['seconds'] / 60:.1f}" + ("" if c["complete"] else "*")
+    efficiency = c.get("efficiency", {})
+    method = efficiency.get("method")
+    seconds = method["seconds"] if method else c["seconds"]
+    complete = c["complete"] and not efficiency.get("unmeasured_sessions")
+    return f"{seconds / 60:.1f}" + ("" if complete else "*")
 
 
 EFFICIENCY_NOTE = (

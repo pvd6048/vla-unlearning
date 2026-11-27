@@ -41,3 +41,17 @@ Algorithm 1 recovery using the current anchor between refreshes, weighted empty-
 projected tensors and exact resume. See [PAPER_ALIGNMENT.md](../PAPER_ALIGNMENT.md) for the optional
 pinned-author source comparisons and their limits.
 These run on CPU and are included in the local runner (Slurm's check already discovers all tests).
+
+`python tests/test_task_arithmetic_rmu.py` checks task-vector negation against an independent
+forget-task fit, RMU's two-step reference objective, action masks, restricted update scope, reference
+inputs, hook cleanup and deterministic stochastic-resume behavior, including interrupted finalization.
+`python tests/test_method_benchmarks.py` checks benchmark variants, S1/oracle/drift planning, every
+stream metric, report generation and efficiency exports on synthetic fixtures. On Windows its
+fcntl import stand-in is only for pure planner/report helpers; worker locking is not tested.
+Both run on CPU; set `USE_TF=0` if optional TensorFlow imports slow down transformers startup.
+
+Optional original-source checks: `check_task_vectors.py` compares against the authors' arithmetic,
+and `check_groot_rmu.py` compares RMU with a full frozen reference using GR00T's actual DiT blocks
+on CPU (diffusers 0.35.1 required). Source downloads, commit pins, hashes and audit scope are
+documented in [TASK_ARITHMETIC_RMU.md](../TASK_ARITHMETIC_RMU.md). These checks need no model weights
+or LIBERO data and are not rollout or GPU-cost benchmarks.

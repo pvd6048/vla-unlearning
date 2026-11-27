@@ -105,6 +105,16 @@ These corrected variants have no calibrated robot-policy rates or measured GPU-m
 The [historical audit](GU_SHARP_AUDIT.md) records earlier variants; its old toy memory estimates do
 not establish hardware fit for this implementation.
 
+## Task arithmetic and RMU
+
+`task_arithmetic` fits the forget task and negates the resulting vector from the pre-unlearning
+checkpoint. `rmu` steers valid action-token activations in one trainable DiT block toward a fixed
+random target while preserving retain activations. Both use the shared training/resume and
+evaluation/cost pipelines; explicit learning rates are required until calibration.
+
+See [TASK_ARITHMETIC_RMU.md](TASK_ARITHMETIC_RMU.md) for the author mappings, adaptations, tests,
+benchmark status and a full S1 benchmark command using `scripts/main_run.py --methods`.
+
 ## One-time setup (login node)
 
 ```bash

@@ -49,7 +49,7 @@ def main():
     plan = load_plan(run)
     trained = [Node.from_path(run, i["node"]) for i in plan if i["kind"] == "train"]
     unlearn = [n for n in trained if n.last_op.kind == "U"]
-    methods = list(dict.fromkeys(n.last_op.method for n in unlearn))
+    methods = list(dict.fromkeys(n.last_op.method_spec for n in unlearn))
 
     # --- Success rates ---------------------------------------------------------------------------
     evaluated = sorted({i["node"] for i in plan if i["kind"] == "eval"})  # path order = the tree, depth first

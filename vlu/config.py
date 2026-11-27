@@ -92,6 +92,10 @@ class Recipe:
     gu_cap: float = 0.5
     gu_forget_weight: float = 1.5  # gamma in the authors' GeometricUnlearn.yaml
     gu_retain_weight: float = 1.0  # alpha; set gamma=1 for a matched NPO-RT control
+    task_arithmetic_scale: float = 1.0  # theta0 - scale * (forget-fitted theta - theta0)
+    rmu_layer: int = 0  # train only this DiT block; preserve the baseline checkpoint's full scope
+    rmu_alpha: float = 100.0  # retain activation MSE weight; provisional on GR00T
+    rmu_steering: float = 20.0  # norm of the fixed positive-uniform random target; provisional
     # Sharp MinMax: paper CIFAR-100 split and vanilla SAM settings; provisional for GR00T.
     # The forget partition: the weights with the "largest" forget gradients (the paper's App. E.2 and
     # section 4.2: "most salient to F") or the "smallest" (its Algorithm 1, "bottom 10%", and the authors'

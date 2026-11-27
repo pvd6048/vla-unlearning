@@ -110,8 +110,8 @@ The week-1 methods (GA, Gradient Difference, NPO, SSD, SalUn) are **standard bas
 |---|---|---|
 | **VLA-Forget** (2026) | The only dedicated VLA unlearning method we found | **Done:** ported in `vlu/vlaforget.py` (staged LoRA, PCGrad, velocity-KL) |
 | **LACU** (ECCV 2026) | State of the art for *continual* unlearning in diffusion models, and GR00T's action head is diffusion-family | Medium: replace "nearest concept" with "nearest kept task" in GR00T feature space |
-| **RMU-style representation unlearning** | Strong recent method family, and listed in the team doc. Pushes forget-task features toward a random vector while keeping retain features unchanged. | Low |
-| **Task-vector negation** | Needed anyway for the core forgetting-vs-unlearning question (§5) | Low: subtract task B's fine-tuning delta |
+| **RMU-style representation unlearning** | Pushes forget-task features toward a random vector while keeping retain features unchanged. | **Implemented:** `vlu/rmu.py`, masked DiT-block adaptation; calibration and real benchmarks pending |
+| **Task-vector negation** | Needed for the core forgetting-vs-unlearning question (§5) | **Implemented:** `vlu/task_arithmetic.py`, fresh forget-only fit then negation; calibration and real benchmarks pending |
 | *Optional:* SimNPO, FIT, AKLN | Improved NPO; methods built for repeated unlearning requests | Add if time allows |
 
 These choices come from our reading of the 2025–26 literature; there is no single shared leaderboard, and rankings vary by benchmark.
@@ -142,7 +142,7 @@ OpenVLA-7B with LoRA fits on the 96 GB GPU. VLA-Forget's FC/FAD metrics are defi
 
 | Week | Work |
 |---|---|
-| 2 | Short N1.5 sanity run (reproduce Liu et al.). Implement task-vector negation and RMU-style. Start the VLA-Forget port. |
+| 2 | Short N1.5 sanity run (reproduce Liu et al.). Calibrate and benchmark the implemented task-vector negation and RMU-DiT ports (TASK_ARITHMETIC_RMU.md). |
 | 3 | Finish the VLA-Forget port + OpenVLA bridge check. Implement LACU. Run all new methods on the week-1 stream. |
 
 **Deliverable:** the week-1 results table extended with the state-of-the-art rows.

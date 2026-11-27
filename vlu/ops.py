@@ -192,6 +192,36 @@ def _plan_graddiff(node: Node, recipe: Recipe) -> OpPlan:
     return OpPlan({"forget": forget, "retain": retain}, loss_fn, recipe.unlearn_steps, recipe.unlearn_lr)
 
 
+def _plan_task_arithmetic(node: Node, recipe: Recipe) -> OpPlan:
+    from vlu.task_arithmetic import TaskArithmeticUpdate
+
+    forget, _ = _forget_retain(node, recipe)
+    return OpPlan({"forget": forget}, None, recipe.unlearn_steps, recipe.unlearn_lr,
+                  {"implementation_variant": "forget_finetune_then_negate",
+                   "reference_commit": "mlfoundations/task_vectors@826a64c67082fab0f40628233287948f0f8d7fa3",
+                   "task_arithmetic_scale": recipe.task_arithmetic_scale,
+                   "auxiliary_fit_steps": recipe.unlearn_steps},
+                  update_rule=TaskArithmeticUpdate(recipe.task_arithmetic_scale))
+
+
+def _plan_rmu(node: Node, recipe: Recipe) -> OpPlan:
+    from vlu.rmu import RMUUpdate
+
+    forget, retain = _forget_retain(node, recipe)
+    plan = OpPlan({"forget": forget, "retain": retain}, None, recipe.unlearn_steps, recipe.unlearn_lr,
+                  {"implementation_variant": "masked_dit_block_rmu", "rmu_layer": recipe.rmu_layer,
+                   "reference_commit": "centerforaisafety/wmdp@c0b6c12bb0de3decf9c13bb13f9f1aa15754a132",
+                   "rmu_alpha": recipe.rmu_alpha, "rmu_steering": recipe.rmu_steering})
+
+    def prepare(ctx):
+        plan.update_rule = RMUUpdate(ctx.model, recipe.rmu_layer, recipe.rmu_alpha,
+                                     recipe.rmu_steering, ctx.seed * 1000 + ctx.node.depth)
+        plan.notes["edited_parameters"] = list(plan.update_rule.names)
+
+    plan.prepare = prepare
+    return plan
+
+
 def _plan_gu(node: Node, recipe: Recipe) -> OpPlan:
     from vlu.gu import GeometricUpdate
 
@@ -520,6 +550,8 @@ def _plan_vlaforget(node: Node, recipe: Recipe) -> OpPlan:
 # buffer, which happens automatically because the task is no longer retained after the U op.
 # (ZERO_STEP_METHODS, in vlu/nodes.py: purge.)
 UNLEARN_METHODS: dict[str, Callable[[Node, Recipe], OpPlan]] = {
+    "task_arithmetic": _plan_task_arithmetic,
+    "rmu": _plan_rmu,
     "ga": _plan_ga,
     "graddiff": _plan_graddiff,
     "gu": _plan_gu,
