@@ -5,6 +5,13 @@ settings of 8 unlearning methods, and evaluates everything in the LIBERO simulat
 each method costs: time, memory, compute and the GPU's energy. The results tell
 us how to set our hyperparameters. You don't need to interpret anything: run it and send back one file.
 
+GU and Sharp were realigned to their papers on 2026-11-27; see [PAPER_ALIGNMENT.md](PAPER_ALIGNMENT.md).
+Their new override tokens create fresh calibration nodes. Earlier GU/Sharp results, checkpoints,
+sampled masks and toy memory estimates must not be reused. Sharp now uses constant-rate SGD by default,
+with a provisional 2e-4/2e-3/2e-2 grid and both mask orientations; GU uses gamma=1.5, alpha=1.
+The corrected variants have not been measured on GR00T here. The existing 44-GB free-memory preflight
+is not evidence that these variants fit; their actual GPU peak and full-pass preparation cost need measurement.
+
 ## What the machine needs
 
 - Linux (x86_64) with NVIDIA GPUs. At least one GPU with 48 GB or more (e.g. an RTX A6000) for

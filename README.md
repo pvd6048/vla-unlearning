@@ -76,32 +76,34 @@ Run `python tests/test_npo.py` for CPU formula, gradient, reference, RNG and res
 
 ## GU and Sharp MinMax
 
-Three methods come from these two papers, all requiring a retained task besides the one unlearned:
-- `npo_rt_gu` (`vlu/gu_npo_rt.py`): Geometric-disentanglement Unlearning as the paper uses it, a plug-in on a
-  base objective, here NPO-RT. The last 3 DiT blocks and the output layers get NPO-RT's gradient projected
-  in Adam's metric: the forget part off a retain subspace (up to 8 directions from a reference-velocity
-  anchor, the FM stand-in of the paper's KL), keeping only opposite-signed tangential parts (capped), the
-  retain part onto it. The authors' defaults; see METHODS.md for each choice. Calibrated in round 3.
-- `sharp_minmax` (`vlu/sharp_minmax.py`): saliency-split retain SAM / forget sharpness maximization (Tang &
-  Khanna). `sharp_select` picks the forget partition: the `largest` forget gradients (the paper's App. E.2)
-  or the `smallest` (its Algorithm 1 and the authors' code). Calibrated in round 3 with both.
-- `gu` (`vlu/gu.py`): a GU-inspired projection of the AdamW proposal (report it as GU-FM, strict proposal
-  projection). It is not the authors' algorithm, and at rank 2 over all trainable weights it needs about
-  53 GB of GPU memory, so it is not calibrated.
+The primary methods are `npo_rt_gu` and `sharp_minmax`. Their update equations now follow the papers
+and pinned author code; [PAPER_ALIGNMENT.md](PAPER_ALIGNMENT.md) records equations, source ambiguities,
+necessary VLA adaptations and executed comparisons.
 
-The [source and numerical audit](GU_SHARP_AUDIT.md) distinguishes verified computations from
-paper-reproduction claims. Example commands after training `LA/LB` (illustrative rates):
+- `npo_rt_gu`: GU Algorithm 1 on NPO-RT, using the anchor gradient for recovery and projection on the
+  last three DiT blocks/output layers. Author defaults gamma=1.5, alpha=1, basis rank 8 and cap .5.
+  The flow-policy anchor is a reference-velocity proxy for KL.
+- `sharp_minmax`: literal Algorithm 2, full-weight SAM perturbation and second-gradient-only masking,
+  with two independent native optimizers. Default constant-rate SGD; `sharp_optimizer=adamw` selects the
+  released code's optimizer override. Default `sharp_select=smallest` follows Algorithm 1/code;
+  `largest` is the Appendix E.2 alternative. Saliency uses a full forget pass and exact ranks.
+- `gu`: legacy GU-inspired strict proposal projection. It remains available for historical experiments
+  but is excluded from calibration and should not be reported as the primary published-GU baseline.
+
+After training `LA/LB`, fresh illustrative operations (rates require VLA calibration):
 
 ```bash
-python -m vlu.run_op --run goal_s0 --node 'LA/LB/UB-npo_rt_gu@unlearn_lr=1e-5'
-python -m vlu.run_op --run goal_s0 --node 'LA/LB/UB-sharp_minmax@unlearn_lr=1e-6+sharp_select=smallest'
+python -m vlu.run_op --run goal_s0 --node 'LA/LB/UB-npo_rt_gu@unlearn_lr=1e-5+gu_forget_weight=1.5'
+python -m vlu.run_op --run goal_s0 --node 'LA/LB/UB-sharp_minmax@unlearn_lr=2e-3+sharp_optimizer=sgd+sharp_select=smallest'
 ```
 
-None has a calibrated learning rate yet; they join the main run after round 3. GU on NPO-RT checkpoints
-its basis; Sharp MinMax saves its mask, both partitions' AdamW moments (one shared pair of buffers) and
-step counts. All support the shared loop's probes, snapshots and resume. Compare measured compute as well as
-step counts: Sharp MinMax makes four forward/gradient evaluations and two partition updates per step; GU on
-NPO-RT one forward more than NPO-RT on every second step (the reference's, for the anchor).
+GU checkpoints its basis; Sharp checkpoints its mask and independent optimizer states. Old algorithm
+states/masks are rejected. All retain probes, snapshots, resume and cost logging. Sharp performs four
+forward/gradient evaluations and two optimizer updates per request step; GU evaluates the retain
+reference every step, with anchor differentiation every step and basis refresh every second step.
+These corrected variants have no calibrated robot-policy rates or measured GPU-memory results yet.
+The [historical audit](GU_SHARP_AUDIT.md) records earlier variants; its old toy memory estimates do
+not establish hardware fit for this implementation.
 
 ## One-time setup (login node)
 

@@ -31,13 +31,13 @@ non-current-device RNG check is skipped unless two CUDA devices are available. T
 actual operation plans; only GR00T imports and the training loop's CUDA/worker plumbing are stubbed.
 
 `python tests/test_gu.py` checks metric projections, actual AdamW displacements and exact resume.
-`python tests/test_sharp_minmax.py` checks sharp min/max signs, partition isolation, ASAM perturbations, current weights under CUDA autocast (skipped without CUDA),
-temporary-weight restoration (only the perturbed entries are saved), paired randomness, saved saliency masks
-(largest and smallest split, live embodiment rows only), that the shared moment buffers give exactly the
-update of two independent torch AdamW optimizers, and resume. It also trains GU, Sharp MinMax and GU on NPO-RT
-with probes/snapshots on the GR00T-shaped fake under CPU plumbing.
-`python tests/test_gu_npo_rt.py` checks GU on NPO-RT: known-answer whitened projections (retain-orthogonal
-forget part, sign-selective capped tangent, retain part in the basis' span), basis growth (Gram-Schmidt,
-residual threshold, size cap, float16), the projected tensors, NPO-RT's exact update while the basis is empty,
-exact resume and planning checks.
+`python tests/test_sharp_minmax.py` checks literal masked-g1 blends, cross-partition forget updates,
+SAM/ASAM perturbations, current weights under bf16 autocast (CPU or CUDA), restored temporary weights,
+paired randomness, BatchNorm buffers, full-pass saved masks, independent native optimizer counters
+and exact resume. It also trains the methods on the GR00T-shaped CPU fake.
+`python tests/test_saliency.py` checks exact ranks, tie counts, unused embodiment rows and full data coverage.
+`python tests/test_gu_npo_rt.py` checks whitened projections, sign-selective caps, basis growth,
+Algorithm 1 recovery using the current anchor between refreshes, weighted empty-basis behavior,
+projected tensors and exact resume. See [PAPER_ALIGNMENT.md](../PAPER_ALIGNMENT.md) for the optional
+pinned-author source comparisons and their limits.
 These run on CPU and are included in the local runner (Slurm's check already discovers all tests).

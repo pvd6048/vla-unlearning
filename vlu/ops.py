@@ -40,6 +40,20 @@ class OpContext:
     modality_configs: dict
     seed: int
 
+    def full_task_batches(self, task: str, batch_size: int):
+        """Visit every valid forget frame once, without augmentation (Sharp Algorithm 1)."""
+        from vlu.data import make_sample
+        was_training = self.processor.training
+        self.processor.eval()
+        try:
+            demos = self.demos[task]
+            for start in range(0, len(demos.index), batch_size):
+                samples = [make_sample(self.processor, self.modality_configs, demos, episode, step)
+                           for episode, step in demos.index[start:start + batch_size]]
+                yield self.processor.collator(samples)["inputs"]
+        finally:
+            self.processor.train() if was_training else self.processor.eval()
+
     def batches(self, slots: Slots, n: int, stream: int = 0):
         """n batches with the given slots, without augmentation, reproducible from (seed, stream)."""
         was_training = self.processor.training
@@ -93,7 +107,8 @@ def frozen_reference(model: torch.nn.Module) -> torch.nn.Module:
     return ref
 
 
-def accumulate_grads(ctx: OpContext, slots: Slots, n: int, stream: int, square: bool) -> dict[str, torch.Tensor]:
+def accumulate_grads(ctx: OpContext, slots: Slots, n: int, stream: int, square: bool,
+                     batches=None) -> dict[str, torch.Tensor]:
     """Sum over n batches of each trainable parameter's L_FM gradient (square=False) or squared
     gradient (square=True, i.e. n x the diagonal empirical Fisher of batch gradients)."""
     model = ctx.model
@@ -104,7 +119,7 @@ def accumulate_grads(ctx: OpContext, slots: Slots, n: int, stream: int, square: 
     # The op's cost (vlu/cost.py; nothing without an active meter): each batch's compute and FLOPs, and its wait
     # for the batch, which is built here on the main process (no DataLoader workers, unlike training)
     batch_end = time.monotonic()
-    for inputs in ctx.batches(slots, n, stream):
+    for inputs in ctx.batches(slots, n, stream) if batches is None else batches:
         batch_start = time.monotonic()
         model.zero_grad(set_to_none=True)
         with cost.flops("importance"):
@@ -189,55 +204,58 @@ def _plan_gu(node: Node, recipe: Recipe) -> OpPlan:
 
 
 def _plan_sharp_minmax(node: Node, recipe: Recipe) -> OpPlan:
+    from vlu.saliency import ranked_masks
     from vlu.sharp_minmax import SharpMinMaxUpdate
 
     forget, retain = _forget_retain(node, recipe)
     plan = OpPlan({"forget": forget, "retain": retain}, None, recipe.unlearn_steps, recipe.unlearn_lr,
-                  {"sharp_select": recipe.sharp_select,
-                   "sharp_forget_fraction": recipe.sharp_forget_fraction, "sharp_alpha": recipe.sharp_alpha,
-                   "sharp_rho": recipe.sharp_rho, "sharp_strength": recipe.sharp_strength,
-                   "sharp_adaptive": recipe.sharp_adaptive, "importance_batches": recipe.importance_batches,
-                   "implementation_variant": "partition_safe_fm_adamw",
-                   "reference_commit": "HaoranTang/sharp-unlearn@98c41d9e344bd0942421bdcdeee85878d6a657b1"})
+                  {key: getattr(recipe, key) for key in (
+                      "sharp_select", "sharp_forget_fraction", "sharp_alpha", "sharp_rho",
+                      "sharp_strength", "sharp_adaptive", "sharp_optimizer", "sharp_momentum",
+                      "sharp_weight_decay")})
+    plan.notes.update(implementation_variant="paper_algorithm_2_v3", saliency_pass="full_forget_epoch",
+                      reference_commit="HaoranTang/sharp-unlearn@98c41d9e344bd0942421bdcdeee85878d6a657b1")
 
     def prepare(ctx: OpContext):
         path = ctx.node.dir / "sharp_minmax_mask.pt"
         params = trainable_named_parameters(ctx.model)
         embodiment = embodiment_index()
+        task = node.ops[-1].task
+        frames = len(ctx.demos[task].index)
+        if not frames:
+            raise ValueError("Sharp saliency requires nonempty forget data")
+        settings = (recipe.sharp_forget_fraction, recipe.sharp_select, recipe.batch_size, frames, ctx.seed)
         if path.exists():
             saved = torch.load(path, map_location="cpu", weights_only=True)
-            if (saved["fraction"], saved["batches"], saved.get("select", "largest")) != (
-                    recipe.sharp_forget_fraction, recipe.importance_batches, recipe.sharp_select):
-                raise ValueError("Sharp MinMax mask was prepared with a different recipe")
+            if saved.get("version") != 2 or tuple(saved.get("settings", ())) != settings:
+                raise ValueError("Sharp mask uses an older algorithm or different recipe; start a fresh operation")
             masks = {n: m.to(params[n].device) for n, m in saved["masks"].items()}
         else:
-            grads = accumulate_grads(ctx, forget, recipe.importance_batches, stream=0, square=False)
-            saliency = {name: g.abs() for name, g in grads.items()}
-            live = {n: live_part(n, s, embodiment) for n, s in saliency.items()}
-            fraction = recipe.sharp_forget_fraction
-            if recipe.sharp_select == "largest":  # as SalUn: zero saliency is never selected
-                threshold = top_fraction_threshold(live, fraction)
-                masks = {n: (s >= threshold) & (s > 0) for n, s in saliency.items()}
-            else:  # the authors' generate_mask.py: the lowest-ranked entries, zeros included
-                threshold = top_fraction_threshold(live, 1 - fraction)  # the fraction-quantile
-                masks = {}
-                for n, s in saliency.items():
-                    mask = torch.zeros_like(s, dtype=torch.bool)
-                    view = live_part(n, mask, embodiment)  # only the weights that can change
-                    view.copy_(live_part(n, s, embodiment) <= threshold)
-                    masks[n] = mask
+            devices = sorted({p.device.index for p in params.values() if p.is_cuda})
+            # Cache hits and misses must leave the training RNG identical.
+            with torch.random.fork_rng(devices=devices):
+                torch.manual_seed(ctx.seed * 1000 + 100)
+                grads = accumulate_grads(ctx, forget, 0, stream=0, square=False,
+                                         batches=ctx.full_task_batches(task, recipe.batch_size))
+            for g in grads.values():
+                g.abs_()
+            masks = ranked_masks(grads, recipe.sharp_forget_fraction, recipe.sharp_select, embodiment)
+            del grads
             ctx.node.dir.mkdir(parents=True, exist_ok=True)
             tmp = path.with_name(path.name + ".tmp")
-            torch.save({"fraction": fraction, "batches": recipe.importance_batches, "select": recipe.sharp_select,
-                        "masks": masks}, tmp)
+            torch.save({"version": 2, "settings": settings, "masks": masks}, tmp)
             tmp.replace(path)
         selected = sum(int(live_part(n, m, embodiment).sum()) for n, m in masks.items())
         total = sum(live_part(n, m, embodiment).numel() for n, m in masks.items())
         if not 0 < selected < total:
-            raise ValueError("Sharp MinMax saliency produced an empty partition; check fraction/data")
-        plan.notes["actual_forget_fraction"] = selected / total
+            raise ValueError("Sharp MinMax saliency produced an empty partition")
+        plan.notes.update(actual_forget_fraction=selected / total, saliency_frames=frames,
+                          saliency_batches=math.ceil(frames / recipe.batch_size))
         plan.update_rule = SharpMinMaxUpdate(masks, recipe.sharp_alpha, recipe.sharp_rho,
-                                             recipe.sharp_strength, recipe.sharp_adaptive)
+                                             recipe.sharp_strength, recipe.sharp_adaptive,
+                                             recipe.sharp_optimizer, recipe.sharp_momentum,
+                                             recipe.sharp_weight_decay)
+        plan.update_rule.check_masks(params)
 
     plan.prepare = prepare
     return plan
@@ -309,15 +327,18 @@ def _plan_npo_rt_gu(node: Node, recipe: Recipe) -> OpPlan:
 
     forget, retain = _forget_retain(node, recipe)
     plan = OpPlan({"forget": forget, "retain": retain}, None, recipe.unlearn_steps, recipe.unlearn_lr,
-                  {"npo_beta": recipe.npo_beta, "retain_coeff": 1.0, "gu_basis_k": recipe.gu_basis_k,
+                  {"npo_beta": recipe.npo_beta, "retain_coeff": recipe.gu_retain_weight, "gu_basis_k": recipe.gu_basis_k,
                    "gu_last_blocks": recipe.gu_last_blocks, "gu_refresh_every": recipe.gu_refresh_every,
                    "gu_cap": recipe.gu_cap, "retain_anchor": "masked mean squared velocity difference to theta0",
+                   "gu_forget_weight": recipe.gu_forget_weight, "gu_retain_weight": recipe.gu_retain_weight,
+                   "implementation_variant": "paper_algorithm_1_velocity_anchor_v2",
                    "reference_commit": "Lemutisme/geo-unlearning@bbe4d5077b21f6ded0ddbff8bf49b0336260626a"})
 
     def prepare(ctx: OpContext):
         params = trainable_named_parameters(ctx.model)
         names = projected_names(list(params), recipe.gu_last_blocks)
-        rule = GuNpoRt(recipe.npo_beta, names, recipe.gu_basis_k, recipe.gu_refresh_every, recipe.gu_cap)
+        rule = GuNpoRt(recipe.npo_beta, names, recipe.gu_basis_k, recipe.gu_refresh_every, recipe.gu_cap,
+                       recipe.gu_forget_weight, recipe.gu_retain_weight)
         rule.attach(ctx.model, frozen_reference(ctx.model))
         plan.notes["projected_tensors"] = len(names)
         plan.notes["projected_fraction"] = sum(params[n].numel() for n in names) / sum(p.numel() for p in params.values())

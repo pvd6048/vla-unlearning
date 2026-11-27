@@ -268,6 +268,10 @@ def check_op(node: Node, recipe: Recipe = RECIPE) -> None:
         cap = effective.gu_cap
         if cap is None or not math.isfinite(cap) or not 0 <= cap <= 1:
             raise ValueError(f"{node}: gu_cap must lie in [0, 1], got {cap!r}")
+        for key in ("gu_forget_weight", "gu_retain_weight"):
+            value = getattr(effective, key)
+            if value is None or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{node}: {key} must be finite and positive")
     if op.method == "sharp_minmax":
         effective = recipe_for(op, recipe)
         if effective.sharp_select not in ("largest", "smallest"):
@@ -280,8 +284,12 @@ def check_op(node: Node, recipe: Recipe = RECIPE) -> None:
             value = getattr(effective, key)
             if value is None or not math.isfinite(value) or value < 0:
                 raise ValueError(f"{node}: {key} must be finite and nonnegative")
-        if not isinstance(effective.importance_batches, int) or effective.importance_batches < 1:
-            raise ValueError(f"{node}: importance_batches must be positive")
+        if effective.sharp_optimizer not in ("sgd", "adamw"):
+            raise ValueError(f"{node}: sharp_optimizer must be 'sgd' or 'adamw'")
+        for key in ("sharp_momentum", "sharp_weight_decay"):
+            value = getattr(effective, key)
+            if value is None or not math.isfinite(value) or value < 0:
+                raise ValueError(f"{node}: {key} must be finite and nonnegative")
     if "unlearn_lr" in _KEYS_USED.get(op.method, ()) and recipe_for(op, recipe).unlearn_lr is None:
         raise ValueError(f"{node}: {op.method} has no learning rate yet: set it from the calibration "
                          "(unlearn_lrs in vlu/config.py), or give the op one (@unlearn_lr=...)")
@@ -296,13 +304,13 @@ _KEYS_USED = {
     "ga": _UNLEARN_KEYS,
     "graddiff": _UNLEARN_KEYS,
     "gu": _UNLEARN_KEYS + ("gu_rank",),
-    # No weight_decay: Sharp MinMax trains without it (it would move the inactive partition).
-    "sharp_minmax": tuple(k for k in _UNLEARN_KEYS if k != "weight_decay") + (
-        "importance_batches", "sharp_select", "sharp_forget_fraction", "sharp_alpha", "sharp_rho", "sharp_strength",
-        "sharp_adaptive"),
+    "sharp_minmax": ("unlearn_steps", "unlearn_lr", "batch_size", "sharp_select", "sharp_forget_fraction",
+                     "sharp_alpha", "sharp_rho", "sharp_strength", "sharp_adaptive", "sharp_optimizer",
+                     "sharp_momentum", "sharp_weight_decay"),
     "npo": _UNLEARN_KEYS + ("npo_beta",),
     "npo_rt": _UNLEARN_KEYS + ("npo_beta",),
-    "npo_rt_gu": _UNLEARN_KEYS + ("npo_beta", "gu_basis_k", "gu_last_blocks", "gu_refresh_every", "gu_cap"),
+    "npo_rt_gu": _UNLEARN_KEYS + ("npo_beta", "gu_basis_k", "gu_last_blocks", "gu_refresh_every", "gu_cap",
+                                "gu_forget_weight", "gu_retain_weight"),
     "ssd": ("batch_size", "importance_batches", "ssd_alpha", "ssd_lambda", "ssd_reference", "ssd_adaptive"),
     "salun": _UNLEARN_KEYS + ("salun_keep", "importance_batches"),
     "vlaforget": ("unlearn_steps", "batch_size") + tuple(f"vlaforget.{f.name}" for f in fields(VLAForgetConfig)),
