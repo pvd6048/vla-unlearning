@@ -79,9 +79,12 @@ to the measured cost); the fixed per-task FM probes track the FM losses.
 
 ## Benchmark entry point and measurements
 
-Both methods are calibrated in round 3 with the other methods (`scripts/calibrate.py`, run `cal`,
-reusing LA and LA/LB): task arithmetic at `unlearn_lr` 3e-7, 1e-6, 3e-6 (scale 1) and 1e-6 at scale
-2; RMU at `unlearn_lr` 1e-5 and 5e-5, on DiT block 0 and block 7. After the round sets their values in
+Both methods are calibrated with the other methods (`scripts/calibrate.py`, run `cal`, reusing LA and
+LA/LB). Round 3: task arithmetic at `unlearn_lr` 3e-7, 1e-6, 3e-6 (scale 1) and 1e-6 at scale 2 forgot
+nothing (edit norm 0.2-1.7, ~1% of tauB's 131); RMU at 1e-5 and 5e-5 on DiT blocks 0 and 7 kept A (1.00) and
+partly forgot B (0.68-0.72 at 5e-5), with steering 20 about 50x below the action tokens' hidden norm
+(~760 at block 0, ~1200 at block 7). Round 4: task arithmetic at 3e-6 with scales 5, 20, 50; RMU at block 7
+with steering 300, 1000, 3000 at 1e-4 and 1000 at 5e-5. After the round sets their values in
 `vlu/config.py`, they join `METHODS` in `scripts/main_run.py`, or are added to the same main run:
 
 ```bash

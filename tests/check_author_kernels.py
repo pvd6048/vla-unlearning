@@ -197,7 +197,20 @@ def check_gu_algorithm_1(source):
         author.optimizer_step(optimizer=optimizer)
         error = max(error, (actual-model.weight.grad).abs().max().item())
         torch.testing.assert_close(actual, model.weight.grad, atol=1e-6, rtol=1e-5)
-    print(f"GU complete author gradient rewrite: 10 seeds, gamma=1.5, alpha=.7; max abs error {error:.3g}")
+        # gu_recovery="separate": with the anchor as the retain loss inside the total (Algorithm 1's own
+        # setting), the authors' recovery yields exactly the forget gradient, so their rewrite must equal ours
+        # given the two loss gradients separately.
+        g_forget = torch.randn_like(model.weight)
+        separate = GuNpoRt(.1, ["weight"], 2, 2, .5, gamma=author.gamma, alpha=author.alpha, recovery="separate")
+        separate.initialize(optimizer)
+        separate.basis["weight"] = list(projection.basis["weight"])
+        actual = separate._project("weight", model.weight, g_forget, gr)
+        model.weight.grad = author.gamma * g_forget + author.alpha * gr
+        projection._step = 1  # again a non-refresh step (see above); the basis is unchanged
+        author.optimizer_step(optimizer=optimizer)
+        error = max(error, (actual-model.weight.grad).abs().max().item())
+        torch.testing.assert_close(actual, model.weight.grad, atol=1e-6, rtol=1e-5)
+    print(f"GU complete author gradient rewrite: 10 seeds, gamma=1.5, alpha=.7, both recoveries; max abs error {error:.3g}")
 
 
 if __name__ == "__main__":

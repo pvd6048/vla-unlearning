@@ -242,7 +242,7 @@ def _plan_sharp_minmax(node: Node, recipe: Recipe) -> OpPlan:
                   {key: getattr(recipe, key) for key in (
                       "sharp_select", "sharp_forget_fraction", "sharp_alpha", "sharp_rho",
                       "sharp_strength", "sharp_adaptive", "sharp_optimizer", "sharp_momentum",
-                      "sharp_weight_decay")})
+                      "sharp_weight_decay", "sharp_clip")})
     plan.notes.update(implementation_variant="paper_algorithm_2_v3", saliency_pass="full_forget_epoch",
                       reference_commit="HaoranTang/sharp-unlearn@98c41d9e344bd0942421bdcdeee85878d6a657b1")
 
@@ -284,7 +284,7 @@ def _plan_sharp_minmax(node: Node, recipe: Recipe) -> OpPlan:
         plan.update_rule = SharpMinMaxUpdate(masks, recipe.sharp_alpha, recipe.sharp_rho,
                                              recipe.sharp_strength, recipe.sharp_adaptive,
                                              recipe.sharp_optimizer, recipe.sharp_momentum,
-                                             recipe.sharp_weight_decay)
+                                             recipe.sharp_weight_decay, recipe.sharp_clip)
         plan.update_rule.check_masks(params)
 
     plan.prepare = prepare
@@ -361,14 +361,15 @@ def _plan_npo_rt_gu(node: Node, recipe: Recipe) -> OpPlan:
                    "gu_last_blocks": recipe.gu_last_blocks, "gu_refresh_every": recipe.gu_refresh_every,
                    "gu_cap": recipe.gu_cap, "retain_anchor": "masked mean squared velocity difference to theta0",
                    "gu_forget_weight": recipe.gu_forget_weight, "gu_retain_weight": recipe.gu_retain_weight,
-                   "implementation_variant": "paper_algorithm_1_velocity_anchor_v2",
+                   "gu_recovery": recipe.gu_recovery,
+                   "implementation_variant": "paper_algorithm_1_velocity_anchor_v3",
                    "reference_commit": "Lemutisme/geo-unlearning@bbe4d5077b21f6ded0ddbff8bf49b0336260626a"})
 
     def prepare(ctx: OpContext):
         params = trainable_named_parameters(ctx.model)
         names = projected_names(list(params), recipe.gu_last_blocks)
         rule = GuNpoRt(recipe.npo_beta, names, recipe.gu_basis_k, recipe.gu_refresh_every, recipe.gu_cap,
-                       recipe.gu_forget_weight, recipe.gu_retain_weight)
+                       recipe.gu_forget_weight, recipe.gu_retain_weight, recipe.gu_recovery)
         rule.attach(ctx.model, frozen_reference(ctx.model))
         plan.notes["projected_tensors"] = len(names)
         plan.notes["projected_fraction"] = sum(params[n].numel() for n in names) / sum(p.numel() for p in params.values())

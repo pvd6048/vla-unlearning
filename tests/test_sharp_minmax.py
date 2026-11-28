@@ -154,6 +154,30 @@ class SharpTests(unittest.TestCase):
         torch.testing.assert_close(forget_grad, 2 * g0 - g1 * forget_mask, atol=1e-5, rtol=1e-3)
         self.assertFalse(torch.equal(w_end, w_forget))
 
+    def test_optional_clipping_bounds_each_phase(self):
+        """sharp_clip: each phase's blended gradient reaches its optimizer clipped at max_grad_norm; the logged
+        norm is the one before clipping. Without it the gradient is passed on unchanged (the paper)."""
+        for clip in (False, True):
+            model = Quadratic()
+            rule = make_rule()
+            rule.clip = clip
+            optimizer = rule.make_optimizer(model, .01)
+            rule.initialize(optimizer)
+            seen = []
+            for opt in (optimizer, rule.forget_optimizer):
+                original = opt.step
+                def step(*args, original=original, **kwargs):
+                    seen.append(model.weight.grad.norm().item())
+                    return original(*args, **kwargs)
+                opt.step = step
+            _, metrics = rule.step(model, batches(), optimizer, .01)
+            self.assertEqual(len(seen), 2)
+            if clip:
+                self.assertTrue(all(n <= .01 + 1e-6 for n in seen), seen)
+                self.assertGreater(metrics["grad_norm"], .01)
+            else:
+                self.assertTrue(any(n > .01 for n in seen), seen)
+
     def test_zero_radius_still_updates_outside_forget_selection(self):
         model = Quadratic()
         rule = make_rule(rho=0.)

@@ -37,6 +37,12 @@ layers, basis rank 8, refresh every two steps, fp16 basis storage, fp32 projecti
 residual threshold 1e-3, sign threshold zero, and tangent cap .5.
 Unselected trainable parameters receive the weighted base gradient.
 
+**Update after calibration round 3 (28 Nov):** this recovery (`gu_recovery=anchor`) fed back on GR00T
+(anchor 0.002 -> 0.35, gradient norm 63 -> 1460, A's success rate 0.12-0.60 where NPO-RT kept 1.00).
+`gu_recovery=separate` (round 4) keeps Algorithm 1's equations with one retain loss: g_f is the forget loss's
+own gradient and g_r the retain FM loss's; the anchor only builds the basis. It equals the authors' rewrite
+whenever the retain loss inside g_total is the anchor, Algorithm 1's own setting (`tests/check_author_kernels.py`).
+
 The recovered g_f includes some retain-FM gradient because the anchor differs from the supervised
 retain loss. This is intentional: it is the published/released recovery, rather than an independently
 redefined forget gradient. With an empty basis the update equals the weighted base gradient.
@@ -74,7 +80,9 @@ to all optimized tensors). The paper's 5e-4 is a from-scratch CIFAR regularizer:
 momentum .9 shrinks each weight by lr * wd / (1 - momentum) per optimizer, two per step, so at useful
 SGD rates on GR00T it would shrink the pretrained weights by 18% (lr 0.02) to 99% (lr 0.5) over 1000
 steps and dominate the result.
-No extra gradient clipping or warmup/cosine scheduling is applied.
+No extra gradient clipping or warmup/cosine scheduling is applied by default. `sharp_clip=1` clips each
+phase's gradient at the repo's max_grad_norm (1.0): calibration round 3 ran without it and every variant's
+forget ascent ran away to NaN (round 4 tries it on).
 Two independent native optimizer states preserve per-parameter counters and phase histories.
 
 There are two explicit paper/code ambiguities:

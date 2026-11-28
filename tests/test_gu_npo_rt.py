@@ -214,18 +214,74 @@ class TrainingTests(unittest.TestCase):
         torch.testing.assert_close(p.grad, expected)
         self.assertGreater(rule.last_anchor, 0.)
 
+    def test_separate_recovery_uses_each_loss_gradient(self):
+        """gu_recovery="separate": g_f is the forget (NPO) loss's own gradient and g_r the retain FM loss's;
+        the anchor is computed only on refresh steps (this one is not)."""
+        class Policy(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.action_head = nn.Module()
+                self.action_head.action_decoder = nn.Linear(3, 3, bias=False)
+
+            def forward(self, x):
+                pred = self.action_head.action_decoder(x[:, None])
+                error = (pred.square() - x[:, None]).square()
+                return {"loss": error.mean(), "action_loss": error,
+                        "action_mask": torch.ones_like(error)}
+
+        torch.manual_seed(19)
+        model = Policy()
+        ref = copy.deepcopy(model).requires_grad_(False)
+        with torch.no_grad():
+            model.action_head.action_decoder.weight.add_(.2)
+        name = "action_head.action_decoder.weight"
+        p = dict(model.named_parameters())[name]
+        gamma, alpha = 1.5, .7
+        rule = GuNpoRt(.1, [name], 2, 10, .5, gamma, alpha, recovery="separate")
+        optimizer = torch.optim.AdamW(model.parameters(), lr=.001)
+        optimizer.state[p] = {"exp_avg_sq": torch.ones_like(p)}
+        rule.initialize(optimizer)
+        rule.attach(model, ref)
+        rule.basis[name] = [torch.eye(p.numel())[0].reshape_as(p).half()]
+        rule.calls = 1  # not a refresh step
+        x, y = torch.randn(2, 3), torch.randn(2, 3)
+        out, frozen = model(x), ref(x)
+        ratio = frozen["action_loss"].sum((1, 2)) - out["action_loss"].sum((1, 2))
+        npo = 20 * torch.nn.functional.softplus(.1 * ratio).mean()
+        g_f = torch.autograd.grad(npo, p)[0]
+        g_r = torch.autograd.grad(model(y)["loss"], p)[0]
+        expected = rule._project(name, p, g_f, g_r)
+        original = rule._project
+        seen = []
+
+        def inspect(n, parameter, gf, gr_now):
+            torch.testing.assert_close(gf, g_f)
+            torch.testing.assert_close(gr_now, g_r)
+            seen.append(n)
+            return original(n, parameter, gf, gr_now)
+
+        with patch.object(rule, "_project", side_effect=inspect), patch.object(optimizer, "step"), \
+             patch("vlu.gu_npo_rt.velocity_kl", side_effect=AssertionError("anchor on a non-refresh step")):
+            rule.step(model, {"forget": x, "retain": y}, optimizer, float("inf"))
+        self.assertEqual(seen, [name])
+        torch.testing.assert_close(p.grad, expected)
+        self.assertEqual(rule.last_anchor, 0.)
+
     def test_empty_basis_trains_exactly_as_npo_rt(self):
         """With the basis never refreshed after the first step (where the anchor is zero), every step is
         NPO-RT's: same forwards, random draws, gradients (up to summation order) and AdamW."""
-        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+        with tempfile.TemporaryDirectory() as a:
             npo_rt, _, _ = run(Path(a), "npo_rt", 4)
-            gu, _, rule = run(Path(b), "npo_rt_gu", 4, {"gu_refresh_every": 10 ** 6, "gu_forget_weight": 1.})
-        self.assertEqual(sum(map(len, rule.basis.values())), 0)
-        moved = 0
-        for (n, p), q in zip(npo_rt.named_parameters(), gu.parameters()):
-            torch.testing.assert_close(p, q, rtol=0, atol=2e-6, msg=n)
-            moved += not torch.equal(p, Fake().state_dict()[n]) if p.requires_grad else 0
-        self.assertGreater(moved, 0)
+        for recovery in ("anchor", "separate"):
+            with self.subTest(recovery=recovery), tempfile.TemporaryDirectory() as b:
+                gu, _, rule = run(Path(b), "npo_rt_gu", 4, {"gu_refresh_every": 10 ** 6, "gu_forget_weight": 1.,
+                                                            "gu_recovery": recovery})
+                self.assertEqual(sum(map(len, rule.basis.values())), 0)
+                moved = 0
+                for (n, p), q in zip(npo_rt.named_parameters(), gu.parameters()):
+                    torch.testing.assert_close(p, q, rtol=0, atol=2e-6, msg=n)
+                    moved += not torch.equal(p, Fake().state_dict()[n]) if p.requires_grad else 0
+                self.assertGreater(moved, 0)
 
     def test_projection_changes_the_projected_tensors_only_through_the_basis(self):
         with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:

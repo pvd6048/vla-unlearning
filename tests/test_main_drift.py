@@ -26,7 +26,9 @@ torch.manual_seed(0)
 RUN = "goal_s0"
 T0, C, F, ORACLE = "LA/LB/LC", "LA/LB/LC/LD/LE", "LA/LB/LC/UB-purge/LD/LE", "LA/LC"
 SSD, SALUN = "LA/LB/LC/UB-ssd", "LA/LB/LC/UB-salun"
-assert (md.THETA0, md.C, md.F, md.ORACLE) == (T0, C, F, ORACLE) and md.unlearned(md.main_run.METHODS) == ["ssd", "salun"]
+assert (md.THETA0, md.C, md.F, md.ORACLE) == (T0, C, F, ORACLE)
+assert md.unlearned(md.main_run.METHODS) == [m for m in md.main_run.METHODS if m != "purge"]
+md.main_run.METHODS = ["purge", "ssd", "salun"]  # the fixtures below are of these two methods (and purge)
 assert md.unlearned(["purge", "ga", "vlaforget"]) == ["ga", "vlaforget"]
 assert {n: (x, y) for n, x, y in md.wanted()} == {
     "tauB": ("LA", "LA/LB"), "tauD": (T0, "LA/LB/LC/LD"), "F_B": (C, F), "O:theta0": (ORACLE, T0),
@@ -85,6 +87,10 @@ for path in w:
     p.parent.mkdir(parents=True, exist_ok=True)
     torch.save(feats, p)
 
+# The drift script reads the run's methods from its plan: the fixture run's plan holds the three above.
+from vlu.worker import plan_path, write_plan  # noqa: E402
+plan_path(RUN).parent.mkdir(parents=True, exist_ok=True)
+write_plan(RUN, [{"kind": "train", "node": f"{T0}/UB-{m}", "save_at": []} for m in md.main_run.METHODS])
 env = {**os.environ, "PYTHONPATH": str(ROOT)}
 result = subprocess.run([sys.executable, str(ROOT / "scripts" / "main_drift.py"), "--run", RUN], env=env, text=True, capture_output=True)
 assert result.returncode == cd.LEFT_OUT, result.stdout + result.stderr  # a drift is left out: reported as such

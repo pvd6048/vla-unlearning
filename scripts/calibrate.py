@@ -44,6 +44,22 @@ from vlu.nodes import Node, check_op, run_seed  # noqa: E402
 from vlu.worker import item_key, load_plan, plan_path, someone_working, write_plan  # noqa: E402
 
 # Each variant is <method>[@<recipe overrides>] (vlu/nodes.py). Grids around each paper's default.
+# Round 4 (28 Nov results of round 3; LA, LA/LB and every round-3 variant are kept, 14 new variants):
+# - Set from round 3 (vlu/config.py): NPO-RT 1e-5 (A 1.00, B 0.00, B's probe loss at the oracle's), SalUn 3e-5
+#   (confirmed), SSD as in round 2. NPO and VLA-Forget had no setting that kept A and forgot B; their round-3
+#   variants stay listed for the report, nothing new.
+# - GU on NPO-RT: the released recovery ("anchor") fed back on GR00T (vlu/gu_npo_rt.py: anchor 0.002 -> 0.35,
+#   gradient norm 63 -> 1460; A 0.12-0.60 where NPO-RT kept 1.00). Round 4: gu_recovery=separate (Algorithm 1
+#   with one retain loss) at NPO-RT's working rates 3e-6 and 1e-5, gamma 1 (matched to npo_rt) and 1.5.
+# - Sharp MinMax: all six round-3 variants ran away to NaN (unbounded FM ascent, no clipping); at 2e-2 with the
+#   smallest split A held (probe 0.011) while B rose to 0.30 by step 350, then diverged; the largest split hurt A
+#   before B. Round 4: the smallest split with clipping (sharp_clip), at 5e-3, 1e-2, 2e-2. The six failed
+#   variants are no longer planned (run_local.sh retries failed items; they would diverge again); their logs stay.
+# - Task arithmetic forgot nothing: its edit (norm 0.2-1.7) is ~1% of tauB (131). Round 4: the largest fit
+#   (3e-6, edit 1.7) at scales 5, 20, 50 (edits ~9-85, NPO-RT's working edits were 6-7).
+# - RMU forgot partly with A intact (5e-5: B 0.68-0.72). Its target (steering 20) was ~50x smaller than the
+#   action tokens' hidden norm (~760 at block 0, ~1200 at block 7): it shrank activations rather than redirecting
+#   them. Round 4 at block 7: steering 300, 1000, 3000 (ratio ~0.25-2.5) at 1e-4, and 1000 at 5e-5.
 # Round 3 (on the guide's machine, reusing LA and LA/LB and retraining every variant with the cost meter; or on
 # the cluster from scratch), from rounds 1-2 on the guide's machine (METHODS.md, CALIBRATION.md):
 # - GA and GradDiff are dropped: no rate both forgot B and kept A (GA: 1e-7 forgot nothing, 3e-7 lost A;
@@ -99,11 +115,17 @@ VARIANTS = [
     *[f"vlaforget@vlaforget.lr={lr}" for lr in ("1e-5", "2e-5", "5e-5")],  # 5e-5: the paper's lower value
     *[f"npo_rt_gu@unlearn_lr={lr}+gu_forget_weight=1.5" for lr in ("1e-6", "3e-6", "1e-5", "3e-5")],
     *[f"npo_rt_gu@unlearn_lr={lr}+gu_forget_weight=1" for lr in ("3e-6", "1e-5")],  # projection-only controls
-    *[f"sharp_minmax@unlearn_lr={lr}+sharp_optimizer=sgd+sharp_weight_decay=0+sharp_select={select}"
-      for select in ("smallest", "largest") for lr in ("2e-2", "1e-1", "5e-1")],
     *[f"task_arithmetic@unlearn_lr={lr}" for lr in ("3e-7", "1e-6", "3e-6")],
     "task_arithmetic@unlearn_lr=1e-6+task_arithmetic_scale=2",
     *[f"rmu@unlearn_lr={lr}+rmu_layer={layer}" for layer in (0, 7) for lr in ("1e-5", "5e-5")],
+    # Round 4
+    *[f"npo_rt_gu@unlearn_lr={lr}+gu_forget_weight={gamma}+gu_recovery=separate"
+      for gamma in ("1", "1.5") for lr in ("3e-6", "1e-5")],
+    *[f"sharp_minmax@unlearn_lr={lr}+sharp_optimizer=sgd+sharp_weight_decay=0+sharp_select=smallest+sharp_clip=1"
+      for lr in ("5e-3", "1e-2", "2e-2")],
+    *[f"task_arithmetic@unlearn_lr=3e-6+task_arithmetic_scale={scale}" for scale in ("5", "20", "50")],
+    *[f"rmu@unlearn_lr=1e-4+rmu_layer=7+rmu_steering={steering}" for steering in ("300", "1000", "3000")],
+    "rmu@unlearn_lr=5e-5+rmu_layer=7+rmu_steering=1000",
 ]
 
 

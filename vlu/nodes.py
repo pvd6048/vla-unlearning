@@ -279,6 +279,8 @@ def check_op(node: Node, recipe: Recipe = RECIPE) -> None:
             value = getattr(effective, key)
             if value is None or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{node}: {key} must be finite and positive")
+        if effective.gu_recovery not in ("separate", "anchor"):
+            raise ValueError(f"{node}: gu_recovery must be 'separate' or 'anchor', got {effective.gu_recovery!r}")
     if op.method in ("task_arithmetic", "rmu"):
         effective = recipe_for(op, recipe)
         keys = ("task_arithmetic_scale",) if op.method == "task_arithmetic" else ("rmu_alpha", "rmu_steering")
@@ -326,13 +328,13 @@ _KEYS_USED = {
     "gu": _UNLEARN_KEYS + ("gu_rank",),
     "sharp_minmax": ("unlearn_steps", "unlearn_lr", "batch_size", "sharp_select", "sharp_forget_fraction",
                      "sharp_alpha", "sharp_rho", "sharp_strength", "sharp_adaptive", "sharp_optimizer",
-                     "sharp_momentum", "sharp_weight_decay"),
+                     "sharp_momentum", "sharp_weight_decay", "sharp_clip"),
     "task_arithmetic": _UNLEARN_KEYS + ("task_arithmetic_scale",),
     "rmu": _UNLEARN_KEYS + ("rmu_layer", "rmu_alpha", "rmu_steering"),
     "npo": _UNLEARN_KEYS + ("npo_beta",),
     "npo_rt": _UNLEARN_KEYS + ("npo_beta",),
     "npo_rt_gu": _UNLEARN_KEYS + ("npo_beta", "gu_basis_k", "gu_last_blocks", "gu_refresh_every", "gu_cap",
-                                "gu_forget_weight", "gu_retain_weight"),
+                                "gu_forget_weight", "gu_retain_weight", "gu_recovery"),
     "ssd": ("batch_size", "importance_batches", "ssd_alpha", "ssd_lambda", "ssd_reference", "ssd_adaptive"),
     "salun": _UNLEARN_KEYS + ("salun_keep", "importance_batches"),
     "vlaforget": ("unlearn_steps", "batch_size") + tuple(f"vlaforget.{f.name}" for f in fields(VLAForgetConfig)),
@@ -345,11 +347,16 @@ def _flat(recipe: dict) -> dict:
             **{f"vlaforget.{k}": v for k, v in recipe.get("vlaforget", {}).items()}}
 
 
+# Recipe fields added after nodes were trained, with the value the code before them effectively used: an op.json
+# without the field ran that value (not a change).
+_FIELD_ADDED = {"gu_recovery": "anchor", "sharp_clip": False}
+
+
 def recipe_changes(node: Node, recipe: Recipe) -> dict[str, tuple]:
     """{field: (value recorded in the node's op.json, value the current code would use)} for the
     fields its op depends on, if the node was trained with other values, e.g. because a default
-    changed since. A field missing from op.json (added later) counts as changed. Empty for a node
-    without op.json or with an unknown method."""
+    changed since. A field missing from op.json (added later) counts as changed, unless _FIELD_ADDED
+    gives the value the older code used. Empty for a node without op.json or with an unknown method."""
     path = node.dir / "op.json"
     if node.is_base or not path.exists():
         return {}
@@ -358,4 +365,5 @@ def recipe_changes(node: Node, recipe: Recipe) -> dict[str, tuple]:
     if recorded is None or not keys:
         return {}
     recorded, current = _flat(recorded), _flat(json.loads(json.dumps(asdict(recipe_for(node.last_op, recipe)))))
-    return {k: (recorded.get(k, "<not recorded>"), current[k]) for k in keys if recorded.get(k, "<not recorded>") != current[k]}
+    recorded = {k: recorded.get(k, _FIELD_ADDED.get(k, "<not recorded>")) for k in keys}
+    return {k: (recorded[k], current[k]) for k in keys if recorded[k] != current[k]}

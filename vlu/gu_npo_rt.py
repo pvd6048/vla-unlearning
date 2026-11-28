@@ -26,9 +26,17 @@ src/trainer/unlearn/geometric.py, RetainNullProjector and GeometricUnlearn.optim
   x (sqrt(v) + 1e-8), weighted by gamma and alpha, and added. Then clipping and AdamW.
 
 Choices where the sources differ, or where GR00T needs one:
-- Algorithm 1 and the released trainer use g_r = grad(anchor) and recover g_f as
-  (g_tot - alpha g_r) / gamma. We preserve this literally, including the retain-FM contribution in g_f.
-  The anchor gradient is evaluated every step; only basis growth is intermittent.
+- The gradient recovery (gu_recovery). Algorithm 1 recovers g_f = (g_tot - alpha g_r) / gamma, which is the
+  forget loss's gradient when g_r is the gradient of the retain loss inside g_tot. The released trainer puts
+  the retain NLL in g_tot but takes g_r from the KL anchor, so its "g_f" also holds alpha / gamma x
+  (grad retain loss - grad anchor) ("anchor", that literal version: the anchor gradient every step).
+  On GR00T that leftover -grad(anchor) pushes the retain velocities away from theta0 outside the 8-direction
+  basis, which grows the anchor and its gradient: calibration round 3 (28 Nov) measured the anchor rising
+  from 0.002 to 0.35 and the gradient norm from 63 to 1460 at 3e-6, with A's success rate 0.12-0.28
+  where NPO-RT kept 1.00 (gamma 1 and 1.5 alike). "separate" (calibration round 4) keeps Algorithm 1's
+  equations with one retain loss: g_f is the forget loss's own gradient and g_r the retain FM loss's
+  (the retain term in the total), from the two backward passes NPO-RT's forwards allow; the anchor's
+  gradient only builds the basis, on refresh steps.
 - The authors fall back to an EMA of squared gradients before the optimizer has a second moment; that is
   only the first step here, where the anchor's gradient is zero and the basis empty, so there is nothing
   to whiten: the first step is NPO-RT's.
@@ -68,9 +76,11 @@ class GuNpoRt:
     disable_weight_decay = False  # NPO-RT's AdamW, decay included
 
     def __init__(self, beta: float, names: list[str], k: int, refresh_every: int, cap: float,
-                 gamma: float = 1.5, alpha: float = 1.0):
+                 gamma: float = 1.5, alpha: float = 1.0, recovery: str = "anchor"):
+        if recovery not in ("separate", "anchor"):
+            raise ValueError("gu_recovery must be 'separate' or 'anchor'")
         self.beta, self.names, self.k, self.refresh_every, self.cap = beta, list(names), k, refresh_every, cap
-        self.gamma, self.alpha = gamma, alpha
+        self.gamma, self.alpha, self.recovery = gamma, alpha, recovery
         self.basis = {n: [] for n in self.names}
         self.calls = 0
         self.last_anchor = 0.0
@@ -185,42 +195,58 @@ class GuNpoRt:
                    "npo_weight": (2 * torch.sigmoid(self.beta * log_ratio.detach())).mean().item()}
         del out, ref_out, log_ratio
         (self.gamma * npo).backward()
-        # The anchor is part of every GU update; only basis refresh is intermittent.
+        separate = self.recovery == "separate"
+        forget_grads = {}
+        if separate:  # the forget loss's own gradient of the projected tensors, kept apart
+            for name in self.names:
+                g = named[name].grad
+                forget_grads[name] = None if g is None else g / self.gamma
+                named[name].grad = None
         refresh = self.calls % self.refresh_every == 0
         self.calls += 1
-        self._capture = True
+        need_anchor = refresh or not separate  # "anchor" recovery uses its gradient every step
+        self._capture = need_anchor
         try:
             out_r, reference = self._paired(model, batch["retain"])
-            mine = self._taps.pop("mine")
-            reference()
-            theirs = self._taps.pop("ref")
+            if need_anchor:
+                mine = self._taps.pop("mine")
+                reference()
+                theirs = self._taps.pop("ref")
         finally:
             self._capture = False
             self._taps.clear()
         retain_loss = out_r["loss"]
         check_finite({"loss": retain_loss}, "retain loss")
-        anchor = velocity_kl(out_r, {"velocity": mine}, {"velocity": theirs})
-        del mine, theirs
-        check_finite({"anchor": anchor}, "GU retain anchor")
-        grads = torch.autograd.grad(anchor, [named[n] for n in self.names], retain_graph=True, allow_unused=True)
-        if refresh:
-            self._grow_basis(named, grads)
-        self.last_anchor = anchor.item()
-        del anchor
+        anchor_grads = [None] * len(self.names)
+        if need_anchor:
+            anchor = velocity_kl(out_r, {"velocity": mine}, {"velocity": theirs})
+            del mine, theirs
+            check_finite({"anchor": anchor}, "GU retain anchor")
+            anchor_grads = torch.autograd.grad(anchor, [named[n] for n in self.names], retain_graph=True,
+                                               allow_unused=True)
+            if refresh:
+                self._grow_basis(named, anchor_grads)
+            self.last_anchor = anchor.item()
+            del anchor
         metrics["retain_fm"] = retain_loss.item()
         del out_r
         (self.alpha * retain_loss).backward()
-        for name, g_r in zip(self.names, grads):
+        for name, g_anchor in zip(self.names, anchor_grads):
             p = named[name]
-            # Algorithm 1: recover from the joint gradient, not a separately computed forget loss.
-            total = p.grad
-            if total is None and g_r is None:
+            if separate:  # p.grad holds alpha x the retain FM loss's gradient alone
+                g_f, g_r = forget_grads.pop(name), None if p.grad is None else p.grad / self.alpha
+            else:  # the released trainer: recover from the joint gradient with the anchor's gradient
+                total, g_r = p.grad, g_anchor
+                if total is None:
+                    g_f = None
+                elif g_r is None:
+                    g_f = total / self.gamma
+                else:
+                    g_f = (total - self.alpha * g_r) / self.gamma
+            if g_f is None and g_r is None:
                 continue
-            g_f = None
-            if total is not None:
-                g_f = (total - self.alpha * g_r) / self.gamma if g_r is not None else total / self.gamma
             p.grad = self._project(name, p, g_f, g_r)
-        del grads
+        del anchor_grads
         grad_norm = torch.nn.utils.clip_grad_norm_(params, max_grad_norm, error_if_nonfinite=True).item()
         optimizer.step()
         metrics.update(anchor=self.last_anchor, basis_size=sum(map(len, self.basis.values())) / len(self.basis),
@@ -228,15 +254,15 @@ class GuNpoRt:
         return self.gamma * npo.detach() + self.alpha * retain_loss.detach(), metrics
 
     def state_dict(self):
-        return {"kind": "npo_rt_gu", "version": 2, "names": self.names, "basis": self.basis, "calls": self.calls,
+        return {"kind": "npo_rt_gu", "version": 3, "names": self.names, "basis": self.basis, "calls": self.calls,
                 "last_anchor": self.last_anchor,
-                "settings": (self.beta, self.k, self.refresh_every, self.cap, self.gamma, self.alpha)}
+                "settings": (self.beta, self.k, self.refresh_every, self.cap, self.gamma, self.alpha, self.recovery)}
 
     def load_state_dict(self, state):
-        if state.get("version") != 2:
-            raise ValueError("GU checkpoint predates Algorithm 1 gradient recovery; start a fresh operation")
+        if state.get("version") != 3:
+            raise ValueError("GU checkpoint predates the gu_recovery setting; start a fresh operation")
         if state.get("kind") != "npo_rt_gu" or state["names"] != self.names or tuple(state["settings"]) != (
-                self.beta, self.k, self.refresh_every, self.cap, self.gamma, self.alpha):
+                self.beta, self.k, self.refresh_every, self.cap, self.gamma, self.alpha, self.recovery):
             raise ValueError("GU checkpoint has different method settings or projected tensors")
         self.basis, self.calls, self.last_anchor = state["basis"], state["calls"], state["last_anchor"]
 

@@ -74,10 +74,14 @@ class SharpMinMaxUpdate:
     constant_lr = True
 
     def __init__(self, masks, alpha, rho, strength, adaptive=False,
-                 optimizer_name="sgd", momentum=.9, weight_decay=5e-4):
+                 optimizer_name="sgd", momentum=.9, weight_decay=5e-4, clip=False):
+        """clip: clip each phase's blended gradient at the loop's max_grad_norm (the repo's other methods do;
+        the paper and the released loop do not). Without it, the forget phase's ascent of the unbounded FM
+        loss ran away on GR00T at every SGD rate of calibration round 3."""
         self.masks = masks  # True = forget selection
         self.alpha, self.rho, self.strength, self.adaptive = alpha, rho, strength, adaptive
         self.optimizer_name, self.momentum, self.weight_decay = optimizer_name, momentum, weight_decay
+        self.clip = clip
         self.optimizer = self.forget_optimizer = None
 
     def make_optimizer(self, model, lr):
@@ -142,6 +146,8 @@ class SharpMinMaxUpdate:
             for p, g in zip(named.values(), grads):
                 p.grad = g
             p = g = None  # the loop variables would keep the last gradient alive
+            if self.clip:  # norm (logged) is the norm before clipping, as for the other methods
+                torch.nn.utils.clip_grad_norm_(list(named.values()), max_grad_norm, error_if_nonfinite=True)
             opt.step()
             opt.zero_grad(set_to_none=True)
             # Memory: the retain phase's gradients (one weight copy) must not stay alive through the forget
@@ -169,7 +175,7 @@ class SharpMinMaxUpdate:
 
     def _settings(self):
         return (self.alpha, self.rho, self.strength, self.adaptive,
-                self.optimizer_name, self.momentum, self.weight_decay)
+                self.optimizer_name, self.momentum, self.weight_decay, self.clip)
 
     def state_dict(self):
         return {"kind": "sharp_minmax", "version": 3, "masks": self.masks,

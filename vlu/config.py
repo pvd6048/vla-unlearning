@@ -71,9 +71,11 @@ class Recipe:
     # calibration (CALIBRATION.md): the useful ranges are orders of magnitude apart (round 2: GA lost
     # the retained task at 3e-7, SalUn kept it at 1e-4). A method missing here is not calibrated yet:
     # its ops are refused (vlu.nodes.check_op) unless the op sets its own, e.g. "UB-ga@unlearn_lr=3e-7"
-    # (the calibration's variants). SalUn: round 2, retained A at 1.00 and forgot B (0.00).
+    # (the calibration's variants). SalUn: round 2, retained A at 1.00 and forgot B (0.00); round 3 confirmed it
+    # (A 0.98, B 0.00). NPO-RT: round 3, 1e-5 kept A (1.00), forgot B (0.00) and brought B's probe loss to the
+    # oracle's (2.70 vs 2.60); 3e-6 also forgot B but stopped short of the oracle (2.19); 3e-5 overshot (5.1).
     # (method, lr) pairs, not a dict: the recipe stays immutable and hashable.
-    unlearn_lrs: tuple[tuple[str, float], ...] = (("salun", 3e-5),)
+    unlearn_lrs: tuple[tuple[str, float], ...] = (("salun", 3e-5), ("npo_rt", 1e-5))
     # The learning rate of one op: filled in by vlu.nodes.recipe_for from unlearn_lrs or the op's
     # override. Leave it None here (a value here would apply to every method; tests use that).
     unlearn_lr: float | None = None
@@ -92,6 +94,11 @@ class Recipe:
     gu_cap: float = 0.5
     gu_forget_weight: float = 1.5  # gamma in the authors' GeometricUnlearn.yaml
     gu_retain_weight: float = 1.0  # alpha; set gamma=1 for a matched NPO-RT control
+    # "anchor": the released trainer's recovery with the anchor's gradient (calibration round 3; it diverged on
+    # GR00T, vlu/gu_npo_rt.py). "separate": Algorithm 1 with one retain loss (g_f the forget loss's gradient,
+    # g_r the retain FM loss's; the anchor only builds the basis), calibrated in round 4. The default stays
+    # what round 3 ran until round 4 decides (vlu/nodes.py _FIELD_ADDED: older nodes ran "anchor").
+    gu_recovery: str = "anchor"
     task_arithmetic_scale: float = 1.0  # theta0 - scale * (forget-fitted theta - theta0)
     rmu_layer: int = 0  # train only this DiT block; preserve the baseline checkpoint's full scope
     rmu_alpha: float = 100.0  # retain activation MSE weight; provisional on GR00T
@@ -111,6 +118,10 @@ class Recipe:
     # (lr 0.5) over 1000 steps, swamping the unlearning signal. The repo's AdamW decay (1e-5, decoupled)
     # changes weights by about lr * 1e-5 per step, i.e. nothing; its SGD counterpart is 0.
     sharp_weight_decay: float = 0.0
+    # Clip each phase's gradient at max_grad_norm, as the repo's other methods (the paper does not). Round 3
+    # ran without: the forget phase's ascent of the unbounded FM loss ran away to NaN at every rate (at 2e-2,
+    # smallest split, after A held and B's probe loss rose to 0.30 by step 350). Round 4 tries it on.
+    sharp_clip: bool = False
     sharp_forget_fraction: float = 0.3
     sharp_alpha: float = 0.99
     sharp_rho: float = 0.1

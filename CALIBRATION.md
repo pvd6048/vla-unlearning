@@ -1,6 +1,6 @@
 # Calibration run (on a machine without Slurm)
 
-Thank you for running this. It fine-tunes the GR00T N1.6 robot policy on two LIBERO tasks, tries 37
+Thank you for running this. It fine-tunes the GR00T N1.6 robot policy on two LIBERO tasks, tries 45
 settings of 10 unlearning methods, and evaluates everything in the LIBERO simulator. It also measures what
 each method costs: time, memory, compute and the GPU's energy. The results tell
 us how to set our hyperparameters. You don't need to interpret anything: run it and send back one file.
@@ -13,7 +13,7 @@ us how to set our hyperparameters. You don't need to interpret anything: run it 
   same time. The run checks the free memory at the start, warns about GPUs already in use, and stops
   if no GPU has 44 GB free.
 - NVIDIA driver 570 or newer (CUDA 12.8); 525 or newer usually works too.
-- About 400 GB of free disk (it fills to about 305 GB: 25 GB of software, model and data, 260 GB of
+- About 450 GB of free disk (it fills to about 360 GB: 25 GB of software, model and data, 312 GB of
   trained model weights, 17 GB of drift data; up to 50 GB more for checkpoints while training), 64 GB of
   RAM or more, internet access during setup (about 15 GB is downloaded).
 - `git`, `curl`, `cmake` and a C compiler (`build-essential` on Ubuntu). No root access or Slurm is needed.
@@ -41,38 +41,31 @@ If the disk with space is not where you want the code, you can instead put the l
 `echo 'export VLU_STORE=/big/disk/vla-unlearning' > slurm/env.local.sh` before the setup step. The
 `.tar.gz` is then written to that directory.
 
-## Round 3 (on the machine that ran rounds 1 and 2)
+## Round 4 (on the machine that ran rounds 1 to 3)
 
-This round keeps the training of tasks A and B from before and trains 36 unlearning variants: 24 new ones
-(among them four newly added methods: GU on NPO-RT, Sharp MinMax, task arithmetic and RMU) and 12 trained before (in round 2 or on
-24 November) again, now with the measurement of their time, memory, compute and energy. The 12 earlier
-ones are moved to a separate folder first (`$VLU_RUNS_DIR/_archive/`; nothing is deleted). In the
-`vla-unlearning` folder:
+Thank you for round 3. This round keeps everything trained so far (tasks A and B and all of round 3's
+variants) and trains 14 new unlearning variants of four methods (GU on NPO-RT, Sharp MinMax, task arithmetic,
+RMU). In the `vla-unlearning` folder:
 
 ```bash
-mv calibration_test.tar.gz calibration_test_before_round3.tar.gz   # keep the last file; round 3 writes this name again
+mv calibration_test.tar.gz calibration_test_round3.tar.gz   # keep the last file; round 4 writes this name again
 git pull
-git log -1 --format='%h %ad' --date=short               # must be dated 2026-11-27 or later (see below)
-tmux new -s cal3
-bash scripts/setup_cluster.sh 2>&1 | tee -a setup.log   # adds the energy-measurement package (a few minutes)
-df -h .                                                   # needs about 290 GB free
-bash scripts/run_local.sh                                 # about 13-17 hours
+git log -1 --format='%h %ad' --date=short               # must be dated 2026-11-28 or later (see below)
+tmux new -s cal4
+df -h .                                                   # needs about 150 GB free
+bash scripts/run_local.sh                                 # about 5-8 hours
 ```
 
 - **Is it the new code?** If `git pull` prints an error, or the `git log` line shows an earlier date,
-  please stop and send us `git pull`'s message and the output of `git status`. Once it runs, the self-tests
-  include `tests/test_task_arithmetic_rmu.py`, `tests/check_groot_rmu.py` and `tests/test_cuda_round3.py`, the plan line says
-  `37 unlearning variants` (the 36 above plus "purge", which trains nothing; the run of 24 November said 38,
-  the code of 25 November 17, earlier code of 27 November 27), and it prints
-  `archived (trained before the cost meter; ...)` for 12 variants. If the plan line shows another number,
-  please stop and send us that line.
-- **Not enough disk?** Before `run_local.sh`, this deletes the model weights of the earlier rounds'
-  variants that are no longer used (and of the 12 moved ones), up to about 180 GB; their results stay:
-  `source slurm/env.sh && $MAIN_PY scripts/calibrate.py --prune-weights`
-- **Please keep other programs off the GPUs** during this round: a GPU's energy reading includes
-  everything running on it. (If something else runs there, the report flags that GPU's numbers.)
-- **What to send back:** as before, `calibration_<hostname>.tar.gz` (the same name as round 2's file;
-  this one replaces it).
+  please stop and send us `git pull`'s message and the output of `git status`. Once it runs, the plan line
+  says `45 unlearning variants` (round 3 said 37). If it shows another number, please stop and send us that
+  line. It also lists six round-3 Sharp MinMax items as `no longer planned`: expected (they failed in round 3
+  and are replaced by new settings).
+- **Please keep other programs off the GPUs** during this round. In round 3 another program used 18 GB of GPU
+  0, so only one GPU could train and the run took about twice as long; the energy readings of a shared GPU
+  are also flagged.
+- **What to send back:** as before, `calibration_<hostname>.tar.gz` (this one replaces round 3's file, which
+  the first command above keeps under another name).
 - Everything in "If something goes wrong" below applies.
 
 ## If something goes wrong
@@ -99,7 +92,7 @@ always enough for us to see what happened.
 1. Records the machine (GPUs, driver, library versions) and picks GPU rendering for the simulator if a
    test render works on every GPU, else software rendering.
 2. Runs the code's self-tests (a few minutes). If one fails it stops here and packs the logs.
-3. Trains task A (with checkpoints at 2k, 5k, 10k steps), then task B, then 37 unlearning variants of
+3. Trains task A (with checkpoints at 2k, 5k, 10k steps), then task B, then 45 unlearning variants of
    task B, and evaluates each in the simulator. Each variant's time, memory, compute and GPU energy are
    measured as it runs. One worker runs per GPU. After each training it also
    records how the model's internals respond to a fixed set of test frames (a few minutes per model).

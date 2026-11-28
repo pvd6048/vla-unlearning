@@ -167,10 +167,17 @@ benchmark uses the authors' algorithm instead, on NPO-RT (next section).
 Current equations, pinned sources and a claim/evidence matrix are in
 [PAPER_ALIGNMENT.md](PAPER_ALIGNMENT.md). This supersedes the earlier unit-weight/separate-gradient
 implementation. GU Algorithm 1 and the released trainer recover the forget component as
-`(g_total - alpha*grad(anchor))/gamma`; both projection and sign gating use that anchor gradient.
+`(g_total - alpha*grad(anchor))/gamma`; both projection and sign gating use that anchor gradient
+(`gu_recovery=anchor`, the default, what calibration round 3 ran). On GR00T the retain loss inside g_total
+(FM) is not the anchor, and the leftover `-grad(anchor)` fed back: the anchor rose from 0.002 to 0.35, the
+gradient norm from 63 to 1460, and A's success rate fell to 0.12-0.60 where NPO-RT kept 1.00 (gamma 1 and
+1.5 alike). `gu_recovery=separate` keeps Algorithm 1's equations with one retain loss: g_f is the forget
+loss's own gradient, g_r the retain FM loss's, and the anchor only builds the basis (on refresh steps);
+round 4 calibrates it. With the anchor as the retain loss inside g_total, the authors' rewrite equals it
+(`tests/check_author_kernels.py`).
 Defaults match the author's configuration: gamma=1.5, alpha=1, last three blocks plus output layers,
-rank 8, refresh every two steps, fp16 basis, fp32 arithmetic, cap .5. The anchor gradient is computed
-every step, even between basis refreshes. Only its architecture mapping and velocity proxy are VLA
+rank 8, refresh every two steps, fp16 basis, fp32 arithmetic, cap .5. With `anchor` recovery the anchor
+gradient is computed every step, even between basis refreshes; with `separate` only on refresh steps. Only its architecture mapping and velocity proxy are VLA
 adaptations. The base remains NPO-RT with the common continual protocol and AdamW recipe.
 
 The unchanged author gradient rewrite matches on ten seeded classifier fixtures to 2.38e-7 maximum

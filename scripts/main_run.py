@@ -39,10 +39,10 @@ from vlu.nodes import run_seed  # noqa: E402
 from vlu.worker import load_plan, plan_path, write_plan  # noqa: E402
 
 SEED = 0
-# Calibration round 2 set these (vlu/config.py). npo, npo_rt, npo_rt_gu, sharp_minmax, vlaforget, task_arithmetic
-# and rmu join after round 3 sets their rates (unlearn_lrs, vlaforget.lr; sharp_select, task_arithmetic_scale,
-# rmu_layer too); ga and graddiff are dropped.
-METHODS = ["purge", "ssd", "salun"]
+# Calibration rounds 2-3 set these (vlu/config.py: SSD's alpha and reference, SalUn's and NPO-RT's rates).
+# npo_rt_gu, sharp_minmax, task_arithmetic and rmu join after calibration round 4 sets their settings. npo and
+# vlaforget had no setting that kept A and forgot B in round 3 (scripts/calibrate.py); ga and graddiff are dropped.
+METHODS = ["purge", "ssd", "salun", "npo_rt"]
 CONTROL = ["LA/LB/LC/LD", "LA/LB/LC/LD/LE"]  # PLAN.md section 5.1, branch C (both evaluated, as the tails)
 FISHER = "LA/LB/LC:A,B"  # at theta0 of every U_B: the curvature of B and of a retained task (main_drift.py)
 VIDEOS = 2  # per task per eval, to see how the models fail (PLAN.md section 5.3, question 4)
